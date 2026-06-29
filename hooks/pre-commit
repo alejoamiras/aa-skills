@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Blocks commits containing detectable secrets (gitleaks >= 8.19).
+# Backstopped by gitleaks in CI and GitHub push protection on the remote.
+set -euo pipefail
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks not installed (brew install gitleaks). Bypass with --no-verify at your own risk." >&2
+  exit 1
+fi
+
+if ! gitleaks git --staged --redact --no-banner; then
+  echo "pre-commit: gitleaks flagged a potential secret in staged changes. Commit blocked." >&2
+  exit 1
+fi
