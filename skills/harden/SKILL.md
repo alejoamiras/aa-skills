@@ -319,6 +319,8 @@ Categories to scan (CWE numbers from current Top 25 — 2024/2025 list):
 - Sensitive data exposure (CWE-200), insufficient credential protection (CWE-522)
 - DoS / resource exhaustion: unbounded loops, regex catastrophic backtracking, file-handle exhaustion, memory bombs
 - Trust boundary violations: implicit trust of input that should not be trusted
+- Smart contracts (Solidity / EVM), when in scope: reentrancy (CWE-841), unchecked external-call return values (CWE-252), integer over/underflow, delegatecall / proxy storage-collision & unprotected initializers, tx.origin auth, missing or incorrect access control, signature replay (missing nonce / EIP-712 domain separator), oracle & price manipulation (flash-loan-assisted), front-running / MEV / missing slippage bounds, gas griefing / unbounded-loop DoS, rounding & precision loss in accounting
+- ZK circuits (Aztec.nr / Noir), when in scope: under-constrained circuits (values used but not constrained, missing range/equality assertions) — the dominant ZK bug class; oracle / `unsafe` return values not re-constrained in-circuit; nullifier reuse / missing / predictable nullifiers (double-spend, privacy leak); note-encryption & secret leakage (plaintext logs, weak randomness); missing authwit (authorization-witness) checks; public/private state desync; L1↔L2 message forgery / double-consumption / replay; missing chain-id or version binding; reorg assumptions
 
 NOTES (not findings unless reachable exploit path is concrete):
 - Logging gaps for security-relevant events: noted in cross-cutting observations, not as findings unless a detection-failure scenario is concrete.
