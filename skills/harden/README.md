@@ -72,4 +72,4 @@ The HTML report leads each finding with a three-paragraph plain-language ELI5 (w
 
 ## What it is NOT
 
-Not a diff reviewer (use a code-review tool), not for smart contracts (separate specialized skill), not idempotent (cross-run agreement is signal), and not a substitute for human judgment on Critical findings.
+Not a diff reviewer (use a code-review tool), not idempotent (cross-run agreement is signal), and not a substitute for human judgment on Critical findings. It is domain-agnostic — app, backend, and smart-contract code (Solidity / Noir / Aztec.nr) are all in scope.
