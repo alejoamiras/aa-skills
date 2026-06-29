@@ -9,8 +9,11 @@ The real files live **here**; `~/.claude/skills/<name>` are symlinks. Editing a 
 | Skill | What it does |
 |---|---|
 | [`blueprint`](skills/blueprint/) | Plan-creation protocol with four ceremony tiers (light / mid / deep / mega-deep), dual-model audits, ELI5 HTML deliverables |
-| [`harden`](skills/harden/) | Whole-codebase audit (security / bugs / quality) — map-reduce over parallel Claude + Codex agents, five effort levels || [`codex`](skills/codex/) | Second-opinion consults via the Codex CLI (cross-model review) |
-| [`my-stack`](skills/my-stack/) | Project scaffolding: Bun, Biome, CI/CD conventions, supply-chain hardening || [`wallet-sdk`](skills/wallet-sdk/) | `@aztec/wallet-sdk` integration patterns for dApp frontends + wallet extensions |
+| [`harden`](skills/harden/) | Whole-codebase audit (security / bugs / quality) — map-reduce over parallel Claude + Codex agents, five effort levels |
+| [`codex`](skills/codex/) | Second-opinion consults via the Codex CLI (cross-model review) |
+| [`my-stack`](skills/my-stack/) | Project scaffolding: Bun, Biome, CI/CD conventions, supply-chain hardening |
+| [`run-isolation`](skills/run-isolation/) | Make a repo's local services/tests parallel-safe across many agents — shared `~/.agents` port registry, process-group teardown |
+| [`wallet-sdk`](skills/wallet-sdk/) | `@aztec/wallet-sdk` integration patterns for dApp frontends + wallet extensions |
 
 Each skill directory has a `README.md` explaining the concepts (blueprint and harden include pipeline diagrams) and a `SKILL.md` with the exact protocol the agent follows. The README is the explainer; SKILL.md is the source of truth.
 

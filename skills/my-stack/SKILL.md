@@ -64,9 +64,10 @@ Tooling, conventions, scaffolding, and CI/CD for repositories I own. Use when sc
 ├── docs/
 │   ├── roadmap.md                    # Phases, decisions, backlog
 │   └── ci-pipeline.md                # CI/CD reference
-├── scripts/e2e/                      # When E2E needs external services
-│   ├── agent.sh                      # Per-worktree e2e runner
-│   └── resolve-ports.ts              # Ephemeral port allocator
+├── scripts/run/                      # Run isolation (parallel-safe local services)
+│   ├── registry.ts                   # Shared ~/.agents port registry + allocator
+│   ├── resolve-ports.ts              # Claims ports per service from the registry
+│   └── agent.sh                      # Per-worktree runner
 ├── .github/workflows/
 ├── CLAUDE.md                         # Project instructions
 ├── biome.json
@@ -261,45 +262,101 @@ describe("ProverClient", () => {
 
 Extract shared logic (e.g. `deploySchnorrAccount()`) into in-file helpers. Promote to a shared file only when reused across files.
 
-### 8. Parallel-safe E2E (required when external services are involved)
+### 8. Run isolation (parallel-safe local services & tests)
 
-E2E tests needing external services (Aztec local network, anvil, PXE, playground) MUST run safely in parallel across multiple agents / worktrees. Hardcoded ports collide.
+Any local service an agent starts — anvil, the Aztec sandbox (native as of v5, not a container), PXE, playground, dev servers — MUST run safely when MANY agents share one machine (often separate worktrees). Principle: **isolate by ownership, not technology** — a run owns its ports, process group, and data dir, and tears down exactly what it owns. The `/run-isolation` skill retrofits any repo to this; the canonical implementation is below.
 
-**`scripts/e2e/resolve-ports.ts`** — bind-and-release ephemeral ports:
+Two non-negotiable bans: **no hardcoded ports** on the run path, and **no by-name kills** (`pkill -f anvil`, `killall node`) — those murder other agents' processes and are the real reason a healthy run "looks broken".
+
+**`scripts/run/registry.ts`** — host-level run registry under `~/.agents`: a shared source-of-truth (`ports.md`, consultable by every agent) and a race-free allocator (atomic `mkdir` lock; dead-owner rows self-heal on every read):
 
 ```ts
-import { createServer } from 'node:net';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { mkdirSync, rmdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
-async function pickPort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.unref();
-    srv.on('error', reject);
-    srv.listen(0, () => {
-      const port = (srv.address() as { port: number }).port;
-      srv.close(() => resolve(port));
-    });
-  });
+const DIR = join(homedir(), '.agents');
+const FILE = join(DIR, 'ports.md');           // the shared, human-readable source-of-truth
+const LOCK = join(DIR, 'ports.lock');          // atomic mkdir lock serializes all mutations
+const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+async function withLock<T>(fn: () => T): Promise<T> {
+  mkdirSync(DIR, { recursive: true });
+  for (let i = 0; i < 400; i++) {
+    try { mkdirSync(LOCK); } catch { await new Promise((r) => setTimeout(r, 25)); continue; }
+    try { return fn(); } finally { rmdirSync(LOCK); }
+  }
+  throw new Error('run-registry: lock timeout (stale ~/.agents/ports.lock? remove it)');
 }
 
-const services = ['anvil', 'aztec', 'aztecAdmin', 'aztecP2p', 'playground'] as const;
-const ports = Object.fromEntries(
-  await Promise.all(services.map(async (s) => [s, await pickPort()] as const)),
-);
-mkdirSync('.e2e-state', { recursive: true });
-writeFileSync('.e2e-state/ports.json', JSON.stringify(ports, null, 2));
+type Row = { runId: string; service: string; port: number; pid: number; worktree: string; started: string };
+
+function read(): Row[] {
+  if (!existsSync(FILE)) return [];
+  return readFileSync(FILE, 'utf8').split('\n')
+    .map((l) => l.split('|').map((c) => c.trim()))
+    .filter((c) => c.length >= 8 && /^\d+$/.test(c[3]))      // data rows only (skip header/separator)
+    .map((c) => ({ runId: c[1], service: c[2], port: Number(c[3]), pid: Number(c[4]), worktree: c[5], started: c[6] }));
+}
+
+function write(rows: Row[]): void {
+  const head = '| runId | service | port | pid | worktree | started |\n|---|---|---|---|---|---|\n';
+  writeFileSync(FILE, head + rows.map((r) => `| ${r.runId} | ${r.service} | ${r.port} | ${r.pid} | ${r.worktree} | ${r.started} |`).join('\n') + '\n');
+}
+
+// Reserve a free port for one service and record the owning run. ownerPid MUST be a long-lived
+// process (the agent.sh shell), not this short script — that's what liveness-reaping keys off.
+export const claim = (o: { runId: string; service: string; ownerPid: number; worktree: string; base: number; span: number }) =>
+  withLock(() => {
+    const rows = read().filter((r) => alive(r.pid));        // reap dead owners → ports free up
+    const taken = new Set(rows.map((r) => r.port));
+    let port = o.base;
+    while (taken.has(port)) if (++port >= o.base + o.span) throw new Error('run-registry: no free port in range');
+    rows.push({ runId: o.runId, service: o.service, port, pid: o.ownerPid, worktree: o.worktree, started: new Date().toISOString() });
+    write(rows);
+    return port;
+  });
+
+export const release = (runId: string) =>
+  withLock(() => write(read().filter((r) => r.runId !== runId && alive(r.pid))));
+```
+
+**`scripts/run/resolve-ports.ts`** — claim one port per service from the registry (RUN_ID + OWNER_PID come from `agent.sh`); still writes a run-local `ports.json` for the run's own processes to read:
+
+```ts
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { claim } from './registry';
+
+const RUN_ID = process.env.RUN_ID!;             // stable per worktree (set by agent.sh)
+const OWNER_PID = Number(process.env.OWNER_PID); // the long-lived agent.sh shell ($$)
+const services = ['anvil', 'aztec', 'aztecAdmin', 'aztecP2p', 'playground'];
+
+// Per-worktree base range so independent worktrees barely contend; the registry resolves the rest.
+const seed = Number(BigInt('0x' + Buffer.from(RUN_ID).toString('hex').slice(0, 6)) % 380n);
+const ports: Record<string, number> = {};
+for (let i = 0; i < services.length; i++) {
+  ports[services[i]] = await claim({
+    runId: RUN_ID, service: services[i], ownerPid: OWNER_PID, worktree: process.cwd(),
+    base: 20000 + seed * 100 + i * 20, span: 20,
+  });
+}
+mkdirSync('.run-state', { recursive: true });
+writeFileSync('.run-state/ports.json', JSON.stringify(ports, null, 2));
 console.log(JSON.stringify(ports));
 ```
 
-**`scripts/e2e/agent.sh`** — per-worktree runner:
+**`scripts/run/agent.sh`** — per-worktree runner:
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Allocate ports
-PORTS=$(bun scripts/e2e/resolve-ports.ts)
+# Stable per-worktree run id + the long-lived owner pid (this shell) for the registry
+export RUN_ID="${RUN_ID:-$(printf '%s' "$PWD" | shasum | cut -c1-8)}"
+export OWNER_PID=$$
+
+# Allocate ports from the shared ~/.agents registry
+PORTS=$(bun scripts/run/resolve-ports.ts)
 ANVIL_PORT=$(echo "$PORTS" | jq -r .anvil)
 AZTEC_PORT=$(echo "$PORTS" | jq -r .aztec)
 # ... extract the rest
@@ -322,48 +379,54 @@ ANVIL_PORT="$ANVIL_PORT" AZTEC_PORT="$AZTEC_PORT" \
 
 ```ts
 import { spawn } from 'node:child_process';
-import { writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { release } from '../../scripts/run/registry';
 
-const PORTS = JSON.parse(readFileSync('.e2e-state/ports.json', 'utf-8'));
-const owned: Record<string, number> = {}; // service -> pid
+const PORTS = JSON.parse(readFileSync('.run-state/ports.json', 'utf-8'));
+const RUN_ID = process.env.RUN_ID!;
+const owned: Record<string, number> = {}; // service -> pgid (=== child.pid when detached)
 
 function spawnService(name: string, cmd: string, args: string[]): void {
-  const dataDir = `${tmpdir()}/myproject-${name}-${process.pid}-${Date.now()}`;
+  const dataDir = join(tmpdir(), `myproject-${RUN_ID}-${name}`);   // per-run, isolated
   const child = spawn(cmd, args, {
-    detached: true,
+    detached: true,                                                // new process group: pgid === child.pid
     stdio: 'inherit',
-    env: { ...process.env, DATA_DIR: dataDir },
+    env: { ...process.env, DATA_DIR: dataDir, HOME: dataDir },     // isolate global state (~/.aztec, ~/.foundry)
   });
   owned[name] = child.pid!;
 }
 
+function killGroup(pgid: number): void {
+  try { process.kill(-pgid, 'SIGTERM'); } catch { /* already gone */ }   // negative pid = whole process group
+}
+
 export async function setup(): Promise<void> {
-  // Reap orphans from prior crashed runs
-  if (existsSync('.e2e-state/owned.json')) {
-    const prior = JSON.parse(readFileSync('.e2e-state/owned.json', 'utf-8'));
-    for (const pid of Object.values(prior) as number[]) {
-      try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
-    }
+  if (existsSync('.run-state/owned.json')) {                       // reap only THIS worktree's prior run
+    const prior = JSON.parse(readFileSync('.run-state/owned.json', 'utf-8'));
+    for (const pgid of Object.values(prior) as number[]) killGroup(pgid);
   }
   spawnService('anvil', 'anvil', ['--port', String(PORTS.anvil)]);
-  // ... aztec, playground, etc.
-  writeFileSync('.e2e-state/owned.json', JSON.stringify(owned));
+  // ... aztec sandbox, playground, etc. — each on its PORTS.* port, each detached
+  mkdirSync('.run-state', { recursive: true });
+  writeFileSync('.run-state/owned.json', JSON.stringify(owned));
 }
 
 export async function teardown(): Promise<void> {
-  for (const pid of Object.values(owned)) {
-    try { process.kill(pid, 'SIGTERM'); } catch { /* ignore */ }
-  }
-  rmSync('.e2e-state', { recursive: true, force: true });
+  for (const pgid of Object.values(owned)) killGroup(pgid);        // kill ONLY groups we own — never `pkill -f`
+  await release(RUN_ID);                                           // drop our rows from the ~/.agents registry
+  rmSync('.run-state', { recursive: true, force: true });
 }
 ```
 
 **Required principles (recap):**
-- Ephemeral ports per run (no hardcoded ports)
-- Worktree-local lockfile (`.e2e-state/owned.json`) tracks PIDs for orphan reaping
-- Path-scoped cleanup (`pkill -f "<unique-marker>"`) — never kill by generic process name
-- Isolated data dirs per run
+- **Ports**: claimed from the shared `~/.agents` registry (race-free, cross-agent visible) — never hardcoded.
+- **Ownership**: each service in its own process group; teardown is `kill(-pgid)` for groups you own. `pkill -f "<marker>"` is orphan-recovery fallback ONLY, never normal teardown.
+- **Data dirs**: per-run, with `HOME`/`--datadir` overridden so global state (`~/.aztec`, `~/.foundry`) can't collide.
+- **Containerized deps** (if any — the Aztec sandbox is native as of v5, so it's just a host process): one compose project per run (`docker compose -p $RUN_ID … down -v --remove-orphans`).
+- **Browser E2E**: set COOP/COEP headers and assert `await page.evaluate(() => crossOriginIsolated)` — don't rely on localhost auto-enabling SharedArrayBuffer.
+- A run that can't reach a service is NOT proof it's broken — check whether THIS run owns it (registry + pgid) before restarting anything.
 
 Useful pattern for single-worktree fast iteration: fingerprint the sandbox by its deployed L1 contract addresses and compare against the last known set on startup — a mismatch means the sandbox was restarted and cached state is stale, so the run should reset rather than trust it.
 
@@ -456,7 +519,7 @@ bunx storybook@latest init
     "test": "bun run lint && bun test",
     "test:components": "vitest run",
     "test:e2e": "playwright test",
-    "e2e:agent": "scripts/e2e/agent.sh"
+    "e2e:agent": "scripts/run/agent.sh"
   }
 }
 ```
