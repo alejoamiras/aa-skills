@@ -1,6 +1,6 @@
 ---
 name: harden
-description: Whole-codebase audit skill with three focuses (security / bugs / quality) and five effort levels (low / medium / high / max / ultra). Map-reduce protocol with parallel Claude + Codex agents per cluster, coordinator-of-specialists shape (Cloudflare-style). Produces impact-bucketed reports under `audit/<focus>/<date-run-id>/`. Use when finishing a vibecoded project that needs cleanup passes before shipping, or any time the user wants a whole-codebase scan rather than a diff review. Trigger phrases include "/harden security", "/harden bugs", "/harden quality", "audit this codebase for X", "whole repo review", "bug hunt", "security pass", "maintainability audit", "scan this repo". Auto-fire ONLY on explicit audit verbs (audit / scan / whole repo review / bug hunt / security pass / maintainability audit), NOT on generic "shipping prep" or "implementation help" language. If the user invokes bare `/harden` or "harden this app" without specifying focus, ask which focus they want (security / bugs / quality / all three sequentially) before proceeding. NOT for diff-only review (use /code-review) and NOT for smart contracts (out of scope — Solidity/Noir/Aztec.nr need a smart-contract-specialized audit).
+description: Whole-codebase audit skill with three focuses (security / bugs / quality) and five effort levels (low / medium / high / max / ultra). Map-reduce protocol with parallel Claude + Codex agents per cluster, coordinator-of-specialists shape (Cloudflare-style). Produces impact-bucketed reports under `audit/<focus>/<date-run-id>/`. Use when finishing a vibecoded project that needs cleanup passes before shipping, or any time the user wants a whole-codebase scan rather than a diff review. Trigger phrases include "/harden security", "/harden bugs", "/harden quality", "audit this codebase for X", "whole repo review", "bug hunt", "security pass", "maintainability audit", "scan this repo". Auto-fire ONLY on explicit audit verbs (audit / scan / whole repo review / bug hunt / security pass / maintainability audit), NOT on generic "shipping prep" or "implementation help" language. If the user invokes bare `/harden` or "harden this app" without specifying focus, ask which focus they want (security / bugs / quality / all three sequentially) before proceeding. NOT for diff-only review (use /code-review).
 ---
 
 # Harden
@@ -277,7 +277,7 @@ The HTML companion is a **standalone single-file HTML** (no external CSS, no Jav
 
 ## Per-focus prompts
 
-The prompts below are the EXACT prompts sent to Phase 2 agents and reused for Phase 4 verification. Language-agnostic, web/backend focus (smart contracts are out of scope — they need a smart-contract-specialized audit).
+The prompts below are the EXACT prompts sent to Phase 2 agents and reused for Phase 4 verification. Language- and domain-agnostic: they work on application, backend, and smart-contract code (Solidity / Noir / Aztec.nr) alike.
 
 ### `security` prompt
 
@@ -330,7 +330,6 @@ DO NOT FLAG:
 - Framework-default protections (CSRF tokens, HTTPS-only cookies, secure headers from helmet/Spring Security/etc.) UNLESS you can show a concrete bypass.
 - Issues in test, demo, fixture, or migration code UNLESS that code is production-wired (imported by production paths, exposed via prod build, or shipped with the binary).
 - Generic "consider input validation" notes without a concrete source-to-sink trace.
-- Smart contract vulnerabilities (out of scope — use a smart-contract-specialized audit).
 - Pre-existing issues unrelated to this cluster.
 - Quality or maintainability concerns (use /harden quality).
 ```
@@ -556,7 +555,6 @@ From the multi-agent LLM auditing literature plus codex-flagged failure modes sp
 ## What `/harden` is NOT
 
 - NOT for diff-only review (use `/code-review max --fix`).
-- NOT for smart contracts (out of scope: Solidity/Noir/Aztec.nr need a smart-contract-specialized audit).
 - NOT a substitute for human review on critical findings. Verify before acting on Critical / Blocker.
 - NOT idempotent: rerunning on the same codebase gives slightly different results (different model rollouts, agent contexts). Cross-run agreement is signal.
 - NOT composed with `/blueprint`. The report is the deliverable. The user decides what to fix; `/blueprint` is a separate skill for implementing fixes if the user chooses to.
