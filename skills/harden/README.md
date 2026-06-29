@@ -50,6 +50,8 @@ Effort scales **agent intelligence and depth, never phase composition** — all 
 
 The coordinator deliberately switches family at `max`+: the map phase becomes Claude-heavy there, so a Codex judge at the reduce stage catches what Anthropic-family models share as blind spots.
 
+> **Model availability:** Fable is the intended top-tier model in the table above. While Fable is deactivated, runs substitute **Opus 4.8 (1M context)** everywhere the table says Fable.
+
 ## Severity, per focus
 
 - **security** — cluster agents report impact + exploitability *factors*; the coordinator assigns the CVSS v4.0 band centrally (bands drift when assigned per-agent).

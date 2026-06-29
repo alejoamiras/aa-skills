@@ -18,6 +18,8 @@ Structured plan-creation protocol for non-trivial work. Four tiers scaled to siz
 
 **Default to `mid`** when scope is unclear. BUT: if two or more of the following are HIGH, recommend `deep` regardless of package count — **novelty, blast radius, irreversibility, migration cost, external coupling, security sensitivity**. Single-package can still be `deep` for auth, billing, concurrency, migrations, irreversible state changes. Escalate to `mega-deep` only when the team has no prior experience with the surface area (subagent fan-out is expensive).
 
+**Model note — Fable → Opus fallback.** The "fable" subagent is the top-tier Claude planning/audit leg that runs in parallel with Codex in every tier. Run it on **Fable** when available; **while Fable is deactivated, run it on Opus 4.8 (1M context)** (`Agent` tool: `model: 'opus'`). "fable" names the *role* — the independent top-tier Claude reviewer alongside Codex — not a hard model requirement, so `audit-fable.md` and the "codex + fable" terminology stay as-is regardless of which model fills the role.
+
 ---
 
 ## Phase 0: Clarifying questions (ALL tiers)
@@ -86,7 +88,7 @@ Once the tier is set, proceed to the per-tier protocol below.
 2. Draft `plan.md` (main agent). **Then generate one competing outline as an alternative approach** (main agent, different angle: cheapest-first vs safest-first, monolithic vs split, etc.). This forces actual plan-space search, not just one author + reviews. Both go into the audit.
 3. **Dual audit in parallel**:
    - Codex via `/codex xhigh` with explicit adversarial / security / assumption-attack asks. Codex sees BOTH outlines.
-   - Fable subagent via the `Agent` tool, configured as a top-tier Claude subagent specialized for architectural planning (today: `subagent_type: 'Plan'`, `model: 'fable'`; capability matters more than the literal name). Same asks. Sees both outlines.
+   - Fable subagent via the `Agent` tool, configured as a top-tier Claude subagent specialized for architectural planning (today: `subagent_type: 'Plan'`, `model: 'fable'`, fallback `model: 'opus'` (Opus 4.8 1M) while Fable is unavailable; capability matters more than the literal name). Same asks. Sees both outlines.
 4. Iterate on feedback; produce a **decision ledger**: which outline was chosen, what alternatives were rejected and why, what's still disputed.
 5. **Final fresh-context codex pass**: open a NEW codex session (not a resume). Provide the **consolidated plan, the decision ledger (rejected alternatives + unresolved disagreements)**, and the adversarial + assumption-attack asks. Fresh codex now has the full decision trail and can genuinely re-evaluate, not just review the surface again.
 6. Generate `eli5.html` with DRAFT `/goal` + `/loop` embedded.
@@ -100,7 +102,7 @@ Once the tier is set, proceed to the per-tier protocol below.
 2. **Three independent plans in parallel** (different perspectives, separate context):
    - **Main agent**: drafts against the clarifying answers.
    - **Codex**: invoked via `/codex xhigh` with clarifying answers + task statement + explicit adversarial / security / assumption-attack asks.
-   - **Fable subagent** (top-tier Claude subagent specialized for architectural planning; today via `subagent_type: 'Plan'`, `model: 'fable'`): given clarifying answers + adversarial / security / assumption-attack asks.
+   - **Fable subagent** (top-tier Claude subagent specialized for architectural planning; today via `subagent_type: 'Plan'`, `model: 'fable'`, fallback `model: 'opus'` (Opus 4.8 1M) while Fable is unavailable): given clarifying answers + adversarial / security / assumption-attack asks.
 3. **Consolidate** (by main): take the strongest pieces, verify factual claims against the repo, produce a **decision ledger** documenting which decisions came from which source, which were rejected and why, what's still disputed.
 4. **Contradiction-check** (NEW): send the consolidated plan + the decision ledger back to BOTH codex and the fable subagent for one round of contradiction-checking. They look for: choices that contradict each other across phases, rejected alternatives that should have been kept, disputed items that were silently resolved. This catches main's consolidation blind spots before the gate.
 5. **Double audit** on the contradiction-checked plan:

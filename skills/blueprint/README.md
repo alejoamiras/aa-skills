@@ -38,6 +38,7 @@ Key mechanics, independent of tier:
 - **Assumptions are structured** as *Facts* (verified), *Inferences* (derived, could be wrong), and *Asks* (need the human). The approval gate blocks while Asks are unresolved.
 - **Security & Adversarial Considerations** is a mandatory plan section, fenced off from Assumptions so the two don't blur ("Assumptions is not a generic risk register; Security is not where uncertain facts go").
 - **Cross-model auditing**: a second model family (Codex) reviews the plan. Two agents from the same family agreeing is not a signal; cross-family convergence is.
+- **Model fallback**: the top-tier Claude leg ("fable") runs on Fable when available, else **Opus 4.8 (1M context)**. "fable" is the role name (the independent top-tier reviewer alongside Codex), not a hard model pin.
 - **`eli5.html` is a hard prerequisite** — a standalone plain-language companion you can open in a browser, with "why this tier was chosen" and "approval decision needed" sections. No eli5, no approval ask. At the gate, the agent must print its absolute path + `file://` URL on standalone lines and open it (macOS) — the human never hunts for the plan.
 - **Seeds are drafts until you approve.** After the gate (especially conditional approvals), the `/goal` and `/loop` strings are regenerated against the scope you actually approved, and delivered paste-ready.
 - **Post-implementation**: `/code-review max --fix` runs first and commits separately, so the final Codex audit sees both the net diff and what the review pass changed — provenance preserved.

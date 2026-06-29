@@ -1,6 +1,6 @@
 ---
 name: harden
-description: Whole-codebase audit skill with three focuses (security / bugs / quality) and five effort levels (low / medium / high / max / ultra). Map-reduce protocol with parallel Claude + Codex agents per cluster, coordinator-of-specialists shape (Cloudflare-style). Produces impact-bucketed reports under `audit/<focus>/<date-run-id>/`. Use when finishing a vibecoded project that needs cleanup passes before shipping, or any time the user wants a whole-codebase scan rather than a diff review. Trigger phrases include "/harden security", "/harden bugs", "/harden quality", "audit this codebase for X", "whole repo review", "bug hunt", "security pass", "maintainability audit", "scan this repo". Auto-fire ONLY on explicit audit verbs (audit / scan / whole repo review / bug hunt / security pass / maintainability audit), NOT on generic "shipping prep" or "implementation help" language. If the user invokes bare `/harden` or "harden this app" without specifying focus, ask which focus they want (security / bugs / quality / all three sequentially) before proceeding. NOT for diff-only review (use /code-review) and NOT for smart contracts (use /security-audit, which is Aztec/Solidity/Noir specialized).
+description: Whole-codebase audit skill with three focuses (security / bugs / quality) and five effort levels (low / medium / high / max / ultra). Map-reduce protocol with parallel Claude + Codex agents per cluster, coordinator-of-specialists shape (Cloudflare-style). Produces impact-bucketed reports under `audit/<focus>/<date-run-id>/`. Use when finishing a vibecoded project that needs cleanup passes before shipping, or any time the user wants a whole-codebase scan rather than a diff review. Trigger phrases include "/harden security", "/harden bugs", "/harden quality", "audit this codebase for X", "whole repo review", "bug hunt", "security pass", "maintainability audit", "scan this repo". Auto-fire ONLY on explicit audit verbs (audit / scan / whole repo review / bug hunt / security pass / maintainability audit), NOT on generic "shipping prep" or "implementation help" language. If the user invokes bare `/harden` or "harden this app" without specifying focus, ask which focus they want (security / bugs / quality / all three sequentially) before proceeding. NOT for diff-only review (use /code-review) and NOT for smart contracts (out of scope — Solidity/Noir/Aztec.nr need a smart-contract-specialized audit).
 ---
 
 # Harden
@@ -74,7 +74,7 @@ This prevents one bad map from poisoning all downstream phases on large repos.
 
 Save to `audit/<focus>/<run-id>/raw/repo-map.md` (flat) or `audit/<focus>/<run-id>/raw/repo-map/<package>.md` (hierarchical, per package).
 
-Effort scales which model is used (Haiku at `low`, Sonnet at `medium`+, Fable at `max`+).
+Effort scales which model is used (Haiku at `low`, Sonnet at `medium`+, Fable at `max`+). **While Fable is deactivated, use Opus 4.8 (1M context) in its place** — see the Model note under Effort knob.
 
 ### Phase 2: Map (parallel agents per cluster)
 
@@ -277,7 +277,7 @@ The HTML companion is a **standalone single-file HTML** (no external CSS, no Jav
 
 ## Per-focus prompts
 
-The prompts below are the EXACT prompts sent to Phase 2 agents and reused for Phase 4 verification. Language-agnostic, web/backend focus (smart contracts route to `/security-audit`).
+The prompts below are the EXACT prompts sent to Phase 2 agents and reused for Phase 4 verification. Language-agnostic, web/backend focus (smart contracts are out of scope — they need a smart-contract-specialized audit).
 
 ### `security` prompt
 
@@ -330,7 +330,7 @@ DO NOT FLAG:
 - Framework-default protections (CSRF tokens, HTTPS-only cookies, secure headers from helmet/Spring Security/etc.) UNLESS you can show a concrete bypass.
 - Issues in test, demo, fixture, or migration code UNLESS that code is production-wired (imported by production paths, exposed via prod build, or shipped with the binary).
 - Generic "consider input validation" notes without a concrete source-to-sink trace.
-- Smart contract vulnerabilities (use the security-audit skill).
+- Smart contract vulnerabilities (out of scope — use a smart-contract-specialized audit).
 - Pre-existing issues unrelated to this cluster.
 - Quality or maintainability concerns (use /harden quality).
 ```
@@ -457,6 +457,8 @@ DO NOT FLAG:
 
 The effort knob scales agent intelligence and depth, NOT phase composition. All phases run at every level (Codex is never skipped, even at `low`).
 
+**Model note — Fable → Opus fallback.** This ladder names **Fable** as the top-tier Claude model (Phase 1 map and Phase 2 cluster agents at `max`/`ultra`; the Phase 3 coordinator at `high`). **Fable is currently deactivated — wherever this skill says "Fable", substitute Opus 4.8 (1M context)** (`Agent` tool: `model: 'opus'`) until Fable returns, then prefer Fable again. This swaps only the concrete model; the map-reduce shape, per-cluster agent counts, and the cross-family Codex coordination (footnote ¹) are unchanged. The Codex legs are unaffected.
+
 | Effort | Phase 1 model | Phase 2 agents per cluster | Phase 2.5 cross-rebuttal | Phase 3 coordinator | Phase 4 verifier depth | Wall-clock (rough, 10 clusters) |
 |--------|---------------|----------------------------|--------------------------|---------------------|-------------------------|----------------------------------|
 | `low` | Haiku | 2: Claude Haiku + Codex (minimal effort) | NO | Sonnet | top 3 (severity-bucket prioritized) | ~10-15 min |
@@ -554,7 +556,7 @@ From the multi-agent LLM auditing literature plus codex-flagged failure modes sp
 ## What `/harden` is NOT
 
 - NOT for diff-only review (use `/code-review max --fix`).
-- NOT for smart contracts (use `security-audit` skill: bridges/wallets/Solidity/Noir specialized).
+- NOT for smart contracts (out of scope: Solidity/Noir/Aztec.nr need a smart-contract-specialized audit).
 - NOT a substitute for human review on critical findings. Verify before acting on Critical / Blocker.
 - NOT idempotent: rerunning on the same codebase gives slightly different results (different model rollouts, agent contexts). Cross-run agreement is signal.
 - NOT composed with `/blueprint`. The report is the deliverable. The user decides what to fix; `/blueprint` is a separate skill for implementing fixes if the user chooses to.
