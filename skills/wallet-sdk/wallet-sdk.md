@@ -1301,31 +1301,6 @@ confirmConnection: async () => {
 
 ---
 
-## Migration from Azguard SDK
-
-If you're migrating from `@azguardwallet/client` to `@aztec/wallet-sdk`, see the companion migration guide (`migration-from-azguard.md`) for a detailed side-by-side mapping of every API call.
-
-### Key Conceptual Differences
-
-| Concept | Azguard (`@azguardwallet/client`) | Wallet SDK (`@aztec/wallet-sdk`) |
-|---------|-------------------------------------|----------------------------------|
-| **Detection** | `window.azguard` injection | `window.postMessage` broadcast discovery |
-| **Connection** | `AzguardClient.create()` + `.connect()` | `WalletManager.configure()` + discovery + ECDH + emoji verification |
-| **Security** | ECDH P-521 + AES-GCM (inpage) | ECDH P-256 + AES-GCM (full channel) + emoji MITM verification |
-| **Accounts** | CAIP-10 strings (`aztec:chainId:address`) | `AztecAddress` objects with `Aliased<>` (has `.alias`) |
-| **Permissions** | `connect(metadata, permissions)` | `wallet.requestCapabilities(manifest)` (richer, per-function scope) |
-| **Transactions** | `azguard.execute([{ kind: 'send_transaction', ... }])` | `wallet.sendTx(payload, opts)` or `contract.methods.foo().send()` |
-| **Simulation** | `azguard.execute([{ kind: 'simulate_views', ... }])` | `wallet.simulateUtility(call, opts)` |
-| **Events** | `onConnected`, `onDisconnected`, `onAccountsChanged` | `provider.onDisconnect(callback)` (per-provider) |
-| **Batching** | Array of operations in `execute()` | `wallet.batch([...])` |
-| **Session** | Stored in `localStorage` with scope | Managed by wallet extension |
-| **Wallet interface** | Custom RPC (`execute` with operation objects) | Standard `Wallet` interface from `@aztec/aztec.js` |
-| **Contract calls** | `{ kind: 'call', contract, method, args }` | `contract.methods.functionName(args).send()` |
-| **Auth witnesses** | `{ kind: 'add_private_authwit', content: {...} }` as an action | `wallet.createAuthWit(from, intent)` |
-| **Contract registration** | `{ kind: 'register_contract', chain, address }` as an operation | `wallet.registerContract(instance, artifact)` |
-
----
-
 ## Common Bridge Patterns (L1-L2)
 
 Many Aztec dApps are bridges. Here are the key wallet-sdk patterns for bridge flows, based on production implementations (e.g. Holonym).

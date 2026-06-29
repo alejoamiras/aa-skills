@@ -14,7 +14,7 @@ The real files live **here**; `~/.claude/skills/<name>` are symlinks. Editing a 
 | [`codex`](skills/codex/) | Second-opinion consults via the Codex CLI (cross-model review) |
 | [`my-stack`](skills/my-stack/) | Project scaffolding: Bun, Biome, CI/CD conventions, supply-chain hardening |
 | [`security-audit`](skills/security-audit/) | Security audit for ecosystem projects (bridges, wallets, smart contracts) |
-| [`wallet-sdk`](skills/wallet-sdk/) | `@aztec/wallet-sdk` integration patterns + Azguard migration guide |
+| [`wallet-sdk`](skills/wallet-sdk/) | `@aztec/wallet-sdk` integration patterns for dApp frontends + wallet extensions |
 
 Each skill directory has a `README.md` explaining the concepts (blueprint and harden include pipeline diagrams) and a `SKILL.md` with the exact protocol the agent follows. The README is the explainer; SKILL.md is the source of truth.
 
