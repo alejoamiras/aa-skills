@@ -385,7 +385,30 @@ Required deliverables present:
 file://<absolute path to eli5.html>
 ```
 
-On macOS, also run `open <absolute path to eli5.html>` so the browser pops without hunting. (Absolute paths are fine in CHAT — the no-absolute-paths rule applies to committed files only.)
+Then continue the presentation cascade:
+
+1. **Remote-viewing hook** — if `BLUEPRINT_VIEW_CMD` is set, run `$BLUEPRINT_VIEW_CMD <absolute plan dir>`. On success (exit 0, single-line URL on stdout) print the returned URL + `/eli5.html` on its own standalone line, labeled as the remote-viewing URL. On failure (non-zero exit or empty stdout) print `remote view unavailable (hook failed); using file paths` — never fail silently when the hook is configured.
+2. **macOS** — run `open <absolute path to eli5.html>` so the browser pops without hunting.
+3. **Otherwise** — the printed paths above are the fallback.
+
+(Absolute paths are fine in CHAT — the no-absolute-paths rule applies to committed files only.)
+
+**After the verdict is recorded** (approve / conditional approve / reject alike): if the remote-viewing hook was used, run `$BLUEPRINT_VIEW_CMD --down <absolute plan dir>` and confirm the teardown in chat. Serving exists only inside the approval window. A DOWN failure is non-blocking but must be reported.
+
+### Remote viewing (headless boxes): the `BLUEPRINT_VIEW_CMD` contract
+
+When blueprint runs on a machine with no browser (e.g. a remote dev server), the machine may export `BLUEPRINT_VIEW_CMD` naming a hook that maps a plan directory to a temporary browsable URL. The skill never learns the mechanism — the hook owns it.
+
+```
+$BLUEPRINT_VIEW_CMD <absolute-path-to-plan-dir>          # UP: publish, print URL
+$BLUEPRINT_VIEW_CMD --down <absolute-path-to-plan-dir>   # DOWN: unpublish
+```
+
+- **UP** stdout: exactly one line — the base URL at which the plan dir is browsable. Must start `http://` or `https://`, NO trailing slash. The skill appends `/eli5.html`. Exit 0 = live; non-zero or empty stdout = fall through the cascade with the visible notice. Repeat UP for the same dir returns the same URL (idempotent).
+- **DOWN**: removes whatever UP published for that dir; exit 0 also when nothing was published (idempotent). The skill calls DOWN immediately after the approval verdict.
+- The hook owns its security policy (what it serves, to whom).
+
+Reference implementation for Tailscale machines: `examples/blueprint-view-tailscale.sh` (serves ONLY `implementations-plan` trees, tailnet-only, symlink-escape guarded, `--off` backstop). Policy notes for ANY implementation: plan trees must never contain secrets (gitleaks guards commits, not live files), and served HTML shares one browser origin across repos — never place untrusted HTML under `implementations-plan`.
 
 Present everything together. User approves explicitly using one of the three verdict formats.
 
