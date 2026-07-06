@@ -409,7 +409,7 @@ $BLUEPRINT_VIEW_CMD --down <absolute-path-to-plan-dir>   # DOWN: unpublish
 - `BLUEPRINT_VIEW_CMD` is the path to an executable; the skill invokes it directly (quoted) with the plan dir as a single argument — the value is never shell-split.
 - The hook owns its security policy (what it serves, to whom).
 
-Reference implementation for Tailscale machines: `examples/blueprint-view-tailscale.sh` (serves ONLY `implementations-plan` trees, tailnet-only, symlink-escape guarded, `--off` backstop). Policy notes for ANY implementation: plan trees must never contain secrets (gitleaks guards commits, not live files), and served HTML shares one browser origin across repos — never place untrusted HTML under `implementations-plan`.
+Reference implementation for Tailscale machines: `examples/blueprint-view-tailscale.sh` (serves ONLY allowlisted doc trees — default `implementations-plan` + `audit`, the latter for `/harden` reports, override via `BLUEPRINT_VIEW_TREES` — tailnet-only, refuses any symlink, `--off` backstop). This contract section is the single source of truth; other skills (e.g. `/harden`'s report step) reference it rather than redefining it. Policy notes for ANY implementation: served doc trees must never contain secrets (gitleaks guards commits, not live files), and served HTML shares one browser origin across repos — never place untrusted HTML under a served tree.
 
 Present everything together. User approves explicitly using one of the three verdict formats.
 

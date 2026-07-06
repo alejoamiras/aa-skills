@@ -275,6 +275,8 @@ The HTML companion is a **standalone single-file HTML** (no external CSS, no Jav
 
 **Reporting back to the user at end-of-task**: give the absolute path to `report.html` so they can click-to-open from the terminal. The HTML is the primary stakeholder-facing artifact; the markdown is the engineering-facing artifact.
 
+**Remote viewing (headless boxes)**: if `BLUEPRINT_VIEW_CMD` is set, additionally run `$BLUEPRINT_VIEW_CMD <absolute path to audit/<focus>/<run-id>>` and print the returned URL + `/report.html` on its own standalone line — full contract (stdout validation, failure notice, `--down`) is defined once in the blueprint skill's "Remote viewing" section; same rules apply here. **Teardown discipline is stricter than blueprint's**: audit reports are a vulnerability inventory, so serve only while the user is actually reading — run `$BLUEPRINT_VIEW_CMD --down <same dir>` as soon as the user acknowledges the report (their next instruction counts), or at session end, whichever comes first, and confirm the teardown in chat. Note the mount covers the repo's whole `audit/` tree (all runs), mirroring blueprint's whole-tree behavior.
+
 ## Per-focus prompts
 
 The prompts below are the EXACT prompts sent to Phase 2 agents and reused for Phase 4 verification. Language- and domain-agnostic: they work on application, backend, and smart-contract code (Solidity / Noir / Aztec.nr) alike.

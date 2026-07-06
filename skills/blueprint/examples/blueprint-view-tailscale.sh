@@ -9,15 +9,18 @@
 #   blueprint-view --off               backstop: drop ALL mounts on the port (idempotent;
 #                                      refuses extra args so it can't be confused with --down)
 #
-# What it serves: ONLY `implementations-plan` trees under BLUEPRINT_VIEW_ROOT
-# (default ~/Projects), each repo's tree mounted at a URL path mirroring the
-# filesystem, tailnet-only — never `tailscale funnel`. The blueprint skill
-# calls DOWN right after the approval verdict, so serving exists only inside
-# approval windows. Guards (fail closed): refuses paths outside ROOT, paths
-# not inside an implementations-plan tree, non-directories, unscannable trees,
-# and trees containing ANY symlink (plan trees are generated docs — a symlink
-# there is either an accident or an exfiltration attempt; tailscaled serves as
-# root, so symlinks must never reach it).
+# What it serves: ONLY allowlisted documentation trees under
+# BLUEPRINT_VIEW_ROOT (default ~/Projects). Allowlist of tree basenames:
+# BLUEPRINT_VIEW_TREES (default "implementations-plan audit" — blueprint plans
+# and /harden reports). Each repo's tree is mounted at a URL path mirroring
+# the filesystem, tailnet-only — never `tailscale funnel`. Consumers (the
+# blueprint gate, the harden report step) call DOWN right after their
+# presentation window, so serving is always short-lived. Guards (fail
+# closed): refuses paths outside ROOT, paths not inside an allowlisted tree,
+# non-directories, unscannable trees, and trees containing ANY symlink (doc
+# trees are generated content — a symlink there is either an accident or an
+# exfiltration attempt; tailscaled serves as root, so symlinks must never
+# reach it).
 #
 # Caveats: two concurrent gates in the SAME repo share one mount — DOWN for
 # one 404s the other until its gate re-presents (UP is idempotent). Orphaned
@@ -39,6 +42,7 @@ set -euo pipefail
 
 PORT="${BLUEPRINT_VIEW_PORT:-43117}"
 ROOT="${BLUEPRINT_VIEW_ROOT:-$HOME/Projects}"
+read -ra TREES <<<"${BLUEPRINT_VIEW_TREES:-implementations-plan audit}"
 
 err() { echo "blueprint-view: $*" >&2; }
 
@@ -113,13 +117,21 @@ case "${plan_dir}" in
   *) err "refusing: ${plan_dir} is outside ${ROOT}"; exit 1 ;;
 esac
 
-# Nearest `implementations-plan` ancestor (the dir itself counts) becomes the mount.
+in_trees() {
+  local t
+  for t in "${TREES[@]}"; do
+    [ "$1" = "${t}" ] && return 0
+  done
+  return 1
+}
+
+# Nearest allowlisted doc-tree ancestor (the dir itself counts) becomes the mount.
 mount_dir="${plan_dir}"
-while [ "${mount_dir}" != "${ROOT}" ] && [ "$(basename -- "${mount_dir}")" != "implementations-plan" ]; do
+while [ "${mount_dir}" != "${ROOT}" ] && ! in_trees "$(basename -- "${mount_dir}")"; do
   mount_dir="$(dirname -- "${mount_dir}")"
 done
-if [ "$(basename -- "${mount_dir}")" != "implementations-plan" ]; then
-  err "refusing: ${plan_dir} is not inside an implementations-plan tree"
+if ! in_trees "$(basename -- "${mount_dir}")"; then
+  err "refusing: ${plan_dir} is not inside a serveable doc tree (allowed: ${TREES[*]})"
   exit 1
 fi
 
