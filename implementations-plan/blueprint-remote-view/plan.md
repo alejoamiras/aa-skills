@@ -1,6 +1,6 @@
 # blueprint-remote-view
 
-**Status**: APPROVED — conditional approve (Alejo, 2026-07-06): ACL owner-only confirmed · all-plans scope confirmed · operator grant confirmed · CONDITION (folded in): serving is approval-window-only, automatic teardown after the verdict
+**Status**: COMPLETED — accepted by Alejo in the Mac browser via the hook itself, 2026-07-06; conditional approve (Alejo, 2026-07-06): ACL owner-only confirmed · all-plans scope confirmed · operator grant confirmed · CONDITION (folded in): serving is approval-window-only, automatic teardown after the verdict
 **Tier**: `/blueprint light`
 **Baseline**: commit `f6106ea` on `main`
 **Date**: 2026-07-06
