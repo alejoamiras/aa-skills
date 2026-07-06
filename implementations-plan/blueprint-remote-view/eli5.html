@@ -47,8 +47,8 @@
   </div>
   <div class="phase">
     <h3>Phase 3: Plug it in on the server</h3>
-    <p>One-time Tailscale permission (no sudo needed afterwards), a symlink, and an environment variable so Claude Code sessions find the helper.</p>
-    <p class="muted">Proves itself by: sharing manageable without sudo + the variable visible inside a real Claude Code session.</p>
+    <p>A symlink and an environment variable so Claude Code sessions find the helper — plus a truth learned during testing: Tailscale insists on root for serving <em>files</em> (its lighter "operator" permission only covers status and port-forwarding). So the helper uses passwordless sudo, which this server already grants; on any other machine that's a real trust decision the script's header calls out.</p>
+    <p class="muted">Proves itself by: share status readable without sudo + the variable visible inside a real Claude Code session.</p>
   </div>
   <div class="phase">
     <h3>Phase 4: Prove the full life cycle, across repos</h3>

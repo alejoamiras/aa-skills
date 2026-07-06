@@ -385,11 +385,11 @@ Required deliverables present:
 file://<absolute path to eli5.html>
 ```
 
-Then continue the presentation cascade:
+Then run EVERY applicable presentation step — these are additive, not first-match-wins (a macOS box with a hook configured does both 1 and 2):
 
-1. **Remote-viewing hook** — if `BLUEPRINT_VIEW_CMD` is set, run `$BLUEPRINT_VIEW_CMD <absolute plan dir>`. On success (exit 0, single-line URL on stdout) print the returned URL + `/eli5.html` on its own standalone line, labeled as the remote-viewing URL. On failure (non-zero exit or empty stdout) print `remote view unavailable (hook failed); using file paths` — never fail silently when the hook is configured.
+1. **Remote-viewing hook** — if `BLUEPRINT_VIEW_CMD` is set, run `$BLUEPRINT_VIEW_CMD <absolute plan dir>` and VALIDATE its stdout before trusting it: success means exit 0 AND exactly one line AND it matches `^https?://` AND it has no trailing slash. On success print the returned URL + `/eli5.html` on its own standalone line, labeled as the remote-viewing URL. Anything else — non-zero exit, empty/multi-line stdout, non-URL line, trailing slash — is a hook failure: print `remote view unavailable (hook failed); using file paths` — never fail silently when the hook is configured.
 2. **macOS** — run `open <absolute path to eli5.html>` so the browser pops without hunting.
-3. **Otherwise** — the printed paths above are the fallback.
+3. **Neither applied** — the printed paths above are the fallback.
 
 (Absolute paths are fine in CHAT — the no-absolute-paths rule applies to committed files only.)
 

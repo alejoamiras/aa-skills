@@ -6,27 +6,31 @@
 # Contract:
 #   blueprint-view <plan-dir>          UP: publish, print base URL (one line, no trailing slash)
 #   blueprint-view --down <plan-dir>   DOWN: unpublish that plan's tree (idempotent)
-#   blueprint-view --off               backstop: drop ALL mounts on the port
+#   blueprint-view --off               backstop: drop ALL mounts on the port (idempotent;
+#                                      refuses extra args so it can't be confused with --down)
 #
 # What it serves: ONLY `implementations-plan` trees under BLUEPRINT_VIEW_ROOT
 # (default ~/Projects), each repo's tree mounted at a URL path mirroring the
 # filesystem, tailnet-only — never `tailscale funnel`. The blueprint skill
 # calls DOWN right after the approval verdict, so serving exists only inside
-# approval windows. Guards: refuses paths outside ROOT, paths not inside an
-# implementations-plan tree, and trees containing symlinks that resolve
-# outside ROOT.
+# approval windows. Guards (fail closed): refuses paths outside ROOT, paths
+# not inside an implementations-plan tree, non-directories, unscannable trees,
+# and trees containing ANY symlink (plan trees are generated docs — a symlink
+# there is either an accident or an exfiltration attempt; tailscaled serves as
+# root, so symlinks must never reach it).
 #
-# Caveat: two concurrent gates in the SAME repo share one mount — DOWN for
-# one 404s the other until its gate re-presents (the hook re-mounts, UP is
-# idempotent). Orphaned mounts (session died mid-gate): `blueprint-view --off`
-# or inspect with `tailscale serve status`.
+# Caveats: two concurrent gates in the SAME repo share one mount — DOWN for
+# one 404s the other until its gate re-presents (UP is idempotent). Orphaned
+# mounts (session died mid-gate): inspect `tailscale serve status`, then
+# `blueprint-view --off` — note it drops every mount on the port, including
+# other agents' live gates.
 #
-# Dependencies: tailscale, jq, coreutils — and, for serve MUTATIONS (up/down/off),
-# root or PASSWORDLESS sudo: tailscale requires root to serve filesystem paths
-# (operator alone is NOT enough — learned empirically, see the plan's lessons).
-# This script uses `sudo -n` and fails loudly if sudo would prompt. That is a
-# real trust decision on multi-user machines; fine where the user is already
-# root-equivalent.
+# Dependencies: tailscale, jq, coreutils — and, for serve MUTATIONS
+# (up/down/off), root or PASSWORDLESS sudo: tailscale requires root to serve
+# filesystem paths (operator alone is NOT enough — learned empirically, see
+# the plan's lessons). Uses `sudo -n`; fails loudly if sudo would prompt.
+# That is a real trust decision on multi-user machines; fine where the user
+# is already root-equivalent.
 # One-time machine setup:
 #   sudo tailscale set --operator=$USER    # optional: sudo-free `serve status`
 #   ln -s "$(pwd)/blueprint-view-tailscale.sh" ~/.local/bin/blueprint-view
@@ -47,13 +51,36 @@ ts_mut() {
   fi
 }
 
+# Print the handler mount-points active on OUR port, one per line.
+# Exits non-zero (with the daemon's error on stderr) if state can't be read —
+# callers must treat that as UNKNOWN, never as "absent".
+handlers() {
+  local json
+  if ! json="$(tailscale serve status --json 2>&1)"; then
+    err "cannot query tailscale serve state: ${json}"
+    return 1
+  fi
+  jq -r --arg port ":${PORT}" \
+    '(.Web // {}) | to_entries[] | select(.key | endswith($port)) | .value.Handlers // {} | keys[]' \
+    <<<"${json}"
+}
+
 case "${PORT}" in
   ''|*[!0-9]*) err "BLUEPRINT_VIEW_PORT must be numeric, got '${PORT}'"; exit 1 ;;
 esac
 
 mode=up
 case "${1:-}" in
-  --off)  ts_mut serve --http="${PORT}" off; exit $? ;;
+  --off)
+    if [ $# -ne 1 ]; then
+      err "--off takes no arguments (did you mean --down <plan-dir>?)"
+      exit 1
+    fi
+    existing="$(handlers)" || exit 1
+    [ -n "${existing}" ] || exit 0          # idempotent: nothing to drop
+    ts_mut serve --http="${PORT}" off
+    exit $?
+    ;;
   --down) mode=down; shift ;;
 esac
 
@@ -63,7 +90,15 @@ if [ $# -ne 1 ]; then
 fi
 
 ROOT="$(realpath -- "${ROOT}")" || { err "BLUEPRINT_VIEW_ROOT does not resolve: ${ROOT}"; exit 1; }
-plan_dir="$(realpath -e -- "$1" 2>/dev/null)" || { err "path does not exist: $1"; exit 1; }
+
+if [ "${mode}" = down ]; then
+  # -m: DOWN must work even after the plan dir was deleted (unpublish is
+  # about the mount, not the files).
+  plan_dir="$(realpath -m -- "$1")"
+else
+  plan_dir="$(realpath -e -- "$1" 2>/dev/null)" || { err "path does not exist: $1"; exit 1; }
+  [ -d "${plan_dir}" ] || { err "not a directory: ${plan_dir}"; exit 1; }
+fi
 
 case "${plan_dir}" in
   "${ROOT}"/*) ;;
@@ -80,32 +115,36 @@ if [ "$(basename -- "${mount_dir}")" != "implementations-plan" ]; then
   exit 1
 fi
 
+# tailscale stores path handlers slash-normalized: create with "/<rel>",
+# match and remove with "/<rel>/".
 rel="${mount_dir#"${ROOT}"/}"
+handler="/${rel}/"
 
-# tailscale normalizes path mounts to a trailing slash in `serve status`.
-mounted() { tailscale serve status 2>/dev/null | grep -qF "/${rel}/"; }
+is_mounted() { grep -qxF -- "${handler}" <<<"$1"; }
 
 if [ "${mode}" = down ]; then
-  # Idempotent when the mount is absent; honest when teardown actually fails.
-  mounted || exit 0
-  # NB: mounts are created with "/<rel>" but tailscale stores (and matches on
-  # removal) the trailing-slash form "/<rel>/".
-  ts_mut serve --http="${PORT}" --set-path="/${rel}/" off >/dev/null 2>&1 || true
-  if mounted; then
-    err "teardown failed for /${rel} (needs root or passwordless sudo)"
+  state="$(handlers)" || exit 1             # UNKNOWN state must not fake success
+  is_mounted "${state}" || exit 0           # idempotent: already absent
+  msg="$(ts_mut serve --http="${PORT}" --set-path="${handler}" off 2>&1 >/dev/null)" || true
+  state="$(handlers)" || exit 1
+  if is_mounted "${state}"; then
+    err "teardown failed for ${handler}: ${msg:-no error output}"
     exit 1
   fi
   exit 0
 fi
 
-# Symlink-escape guard: no symlink in the tree may resolve outside ROOT.
-while IFS= read -r -d '' link; do
-  target="$(realpath -- "${link}" 2>/dev/null)" || target=""
-  case "${target}" in
-    "${ROOT}"/*) ;;
-    *) err "refusing: symlink escapes root: ${link} -> ${target:-<broken>}"; exit 1 ;;
-  esac
-done < <(find "${mount_dir}" -type l -print0)
+# Symlink guard (fail closed): plan trees are generated docs — refuse ANY
+# symlink, which also kills multi-hop directory-symlink escapes, and refuse
+# trees we cannot fully scan (tailscaled serves as root and sees more than us).
+if ! links="$(find "${mount_dir}" -type l 2>&1)"; then
+  err "refusing: cannot fully scan ${mount_dir}: ${links}"
+  exit 1
+fi
+if [ -n "${links}" ]; then
+  err "refusing: symlinks are not allowed in a served plan tree: $(head -n1 <<<"${links}")"
+  exit 1
+fi
 
 dns_name="$(tailscale status --json | jq -r '.Self.DNSName // empty')"
 dns_name="${dns_name%.}"
@@ -118,6 +157,10 @@ ts_mut serve --http="${PORT}" --set-path="/${rel}" --bg "${mount_dir}" >/dev/nul
   err "publish failed (path serving needs root or passwordless sudo; operator alone is not enough)"
   exit 1
 }
+state="$(handlers)" || exit 1
+is_mounted "${state}" || { err "publish did not take effect (handler ${handler} missing)"; exit 1; }
 
+# Percent-encode the URL path, keeping the / separators.
 plan_rel="${plan_dir#"${ROOT}"/}"
-echo "http://${dns_name}:${PORT}/${plan_rel}"
+enc_rel="$(printf '%s' "${plan_rel}" | jq -sRr '@uri | gsub("%2F"; "/")')"
+echo "http://${dns_name}:${PORT}/${enc_rel}"
