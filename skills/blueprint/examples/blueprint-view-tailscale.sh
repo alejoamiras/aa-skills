@@ -52,13 +52,16 @@ ts_mut() {
 }
 
 # Print the handler mount-points active on OUR port, one per line.
-# Exits non-zero (with the daemon's error on stderr) if state can't be read —
-# callers must treat that as UNKNOWN, never as "absent".
+# Tries unprivileged first (works with the operator grant), then sudo -n
+# (operator-less machines). Exits non-zero (error on stderr) if neither can
+# read state — callers must treat that as UNKNOWN, never as "absent".
 handlers() {
   local json
-  if ! json="$(tailscale serve status --json 2>&1)"; then
-    err "cannot query tailscale serve state: ${json}"
-    return 1
+  if ! json="$(tailscale serve status --json 2>/dev/null)"; then
+    if ! json="$(sudo -n tailscale serve status --json 2>&1)"; then
+      err "cannot query tailscale serve state: ${json}"
+      return 1
+    fi
   fi
   jq -r --arg port ":${PORT}" \
     '(.Web // {}) | to_entries[] | select(.key | endswith($port)) | .value.Handlers // {} | keys[]' \
@@ -76,10 +79,15 @@ case "${1:-}" in
       err "--off takes no arguments (did you mean --down <plan-dir>?)"
       exit 1
     fi
-    existing="$(handlers)" || exit 1
-    [ -n "${existing}" ] || exit 0          # idempotent: nothing to drop
-    ts_mut serve --http="${PORT}" off
-    exit $?
+    # Teardown is attempt-first: an unreadable status probe must not prevent
+    # the cleanup attempt (lifecycle safety beats early exit).
+    if existing="$(handlers)"; then
+      [ -n "${existing}" ] || exit 0        # confirmed empty: nothing to drop
+    fi
+    msg="$(ts_mut serve --http="${PORT}" off 2>&1 >/dev/null)" || true
+    state="$(handlers)" || { err "--off attempted; cannot confirm final state: ${msg:-no error output}"; exit 1; }
+    [ -z "${state}" ] || { err "--off failed to clear mounts: ${msg:-no error output}"; exit 1; }
+    exit 0
     ;;
   --down) mode=down; shift ;;
 esac
@@ -123,10 +131,14 @@ handler="/${rel}/"
 is_mounted() { grep -qxF -- "${handler}" <<<"$1"; }
 
 if [ "${mode}" = down ]; then
-  state="$(handlers)" || exit 1             # UNKNOWN state must not fake success
-  is_mounted "${state}" || exit 0           # idempotent: already absent
+  # Attempt-first: if state is readable and the mount is confirmed absent,
+  # done; otherwise ALWAYS attempt removal, then verify. An unreadable probe
+  # must never fake success (exit 1) nor prevent the cleanup attempt.
+  if state="$(handlers)"; then
+    is_mounted "${state}" || exit 0         # idempotent: confirmed absent
+  fi
   msg="$(ts_mut serve --http="${PORT}" --set-path="${handler}" off 2>&1 >/dev/null)" || true
-  state="$(handlers)" || exit 1
+  state="$(handlers)" || { err "teardown attempted for ${handler}; cannot confirm final state: ${msg:-no error output}"; exit 1; }
   if is_mounted "${state}"; then
     err "teardown failed for ${handler}: ${msg:-no error output}"
     exit 1

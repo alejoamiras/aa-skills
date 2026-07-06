@@ -38,7 +38,7 @@ Behavior:
 
 - Env-overridable: `BLUEPRINT_VIEW_PORT` (default `43117`, validated numeric), `BLUEPRINT_VIEW_ROOT` (default `$HOME/Projects`).
 - Input canonicalized with `realpath`; **refuses** (exit 1, reason on stderr, empty stdout): paths outside ROOT; paths not inside an `implementations-plan` tree; nonexistent paths.
-- **Symlink-escape guard** (UP only): pre-mount scan of the mount tree for symlinks resolving outside ROOT; refuse if any. Makes tailscale's (unverified) symlink behavior irrelevant. Residual: symlinks added post-mount — bounded by the approval-window lifecycle (mounts are short-lived now) and re-checked on any re-UP.
+- **Symlink refusal** (UP only; strengthened by /code-review from "escaping symlinks" to "ANY symlink"): pre-mount scan refuses trees containing any symlink at all (plan trees are generated docs; a symlink there is an accident or an exfiltration attempt) and refuses trees it cannot fully scan (fail closed — tailscaled serves as root and sees more than the invoking user). Kills in-ROOT-target and multi-hop directory-symlink escapes wholesale. Residual: symlinks added post-mount — bounded by the approval-window lifecycle and re-checked on any re-UP.
 - UP mounts the nearest `implementations-plan` ancestor via `tailscale serve --http=$PORT --set-path=/<root-relative-path> --bg <dir>` — only plan trees are mountable, never repo code / `.env` / `node_modules`. Whole-tree per repo is deliberate (user requirement, confirmed at gate).
 - **DOWN** removes that tree's path mount (`tailscale serve --http=$PORT --set-path=/<root-relative-path>/ off` — note the trailing slash: tailscale stores handlers slash-normalized and matches removal literally); exit 0 when the mount didn't exist, exit 1 with the daemon's real error when the serve state can't be read or the handler survives removal. Known behavior at Alejo's scale: two concurrent gates in the SAME repo share a mount — DOWN for one 404s the other until its gate re-presents (hook re-UPs); documented in the header, accepted.
 - **Maintenance**: `--off` kills ALL mounts on the port (`tailscale serve --http=$PORT off`); `tailscale serve status` inspects. Backstop for anything orphaned (e.g. a session dying mid-gate).
@@ -85,7 +85,7 @@ UP for two repos' plans: `(a)` nulo/nulo-1 `bridge-permit2-recipient-commitment`
 - Layers: e2e over the real tailnet, full UP→verify→DOWN lifecycle.
 - **Final acceptance (human)**: Alejo opens URL (b) in the Mac browser during the mounted window and confirms rendering + relative links.
 
-### Phase 5: Index, lessons, ship
+### Phase 5: Index, lessons, ship ✓
 
 Update `implementations-plan/index.md`; lessons file for any debugging; `/code-review max --fix` on the diff (fixes committed separately); codex post-impl audit (net diff from `f6106ea` + code-review commit summary + adversarial ask); address high/critical; conventional commits; push `main`.
 
@@ -136,7 +136,7 @@ Update `implementations-plan/index.md`; lessons file for any debugging; `/code-r
 
 ## Codex audit
 
-Session `019f3864-63f0-7842-9648-ef4e6d5bdeff` (xhigh, read-only, 2026-07-06). Verdict: **conditional approve**; all conditions folded (rev 2), then the user's approval condition added the DOWN lifecycle (rev 3). Transcript + adopted/rejected table: `audit-codex.md`.
+Session `019f3864-63f0-7842-9648-ef4e6d5bdeff` (xhigh, read-only, 2026-07-06). Round 1 (plan): **conditional approve**; all conditions folded (rev 2), then the user's approval condition added the DOWN lifecycle (rev 3). Round 2 (post-impl, resumed session): **conditional approve** — conditions adopted: teardown made attempt-first (an unreadable status probe no longer prevents the cleanup attempt), `handlers()` gained a `sudo -n` fallback for operator-less machines, and SKILL.md now mandates DOWN after every ATTEMPTED UP (partial-publish safety) + executable-path invocation semantics. Transcripts + adopted/rejected tables: `audit-codex.md`.
 
 ## Approval record
 

@@ -393,7 +393,7 @@ Then run EVERY applicable presentation step — these are additive, not first-ma
 
 (Absolute paths are fine in CHAT — the no-absolute-paths rule applies to committed files only.)
 
-**After the verdict is recorded** (approve / conditional approve / reject alike): if the remote-viewing hook was used, run `$BLUEPRINT_VIEW_CMD --down <absolute plan dir>` and confirm the teardown in chat. Serving exists only inside the approval window. A DOWN failure is non-blocking but must be reported.
+**After the verdict is recorded** (approve / conditional approve / reject alike): if `BLUEPRINT_VIEW_CMD` was invoked for UP at this gate — **even if that UP failed validation or errored, since it may have partially published** — run `$BLUEPRINT_VIEW_CMD --down <absolute plan dir>` and confirm the teardown in chat. Serving exists only inside the approval window. A DOWN failure is non-blocking but must be reported.
 
 ### Remote viewing (headless boxes): the `BLUEPRINT_VIEW_CMD` contract
 
@@ -405,7 +405,8 @@ $BLUEPRINT_VIEW_CMD --down <absolute-path-to-plan-dir>   # DOWN: unpublish
 ```
 
 - **UP** stdout: exactly one line — the base URL at which the plan dir is browsable. Must start `http://` or `https://`, NO trailing slash. The skill appends `/eli5.html`. Exit 0 = live; non-zero or empty stdout = fall through the cascade with the visible notice. Repeat UP for the same dir returns the same URL (idempotent).
-- **DOWN**: removes whatever UP published for that dir; exit 0 also when nothing was published (idempotent). The skill calls DOWN immediately after the approval verdict.
+- **DOWN**: removes whatever UP published for that dir; exit 0 also when nothing was published (idempotent). The skill calls DOWN immediately after the approval verdict — after every ATTEMPTED UP, successful or not.
+- `BLUEPRINT_VIEW_CMD` is the path to an executable; the skill invokes it directly (quoted) with the plan dir as a single argument — the value is never shell-split.
 - The hook owns its security policy (what it serves, to whom).
 
 Reference implementation for Tailscale machines: `examples/blueprint-view-tailscale.sh` (serves ONLY `implementations-plan` trees, tailnet-only, symlink-escape guarded, `--off` backstop). Policy notes for ANY implementation: plan trees must never contain secrets (gitleaks guards commits, not live files), and served HTML shares one browser origin across repos — never place untrusted HTML under `implementations-plan`.

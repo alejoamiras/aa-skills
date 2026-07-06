@@ -92,3 +92,36 @@ conditional approve (with conditions: add symlink/stale-mount/operator/ACL harde
 | Phase 4 exact-count vs accumulate contradiction | Adopted: reworded to present+no-escape assertions |
 | Hook should return eli5 URL directly | REJECTED: base-URL keeps lessons/audits browsable; normalization rules kill the slash-join bug class |
 | Scoped per-mount prune command | REJECTED for now: YAGNI at 2-device scale; --off suffices |
+
+## Round 2 — post-implementation (resumed session, 2026-07-06)
+
+Verdict: conditional approve (conditions: attempt-first teardown independent of the status probe; SKILL.md requires DOWN after every attempted UP)
+
+### Response
+
+conditional approve (with conditions: make teardown attempt independent of the status probe, and make SKILL.md require DOWN after every attempted UP, even failed/invalid UP)
+
+- **Adversarial / security: high**
+  - `--down` and `--off` currently depend on `handlers()` before attempting cleanup. If `tailscale serve status --json` is unreadable but `sudo -n tailscale serve ... off` would work, the script exits before removing anything. That weakens the approval-window guarantee and the `--off` backstop. Fix: for teardown paths, attempt the mutation even when status is unknown, then exit non-zero if confirmation cannot be obtained.
+  - Related: the header says operator is optional and root/passwordless sudo is enough for mutations, but `handlers()` always runs unsudoed `tailscale serve status --json`. On a non-root user with passwordless sudo but no operator grant, UP can publish via sudo and then fail verification, leaving a possible mount that DOWN also cannot remove. Either make operator a hard dependency, or let `handlers()` fall back to `sudo -n tailscale serve status --json`.
+  - SKILL.md says run DOWN “if the remote-viewing hook was used,” which is ambiguous. It must mean “if `BLUEPRINT_VIEW_CMD` was invoked for UP,” not “if UP succeeded and produced a trusted URL.” A hook can partially publish and then fail stdout validation or post-publish verification. The skill should still run `--down` after the verdict.
+
+- **Code-review commit artifact**
+  - The 15-fix commit mostly hardens the design: symlink refusal, stdout validation, URL encoding, arg-strict `--off`, JSON handler matching, and honest teardown checks are good.
+  - The new problem introduced by that commit is the status-probe gate above: “fail closed” became “do not attempt cleanup when status is unreadable.” That is honest, but it is not lifecycle-safe. Cleanup should be best-effort plus honest reporting.
+
+- **Contract coherence**
+  - Script behavior and SKILL.md mostly align: base URL, no trailing slash, `http(s)`, skill appends `/eli5.html`, DOWN is idempotent, failures are visible.
+  - Tighten invocation wording: `BLUEPRINT_VIEW_CMD` should be an executable path/wrapper, invoked quoted with the plan dir as a single argument. Future hook authors should not assume shell parsing or inline args.
+  - Non-blocking doc nit: plan text still says “symlink-escape guard,” while the final script refuses any symlink. That is stricter than documented, not weaker.
+
+Verification I could run: `shellcheck`, `bash -n`, and `git diff --check` all passed. I could not independently query Tailscale status from this sandbox due daemon socket permission, so I relied on your live e2e evidence for the tailnet behavior.
+### Adopted / Rejected
+
+| Finding | Decision |
+|---|---|
+| Teardown gated on status probe (fail-closed became no-attempt) | Adopted: attempt-first, verify after, honest non-zero when unconfirmable |
+| handlers() unsudoed breaks sudo-but-no-operator machines | Adopted: sudo -n fallback in handlers() |
+| 'if the hook was used' ambiguous — DOWN after every ATTEMPTED UP | Adopted in SKILL.md (partial-publish safety) |
+| BLUEPRINT_VIEW_CMD invocation semantics (executable path, single quoted arg) | Adopted in SKILL.md contract |
+| Doc nit: 'symlink-escape guard' understates 'refuses any symlink' | Adopted in plan.md (stricter-than-documented fixed) |
