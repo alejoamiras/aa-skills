@@ -9,7 +9,9 @@ The real files live **here**; `~/.claude/skills/<name>` are symlinks. Editing a 
 | Skill | What it does |
 |---|---|
 | [`blueprint`](skills/blueprint/) | Plan-creation protocol with four ceremony tiers (light / mid / deep / mega-deep), dual-model audits, ELI5 HTML deliverables |
-| [`harden`](skills/harden/) | Whole-codebase audit (security / bugs / quality) — map-reduce over parallel Claude + Codex agents, five effort levels |
+| [`harden`](skills/harden/) | Whole-codebase audit, all three focuses (security / bugs / quality) — map-reduce over parallel Claude + Codex agents, five effort levels |
+| [`harden-bugs`](skills/harden-bugs/) | Correctness-only clone of the harden harness with zero security language, so it runs clean on any model (Fable included) |
+| [`harden-quality`](skills/harden-quality/) | Maintainability-only clone of the harden harness with zero security language, so it runs clean on any model (Fable included) |
 | [`codex`](skills/codex/) | Second-opinion consults via the Codex CLI (cross-model review) |
 | [`my-stack`](skills/my-stack/) | Project scaffolding: Bun, Biome, CI/CD conventions, supply-chain hardening |
 | [`run-isolation`](skills/run-isolation/) | Make a repo's local services/tests parallel-safe across many agents — shared `~/.agents` port registry, process-group teardown |
