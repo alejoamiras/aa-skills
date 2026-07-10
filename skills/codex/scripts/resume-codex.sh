@@ -11,6 +11,9 @@
 #                are supplied, the script verifies they match and refuses to run
 #                if they do not. If codex-dir is omitted, a fresh dir is created.
 #   effort       Optional. Defaults to xhigh.
+#   model        Optional. Defaults to $CODEX_MODEL, else codex's config.toml model.
+#                (Intended default gpt-5.6 — BLOCKED as of 2026-07-07 on ChatGPT-account
+#                auth; see run-codex.sh header.)
 #
 # Output: same structured trailer as run-codex.sh.
 #
@@ -23,6 +26,9 @@ SID="${1-}"
 PROMPT_FILE="${2:?prompt file required}"
 CODEX_DIR="${3:-}"
 EFFORT="${4:-xhigh}"
+MODEL="${5:-${CODEX_MODEL:-}}"
+MODEL_ARGS=()
+[[ -n "$MODEL" ]] && MODEL_ARGS=(-m "$MODEL")
 
 if [[ ! -f "$PROMPT_FILE" ]]; then
   echo "ERROR: prompt file not found: $PROMPT_FILE" >&2
@@ -69,13 +75,14 @@ LOG_FILE="$CODEX_DIR/log.jsonl"
 
 cp "$PROMPT_FILE" "$CODEX_DIR/followup-$N.md"
 
-echo "Resuming codex session $SID (effort=$EFFORT)..." >&2
+echo "Resuming codex session $SID (model=${MODEL:-config default}, effort=$EFFORT)..." >&2
 echo "Output dir: $CODEX_DIR" >&2
 
 set +e
 codex exec resume "$SID" \
   --json \
   --skip-git-repo-check \
+  "${MODEL_ARGS[@]}" \
   -c "model_reasoning_effort=$EFFORT" \
   -o "$RESPONSE_FILE" \
   - < "$PROMPT_FILE" \

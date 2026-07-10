@@ -38,7 +38,7 @@ The scripts do the whole flow in a single shell process — the per-invocation t
    ~/.claude/skills/codex/scripts/run-codex.sh <prompt-file> <cwd> xhigh read-only
    ```
 
-   Arguments are positional: `<prompt-file>` (required), `<cwd>` (defaults to `$PWD`), `<effort>` (defaults to `xhigh`), `<sandbox>` (defaults to `read-only`). Pass `workspace-write` for the sandbox only if the user explicitly wants codex to make changes.
+   Arguments are positional: `<prompt-file>` (required), `<cwd>` (defaults to `$PWD`), `<effort>` (defaults to `xhigh`), `<sandbox>` (defaults to `read-only`), `<model>` (defaults to codex's configured model). Pass `workspace-write` for the sandbox only if the user explicitly wants codex to make changes.
 
 3. Codex calls take several minutes at `xhigh`. Run in the background (`run_in_background: true`) if you have other work; otherwise accept a long foreground wait.
 
@@ -85,7 +85,7 @@ Resume whenever you disagree with codex, need clarification, want to point out a
 
 Always run codex at `xhigh` reasoning effort — that's what the helper scripts default to, and what the third positional argument controls. The whole point of asking codex is to get its strongest critique; lower effort defeats the purpose. The codex banner in `LOG_FILE` will echo `reasoning effort: xhigh` when wired up correctly.
 
-The scripts pass `-c model_reasoning_effort=<effort>` on every call. Don't pass `-m` (model override) unless the user explicitly asks — codex uses the model from `~/.codex/config.toml`.
+The scripts pass `-c model_reasoning_effort=<effort>` on every call; the model follows codex's `~/.codex/config.toml` unless overridden via the scripts' fifth positional argument or `CODEX_MODEL`. **Intended default is `gpt-5.6`, currently BLOCKED (2026-07-07): OpenAI rejects it on ChatGPT-account auth (API-key only) — flip the default in both scripts + this file once that changes.** Only override the model when the user explicitly asks.
 
 ## Writing the prompt
 
@@ -152,4 +152,4 @@ These exist because past sessions invented unsafe workarounds. Don't.
 
 3. **Never invoke `codex exec` directly from the Bash tool.** Use the helper scripts. Direct invocation forces you back into the multi-call mktemp/grep dance that caused the original cross-contamination bug.
 
-4. **Don't pass `-m` (model override) unless the user explicitly asks** — codex uses the model from `~/.codex/config.toml`.
+4. **Don't override the model unless the user explicitly asks** — by default the scripts defer to codex's `~/.codex/config.toml`; a user-requested override goes through the fifth positional argument (or `CODEX_MODEL`), never by editing the scripts ad hoc.

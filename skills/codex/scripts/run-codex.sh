@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Run a fresh codex session and print a structured trailer for the caller.
 #
-# Usage: run-codex.sh <prompt-file> [cwd] [effort] [sandbox]
+# Usage: run-codex.sh <prompt-file> [cwd] [effort] [sandbox] [model]
 #   prompt-file  Required. Path to a file containing the prompt for codex.
 #   cwd          Optional. Defaults to $PWD. Passed to codex via -C.
 #   effort       Optional. Defaults to xhigh. Passed via -c model_reasoning_effort=...
 #   sandbox      Optional. Defaults to read-only. Passed via --sandbox.
+#   model        Optional. Defaults to $CODEX_MODEL, else codex's config.toml model.
+#                (Intended default gpt-5.6 — BLOCKED as of 2026-07-07: rejected on
+#                ChatGPT-account auth, API-key only. Flip the default here + SKILL.md
+#                once OpenAI enables it for ChatGPT accounts.)
 #
 # Output: human-readable progress on stderr, codex log redirected to a file.
 # The last 4 lines of stdout are guaranteed to be:
@@ -24,6 +28,9 @@ PROMPT_FILE="${1:?prompt file required}"
 CWD="${2:-$PWD}"
 EFFORT="${3:-xhigh}"
 SANDBOX="${4:-read-only}"
+MODEL="${5:-${CODEX_MODEL:-}}"
+MODEL_ARGS=()
+[[ -n "$MODEL" ]] && MODEL_ARGS=(-m "$MODEL")
 
 if [[ ! -f "$PROMPT_FILE" ]]; then
   echo "ERROR: prompt file not found: $PROMPT_FILE" >&2
@@ -41,7 +48,7 @@ SESSION_ID_FILE="$CODEX_DIR/session_id"
 
 cp "$PROMPT_FILE" "$CODEX_DIR/prompt.md"
 
-echo "Running codex (effort=$EFFORT, sandbox=$SANDBOX, cwd=$CWD)..." >&2
+echo "Running codex (model=${MODEL:-config default}, effort=$EFFORT, sandbox=$SANDBOX, cwd=$CWD)..." >&2
 echo "Output dir: $CODEX_DIR" >&2
 
 set +e
@@ -49,6 +56,7 @@ codex exec \
   --json \
   --sandbox "$SANDBOX" \
   --skip-git-repo-check \
+  "${MODEL_ARGS[@]}" \
   -c "model_reasoning_effort=$EFFORT" \
   -C "$CWD" \
   -o "$RESPONSE_FILE" \
