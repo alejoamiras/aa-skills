@@ -215,6 +215,8 @@ Design constraints: system font stack, generous whitespace, max-width ~820px; au
 
 **Reporting back at end-of-task**: give the absolute path to `report.md` (and `report.html` if written) so the user can click-to-open from the terminal.
 
+**Remote viewing (headless boxes)**: if `BLUEPRINT_VIEW_CMD` is set, additionally run `$BLUEPRINT_VIEW_CMD <absolute path to audit/quality/<run-id>>` and print the returned URL + `/report.html` (when written; else `/report.md`) on its own standalone line — the full contract (stdout validation, failure notice, `--down`) is defined once in the blueprint skill's "Remote viewing" section; same rules apply here. **Teardown discipline is strict**: serve only while the user is actually reading — run `$BLUEPRINT_VIEW_CMD --down <same dir>` as soon as the user acknowledges the report (their next instruction counts) or at session end, whichever comes first, and confirm the teardown in chat. The mount covers the repo's whole `audit/` tree (all runs).
+
 ## Scan prompt (Phase 2 agents; reused by the Phase 4 verifier)
 
 ```
