@@ -1,6 +1,6 @@
 ---
 name: blueprint
-description: Plan-creation protocol with FOUR tiers (lowest to highest ceremony) — `/blueprint light` (bounded feature, single codex audit) | `/blueprint mid` (contained feature, codex + fable dual audit; DEFAULT if unsure) | `/blueprint deep` (architectural / cross-cutting, three parallel plans main+codex+fable + double audit + contradiction-check) | `/blueprint mega-deep` (novel surface, planning agents spawn research subagents to map modules before drafting, plus split Round 2 audit). Every tier asks clarifying questions, requires a validation gate on every implementation phase (real project commands + pass criteria), and produces an ELI5 HTML deliverable embedding `/goal` + `/loop` seed strings. Trigger phrases: "ultraplan", "ultrathink plan", "deep plan", "give me a plan", "blueprint this", "plan this carefully", "plan properly", "use the plan protocol", "full ceremony". Auto-fire (invoke without being asked) when the work involves cross-package BEHAVIORAL changes, infra / IaC with rollout or privilege impact, schema or protocol changes, UI-flow redesign, external-system integration, auth or permissions changes, billing logic, data migrations or backfills, concurrency or cache invalidation, or public API changes.
+description: Plan-creation protocol with FOUR tiers (lowest to highest ceremony) — `/blueprint light` (bounded feature, single codex audit) | `/blueprint mid` (contained feature, codex + fable dual audit; DEFAULT if unsure) | `/blueprint deep` (architectural / cross-cutting, three parallel plans main+codex+fable + double audit + contradiction-check) | `/blueprint mega-deep` (novel surface, planning agents spawn research subagents to map modules before drafting, plus split Round 2 audit). Every tier asks clarifying questions, homes the session into a task-named git worktree before drafting (workspace homing via EnterWorktree + the ~/.agents/workspaces.md manifest), requires a validation gate on every implementation phase (real project commands + pass criteria), and produces an ELI5 HTML deliverable embedding `/goal` + `/loop` seed strings. Trigger phrases: "ultraplan", "ultrathink plan", "deep plan", "give me a plan", "blueprint this", "plan this carefully", "plan properly", "use the plan protocol", "full ceremony". Auto-fire (invoke without being asked) when the work involves cross-package BEHAVIORAL changes, infra / IaC with rollout or privilege impact, schema or protocol changes, UI-flow redesign, external-system integration, auth or permissions changes, billing logic, data migrations or backfills, concurrency or cache invalidation, or public API changes.
 ---
 
 # Blueprint
@@ -63,7 +63,22 @@ Example outputs:
 
 The recommendation is advisory. The user always has the final call.
 
-Once the tier is set, proceed to the per-tier protocol below.
+Once the tier is set, proceed to workspace homing, then the per-tier protocol below.
+
+---
+
+## Phase 0.75: Workspace homing (ALL tiers)
+
+Blueprint work lives in its own git worktree, named after the plan. Home the session BEFORE writing any artifact (`plan.md`, research files, `eli5.html`) — artifacts written pre-homing land in the root clone's tree, which is exactly the collision worktrees exist to prevent.
+
+1. **Derive the slug** from the task: kebab-case, == the plan name (e.g. `escrow-refund`). Announce it alongside the tier recommendation ("Homing into worktree `escrow-refund`").
+2. **Skip-or-create**:
+   - Already inside a worktree (`git rev-parse --git-dir` ≠ `--git-common-dir`)? Skip creation and ADOPT: derive the slug from the worktree path itself (`.claude/worktrees/<slug>`) and align the plan name to THAT slug — never register a task-derived slug into a worktree named something else. If the path doesn't match the native layout (custom `WorktreeCreate` hook, manual layout), skip manifest registration and just note it.
+   - Not a git repository? Skip homing entirely, say so, and proceed in place.
+   - Otherwise call `EnterWorktree` with `name: <slug>`. This skill instruction is the standing authorization the tool requires. The native default base (`fresh`, from origin's default branch) is correct — plans start from a clean tree; set `worktree.baseRef: "head"` in settings only when the plan must build on unpushed local work.
+3. **Set up + register**: run `bun install` if a `package.json` exists, then `agent-worktree register <slug> --status "phase 0.75: homed, drafting"` (derives path/branch/repo from cwd; plan defaults to `implementations-plan/<slug>`). If `agent-worktree` is not on PATH, note it and continue — homing works without the manifest.
+4. **Status discipline**: keep the manifest's one-line status current at every gate — after approval (`agent-worktree status <slug> "approved: implementing phase 1"`), at each phase-gate pass (`"phase N green: <next>"`), and at wrap-up (`"done: PR #N"`). That line is what `agent-worktree list` shows a human scanning "what was this one doing?" — it is the discovery layer, not decoration.
+5. **Close-out**: after the PR merges (or the plan is abandoned), suggest `agent-worktree done <slug>` (removes worktree + branch + manifest row). Never run it unprompted while the branch is unmerged.
 
 ---
 
@@ -302,7 +317,7 @@ Use relative links (`plan.md`, `./lessons/`), never absolute filesystem paths.
 
 These live IN `eli5.html` as copy-paste code blocks (DRAFT until the approval gate), and also at the bottom of `plan.md` under a "Seeds" section for terminal grep-ability.
 
-**Seeds are finalized AFTER the approval gate.** Approval can change scope — conditions attached, phases dropped, constraints added — and that invalidates pre-approval seeds. The drafts exist so the user can evaluate the plan; the post-approval versions are canonical. After approval, deliver the final seeds in chat as paste-ready blocks and sync `eli5.html` + plan.md to match.
+**Seeds are finalized AFTER the approval gate.** Approval can change scope — conditions attached, phases dropped, constraints added — and that invalidates pre-approval seeds. The drafts exist so the user can evaluate the plan; the post-approval versions are canonical. After approval, deliver the final seeds in chat as paste-ready blocks and sync `eli5.html` + plan.md to match. **The implementation session must run INSIDE the plan's worktree** (this session already is, post-homing; a fresh session gets there via `agent-worktree resume <slug>`) — seeds pasted into a session sitting in the root clone drive work in the wrong tree.
 
 **Within a single Claude Code session, only one is active. Setting one replaces the other. The ELI5 picks ONE as the recommended seed for this plan; the other is shown as a fallback.** `/goal` is the official primitive for "keep working until a condition holds" (per docs: *"To keep the session working turn after turn until a condition is met rather than on an interval, see `/goal`"*) and survives `claude --resume` — prefer it whenever completion is transcript-observable. `/loop` is interval-based; recurring tasks fire until they expire after 7 days. Use `/loop` with a FIXED interval as the fallback when signals aren't transcript-visible or cron-style reliability is wanted. Avoid self-paced (interval-less) loops for plan execution: the model can end them early when it judges work "done enough" — the classic under-drive stall.
 
@@ -345,6 +360,7 @@ Maintain an ASCII to-do list in your responses showing current phase, done / pen
 
 ```
 [✓] 0. Clarifying questions
+[✓] 0.75 Workspace homing (worktree: <slug>)
 [✓] 1. <Tier-specific drafting step>
 [▶] 2. <Tier-specific audit step>
 [ ] 3. <Tier-specific final-pass step>
@@ -432,7 +448,7 @@ Blueprint sits in a specific phase of the development cycle. Other skills cover 
 
 ### Implementation + lesson tracking
 
-Implement per the plan. Log meaningful attempts in `implementations-plan/<plan>/lessons/phase-N.md`.
+Implement per the plan. Log meaningful attempts in `implementations-plan/<plan>/lessons/phase-N.md`. At each phase-gate pass, refresh the workspace manifest: `agent-worktree status <slug> "phase N green: <next>"` (see Phase 0.75 status discipline).
 
 **Failure-retry policy** (explicit, not parenthetical):
 - **Human-driven implementation**: after **3 failures** on the same step, stop and reassess. The human is in the loop and can re-scope quickly.
@@ -489,3 +505,5 @@ implementations-plan/<plan-name>/
 ```
 
 Update `implementations-plan/index.md` with `- [<plan-name>](<plan-name>/plan.md) — <status> — <one-line hook>` when the plan is created and again when it closes.
+
+All of this lands INSIDE the plan's worktree (Phase 0.75) and merges to the canonical clone with the PR. At close-out, suggest `agent-worktree done <plan-name>`.

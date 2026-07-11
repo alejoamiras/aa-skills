@@ -19,6 +19,14 @@ The real files live **here**; `~/.claude/skills/<name>` are symlinks. Editing a 
 
 Each skill directory has a `README.md` explaining the concepts (blueprint and harden include pipeline diagrams) and a `SKILL.md` with the exact protocol the agent follows. The README is the explainer; SKILL.md is the source of truth.
 
+## Helper CLIs
+
+| Tool | What it does |
+|---|---|
+| [`bin/agent-worktree`](bin/agent-worktree) | Task-named git worktrees off one canonical clone + the `~/.agents/workspaces.md` manifest (who is working on what, where). `new` / `list` / `resume` / `status` / `done` / `register`. Blueprint's workspace homing registers through it. |
+
+`install.sh` symlinks `bin/*` into `~/.local/bin`.
+
 ## Install
 
 ```sh

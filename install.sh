@@ -14,7 +14,9 @@ link() {
   local src="$1" dst="$2"
   if [ -L "${dst}" ]; then
     [ "$(readlink "${dst}")" = "${src}" ] && { echo "ok      ${dst}"; return; }
-    rm "${dst}"
+    mkdir -p "${BACKUP_DIR}"
+    mv "${dst}" "${BACKUP_DIR}/"
+    echo "backup  ${dst} (symlink elsewhere) -> ${BACKUP_DIR}/"
   elif [ -e "${dst}" ]; then
     mkdir -p "${BACKUP_DIR}"
     mv "${dst}" "${BACKUP_DIR}/"
@@ -28,6 +30,20 @@ for skill in "${REPO_DIR}"/skills/*/; do
   name="$(basename "${skill%/}")"
   link "${REPO_DIR}/skills/${name}" "${CLAUDE_DIR}/skills/${name}"
 done
+
+# Helper CLIs (bin/*) go on PATH via ~/.local/bin.
+if compgen -G "${REPO_DIR}/bin/*" > /dev/null; then
+  mkdir -p "${HOME}/.local/bin"
+  for tool in "${REPO_DIR}"/bin/*; do
+    [ -f "${tool}" ] || continue
+    chmod +x "${tool}"
+    link "${tool}" "${HOME}/.local/bin/$(basename "${tool}")"
+  done
+  case ":${PATH}:" in
+    *":${HOME}/.local/bin:"*) ;;
+    *) echo "note    ~/.local/bin is not on PATH — add it to your shell profile" ;;
+  esac
+fi
 
 # claude/ is a PRIVATE submodule (owner-only). Skip gracefully when absent.
 if [ -f "${REPO_DIR}/claude/CLAUDE.md" ]; then

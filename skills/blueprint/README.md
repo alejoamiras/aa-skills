@@ -19,7 +19,8 @@ Every tier runs the same rails; tiers differ in how much adversarial pressure th
 ```mermaid
 flowchart TD
     Q["Phase 0 — clarifying questions (every tier, no exceptions)"] --> R["Phase 0.5 — tier recommendation, user can override"]
-    R --> D["Draft plan.md"]
+    R --> W["Phase 0.75 — workspace homing: EnterWorktree(slug) + manifest registration"]
+    W --> D["Draft plan.md"]
     D --> A["Cross-model audits (Codex; + Fable at mid and above)"]
     A --> C["Consolidate + decision ledger"]
     C --> E["eli5.html with DRAFT /goal + /loop seeds"]
@@ -34,6 +35,7 @@ flowchart TD
 Key mechanics, independent of tier:
 
 - **Clarifying questions always come first.** No tier drafts before asking — including a validation-layers question (unit / integration / e2e / live-network e2e) asked *after* inspecting the project's real tooling, so the options offered actually exist.
+- **Workspace homing before any artifact.** Once the tier is set, the session derives its slug and moves into a task-named git worktree (`.claude/worktrees/<slug>`, branch `worktree-<slug>`) via `EnterWorktree`, then registers in `~/.agents/workspaces.md` and keeps a one-line status current at every gate. One canonical clone, many named worktrees — no more `repo-1/-2/-3` clone sprawl; `agent-worktree list` answers "what is each one doing?", `agent-worktree resume <slug>` re-engages it.
 - **Every implementation phase carries a validation gate**: exact commands from the project's own scripts + pass criteria + layers exercised. "Phase green" is defined by the plan, not vibes — which is what lets the agent implement solo: the loop validates against the plan's own gates instead of guessing, and validates in-step (fast layers after each meaningful edit), not just at phase end. The approval gate blocks plans with gateless phases.
 - **Assumptions are structured** as *Facts* (verified), *Inferences* (derived, could be wrong), and *Asks* (need the human). The approval gate blocks while Asks are unresolved.
 - **Security & Adversarial Considerations** is a mandatory plan section, fenced off from Assumptions so the two don't blur ("Assumptions is not a generic risk register; Security is not where uncertain facts go").
