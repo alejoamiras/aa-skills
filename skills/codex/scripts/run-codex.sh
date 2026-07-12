@@ -6,10 +6,10 @@
 #   cwd          Optional. Defaults to $PWD. Passed to codex via -C.
 #   effort       Optional. Defaults to xhigh. Passed via -c model_reasoning_effort=...
 #   sandbox      Optional. Defaults to read-only. Passed via --sandbox.
-#   model        Optional. Defaults to $CODEX_MODEL, else codex's config.toml model.
-#                (Intended default gpt-5.6 — BLOCKED as of 2026-07-07: rejected on
-#                ChatGPT-account auth, API-key only. Flip the default here + SKILL.md
-#                once OpenAI enables it for ChatGPT accounts.)
+#   model        Optional. Defaults to $CODEX_MODEL, else gpt-5.6-sol.
+#                (gpt-5.6-sol became the default 2026-07-11: it works on
+#                ChatGPT-account auth, unlike the earlier-blocked gpt-5.6.
+#                Pass a 5th arg or set $CODEX_MODEL to override per call.)
 #
 # Output: human-readable progress on stderr, codex log redirected to a file.
 # The last 4 lines of stdout are guaranteed to be:
@@ -28,7 +28,7 @@ PROMPT_FILE="${1:?prompt file required}"
 CWD="${2:-$PWD}"
 EFFORT="${3:-xhigh}"
 SANDBOX="${4:-read-only}"
-MODEL="${5:-${CODEX_MODEL:-}}"
+MODEL="${5:-${CODEX_MODEL:-gpt-5.6-sol}}"
 MODEL_ARGS=()
 [[ -n "$MODEL" ]] && MODEL_ARGS=(-m "$MODEL")
 

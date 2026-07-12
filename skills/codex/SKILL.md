@@ -85,7 +85,7 @@ Resume whenever you disagree with codex, need clarification, want to point out a
 
 Always run codex at `xhigh` reasoning effort — that's what the helper scripts default to, and what the third positional argument controls. The whole point of asking codex is to get its strongest critique; lower effort defeats the purpose. The codex banner in `LOG_FILE` will echo `reasoning effort: xhigh` when wired up correctly.
 
-The scripts pass `-c model_reasoning_effort=<effort>` on every call; the model follows codex's `~/.codex/config.toml` unless overridden via the scripts' fifth positional argument or `CODEX_MODEL`. **Intended default is `gpt-5.6`, currently BLOCKED (2026-07-07): OpenAI rejects it on ChatGPT-account auth (API-key only) — flip the default in both scripts + this file once that changes.** Only override the model when the user explicitly asks.
+The scripts pass `-c model_reasoning_effort=<effort>` on every call and default the model to **`gpt-5.6-sol`** (hardcoded in both scripts), overridable per-call via the scripts' fifth positional argument or `CODEX_MODEL`. `gpt-5.6-sol` became the default on 2026-07-11: it runs on ChatGPT-account auth, unlike the earlier `gpt-5.6` which OpenAI restricted to API-key-only. Only override the model when the user explicitly asks.
 
 ## Writing the prompt
 
@@ -152,4 +152,4 @@ These exist because past sessions invented unsafe workarounds. Don't.
 
 3. **Never invoke `codex exec` directly from the Bash tool.** Use the helper scripts. Direct invocation forces you back into the multi-call mktemp/grep dance that caused the original cross-contamination bug.
 
-4. **Don't override the model unless the user explicitly asks** — by default the scripts defer to codex's `~/.codex/config.toml`; a user-requested override goes through the fifth positional argument (or `CODEX_MODEL`), never by editing the scripts ad hoc.
+4. **Don't override the model unless the user explicitly asks** — the scripts default to `gpt-5.6-sol`; a user-requested override goes through the fifth positional argument (or `CODEX_MODEL`), never by editing the scripts ad hoc.

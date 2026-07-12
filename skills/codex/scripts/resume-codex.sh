@@ -11,9 +11,8 @@
 #                are supplied, the script verifies they match and refuses to run
 #                if they do not. If codex-dir is omitted, a fresh dir is created.
 #   effort       Optional. Defaults to xhigh.
-#   model        Optional. Defaults to $CODEX_MODEL, else codex's config.toml model.
-#                (Intended default gpt-5.6 — BLOCKED as of 2026-07-07 on ChatGPT-account
-#                auth; see run-codex.sh header.)
+#   model        Optional. Defaults to $CODEX_MODEL, else gpt-5.6-sol.
+#                (See run-codex.sh header. Pass a 5th arg or $CODEX_MODEL to override.)
 #
 # Output: same structured trailer as run-codex.sh.
 #
@@ -26,7 +25,7 @@ SID="${1-}"
 PROMPT_FILE="${2:?prompt file required}"
 CODEX_DIR="${3:-}"
 EFFORT="${4:-xhigh}"
-MODEL="${5:-${CODEX_MODEL:-}}"
+MODEL="${5:-${CODEX_MODEL:-gpt-5.6-sol}}"
 MODEL_ARGS=()
 [[ -n "$MODEL" ]] && MODEL_ARGS=(-m "$MODEL")
 
