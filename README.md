@@ -36,7 +36,7 @@ cd ~/Projects/aa-skills && ./install.sh
 
 `install.sh` symlinks each `skills/<name>` into `~/.claude/skills/<name>`, backs up anything it replaces to `~/.claude/backups/`, and wires the repo's pre-commit hook. Rerunning is safe.
 
-> **Note:** `claude/` is a **private submodule** (the owner's global `CLAUDE.md`). Cloning it will fail for everyone else — that's expected, and `install.sh` skips it gracefully. Everything under `skills/` works standalone.
+> **Note:** `claude/` is a **private submodule** (the owner's global `CLAUDE.md` + personal `statusline.sh`). Cloning it will fail for everyone else — that's expected, and `install.sh` skips it gracefully. Everything under `skills/` works standalone.
 
 ## Adding a skill
 
