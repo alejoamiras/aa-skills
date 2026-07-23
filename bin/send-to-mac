@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# send-to-mac — push a build (browser-extension dist, etc.) from this box to the
+# Mac over Tailscale, so you skip the smb://→Finder→download dance.
+#
+#   send-to-mac <path> [dest-subdir]
+#
+# Two transports, best-first:
+#   1. rsync over Tailscale SSH  → lands as an UNPACKED folder at ~/Desktop/<name>/
+#      on the Mac (point chrome://extensions "Load unpacked" there ONCE, then just
+#      hit Reload after every push). Requires macOS Remote Login ON + this box's
+#      SSH key in the Mac's authorized_keys.
+#   2. Taildrop (tailscale file cp) → sends a ZIP to the Mac's Taildrop inbox.
+#      Zero setup, works today; you unzip + re-load-unpacked each time.
+#
+# The Mac peer is auto-detected (first macOS host in the tailnet); override with
+# $SEND_TO_MAC_HOST. Dest subdir defaults to the source basename under ~/Desktop.
+set -euo pipefail
+
+die() { echo "send-to-mac: $*" >&2; exit 1; }
+
+[ $# -ge 1 ] || die "usage: send-to-mac <path> [dest-subdir]"
+SRC="$1"
+[ -e "$SRC" ] || die "path does not exist: $SRC"
+SRC="$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")"   # absolutize
+NAME="$(basename "$SRC")"
+DEST_SUB="${2:-$NAME}"
+
+# Locate the Mac: explicit override, else first macOS peer in the tailnet.
+HOST="${SEND_TO_MAC_HOST:-}"
+if [ -z "$HOST" ]; then
+  HOST="$(tailscale status --json 2>/dev/null \
+    | jq -r 'first(.Peer[]? | select(.OS=="macOS") | .DNSName) // empty' \
+    | sed 's/\.$//')"
+fi
+[ -n "$HOST" ] || die "no macOS peer found in tailnet (set \$SEND_TO_MAC_HOST)"
+
+# Transport 1: rsync if the Mac accepts SSH (Remote Login on).
+if timeout 5 ssh -o BatchMode=yes -o ConnectTimeout=3 "$HOST" true 2>/dev/null; then
+  if [ -d "$SRC" ]; then
+    echo "send-to-mac: rsync '$NAME/' → $HOST:~/Desktop/$DEST_SUB/ (unpacked)"
+    # rsync creates the final dir under ~/Desktop (which always exists on macOS).
+    rsync -az --delete --mkpath "$SRC/" "$HOST:Desktop/$DEST_SUB/" 2>/dev/null \
+      || rsync -az --delete "$SRC/" "$HOST:Desktop/$DEST_SUB/"
+    echo "send-to-mac: done — chrome://extensions → Reload (Load unpacked → ~/Desktop/$DEST_SUB the first time)"
+  else
+    echo "send-to-mac: rsync '$NAME' → $HOST:~/Desktop/"
+    rsync -az "$SRC" "$HOST:Desktop/"
+    echo "send-to-mac: done — file at ~/Desktop/$NAME"
+  fi
+  exit 0
+fi
+
+# Transport 2: Taildrop fallback (no SSH). Zip dirs so they survive as one item.
+echo "send-to-mac: Mac SSH unreachable (enable macOS Remote Login for faster unpacked rsync); using Taildrop." >&2
+PAYLOAD="$SRC"
+CLEANUP=""
+if [ -d "$SRC" ]; then
+  TMP="$(mktemp -d)"; CLEANUP="$TMP"
+  PAYLOAD="$TMP/${NAME}.zip"
+  ( cd "$(dirname "$SRC")" && zip -qr "$PAYLOAD" "$NAME" )
+  echo "send-to-mac: zipped '$NAME/' → ${NAME}.zip"
+fi
+tailscale file cp "$PAYLOAD" "${HOST}:" \
+  && echo "send-to-mac: sent via Taildrop → accept on the Mac (Tailscale menu / ~/Downloads)."
+[ -n "$CLEANUP" ] && rm -rf "$CLEANUP"
