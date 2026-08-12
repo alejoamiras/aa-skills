@@ -13,6 +13,7 @@ The real files live **here**; `~/.claude/skills/<name>` are symlinks. Editing a 
 | [`harden-bugs`](skills/harden-bugs/) | Correctness-only clone of the harden harness with zero security language, so it runs clean on any model (Fable included) |
 | [`harden-quality`](skills/harden-quality/) | Maintainability-only clone of the harden harness with zero security language, so it runs clean on any model (Fable included) |
 | [`codex`](skills/codex/) | Second-opinion consults via the Codex CLI (cross-model review) |
+| [`kimi`](skills/kimi/) | Second-opinion consults via the Kimi Code CLI (Moonshot K3/K2.x) — codex-style harness with a worktree-change tripwire (kimi has no read-only sandbox) |
 | [`my-stack`](skills/my-stack/) | Project scaffolding: Bun, Biome, CI/CD conventions, supply-chain hardening |
 | [`run-isolation`](skills/run-isolation/) | Make a repo's local services/tests parallel-safe across many agents — shared `~/.agents` port registry, process-group teardown |
 | [`wallet-sdk`](skills/wallet-sdk/) | `@aztec/wallet-sdk` integration patterns for dApp frontends + wallet extensions |
