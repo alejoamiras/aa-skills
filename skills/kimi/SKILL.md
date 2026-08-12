@@ -70,7 +70,7 @@ If the user wants hard enforcement, they can add deny rules to `~/.kimi-code/con
 
 6. Read kimi's reply with the Read tool from `RESPONSE_FILE`. Act on `FILES_CHANGED=DETECTED` before anything else.
 
-Exit codes: `0` = completed; `3` = blocked, `6` = paused (goal-mode statuses — rare in one-shot prompts); anything else is a failure — read the LOG_FILE tail the script prints. A common first-run failure is `No model configured`: kimi isn't logged in — ask the user to run `kimi login` (device-code flow, ~30s); never run auth flows yourself.
+Exit codes: `0` = completed; `3` = blocked, `6` = paused (goal-mode statuses — rare in one-shot prompts); anything else is a failure — read the LOG_FILE tail the script prints. A common first-run failure is `No model configured`: kimi isn't logged in — ask the user to run `kimi login` (device-code flow, ~30s); never run auth flows yourself. Beta caveat (true as of 2026-08): Kimi Code access is beta-gated — `kimi login` can complete the OAuth device flow and STILL fail with "unable to verify your membership benefits", leaving `kimi provider list` empty. That means the account has no beta access / active plan yet; it is not a bug in the flow, so don't retry-loop it — surface it to the user and stop.
 
 If the SESSION_ID scrolled out of context but you still have KIMI_DIR, the id is also persisted at `$KIMI_DIR/session_id` — `resume-kimi.sh` reads it from there when its first argument is empty. The original cwd is persisted at `$KIMI_DIR/cwd` and reused on resume.
 
