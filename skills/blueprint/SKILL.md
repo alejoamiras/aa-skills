@@ -1,6 +1,6 @@
 ---
 name: blueprint
-description: Plan-creation protocol with FOUR tiers (lowest to highest ceremony) — `/blueprint light` (bounded feature, single codex audit) | `/blueprint mid` (contained feature, codex + fable dual audit; DEFAULT if unsure) | `/blueprint deep` (architectural / cross-cutting, three parallel plans main+codex+fable + double audit + contradiction-check) | `/blueprint mega-deep` (novel surface, planning agents spawn research subagents to map modules before drafting, plus split Round 2 audit). Every tier asks clarifying questions, runs a cheap-but-clever codebase recon phase to surface reusable/adaptable prior art before planning, homes the session into a task-named git worktree before drafting (workspace homing via EnterWorktree + the ~/.agents/workspaces.md manifest), requires a validation gate on every implementation phase (real project commands + pass criteria), and produces an ELI5 deliverable (a shareable Claude Artifact, with a standalone-HTML fallback) embedding `/goal` + `/loop` seed strings. Trigger phrases: "ultraplan", "ultrathink plan", "deep plan", "give me a plan", "blueprint this", "plan this carefully", "plan properly", "use the plan protocol", "full ceremony". Auto-fire (invoke without being asked) when the work involves cross-package BEHAVIORAL changes, infra / IaC with rollout or privilege impact, schema or protocol changes, UI-flow redesign, external-system integration, auth or permissions changes, billing logic, data migrations or backfills, concurrency or cache invalidation, or public API changes.
+description: Plan-creation protocol with FOUR tiers (lowest to highest ceremony) — `/blueprint light` (bounded feature, single codex audit) | `/blueprint mid` (contained feature, codex + fable dual audit; DEFAULT if unsure) | `/blueprint deep` (architectural / cross-cutting, three parallel plans main+codex+fable + double audit + contradiction-check) | `/blueprint mega-deep` (novel surface, planning agents spawn research subagents to map modules before drafting, plus split Round 2 audit). Every tier asks clarifying questions, runs a cheap-but-clever codebase recon phase to surface reusable/adaptable prior art before planning, homes the session into a task-named git worktree before drafting (workspace homing via EnterWorktree + the ~/.agents/workspaces.md manifest), requires a validation gate on every implementation phase (real project commands + pass criteria), embeds a self-contained post-implementation protocol in every plan.md (`/code-review max --fix`, then an iterative codex fix loop with an explicit no-over-engineering rule, then arc-stacked PR delivery via `gh stack`), and produces an ELI5 deliverable (a shareable Claude Artifact, with a standalone-HTML fallback) embedding `/goal` + `/loop` seed strings. Trigger phrases: "ultraplan", "ultrathink plan", "deep plan", "give me a plan", "blueprint this", "plan this carefully", "plan properly", "use the plan protocol", "full ceremony". Auto-fire (invoke without being asked) when the work involves cross-package BEHAVIORAL changes, infra / IaC with rollout or privilege impact, schema or protocol changes, UI-flow redesign, external-system integration, auth or permissions changes, billing logic, data migrations or backfills, concurrency or cache invalidation, or public API changes.
 ---
 
 # Blueprint
@@ -109,7 +109,7 @@ Blueprint work lives in its own git worktree, named after the plan. Home the ses
 5. Generate the ELI5 companion (Artifact primary; `eli5.html` fallback, see below) with DRAFT `/goal` + `/loop` embedded.
 6. Approval gate.
 7. **Post-approval seeds**: finalize `/goal` + `/loop` against the approved scope; deliver paste-ready in chat (see seeds section).
-8. Implement + lesson tracking + pre-codex `/code-review max --fix` + post-impl codex audit + fix loop.
+8. Implement + lesson tracking, then the post-implementation protocol embedded in plan.md: `/code-review max --fix` → iterative codex fix loop → arc-stacked PR delivery.
 
 **Light floor** (epistemic minimum for the lightest tier): at least 5 verified Facts in the Assumptions section AND no silent Asks in any implementation phase. Every implementation phase must list its assumptions explicitly. If you can't meet this floor, the task is too underspecified for `/blueprint light` — escalate to `mid`.
 
@@ -125,7 +125,7 @@ Blueprint work lives in its own git worktree, named after the plan. Home the ses
 6. Generate the ELI5 companion — Artifact (primary) or `eli5.html` fallback — with DRAFT `/goal` + `/loop` embedded.
 7. Approval gate.
 8. **Post-approval seeds**: finalize `/goal` + `/loop` against the approved scope; deliver paste-ready in chat (see seeds section).
-9. Implement + lesson tracking + pre-codex `/code-review max --fix` + post-impl codex audit + fix loop.
+9. Implement + lesson tracking, then the post-implementation protocol embedded in plan.md: `/code-review max --fix` → iterative codex fix loop → arc-stacked PR delivery.
 
 ### `/blueprint deep`
 
@@ -143,7 +143,7 @@ Blueprint work lives in its own git worktree, named after the plan. Home the ses
 7. Generate the ELI5 companion — Artifact (primary) or `eli5.html` fallback — with DRAFT `/goal` + `/loop` embedded.
 8. Approval gate.
 9. **Post-approval seeds**: finalize `/goal` + `/loop` against the approved scope; deliver paste-ready in chat (see seeds section).
-10. Implement + lesson tracking + pre-codex `/code-review max --fix` + post-impl codex audit + fix loop.
+10. Implement + lesson tracking, then the post-implementation protocol embedded in plan.md: `/code-review max --fix` → iterative codex fix loop → arc-stacked PR delivery.
 
 ### `/blueprint mega-deep`
 
@@ -168,7 +168,7 @@ Same shape as `/blueprint deep`, but with an upfront research phase AND a split 
 11. Generate the ELI5 companion — Artifact (primary) or `eli5.html` fallback — with DRAFT `/goal` + `/loop` embedded.
 12. Approval gate.
 13. **Post-approval seeds**: finalize `/goal` + `/loop` against the approved scope; deliver paste-ready in chat (see seeds section).
-14. Implement + lesson tracking + pre-codex `/code-review max --fix` + post-impl codex audit + fix loop.
+14. Implement + lesson tracking, then the post-implementation protocol embedded in plan.md: `/code-review max --fix` → iterative codex fix loop → arc-stacked PR delivery.
 
 **Cost note**: subagent fan-out is expensive; mega-deep persists multiple research artifacts AND runs a split Round 2 with a fresh subagent. Reserve `mega-deep` for first-of-its-kind work where the implementation cost (days+) dwarfs the audit overhead. Most non-trivial tasks land at `mid` or `deep`.
 
@@ -247,6 +247,43 @@ Rules:
 - **A phase cannot be marked ✓ until its gate passes.** The gate definition in plan.md is THE meaning of "phase green" — the `/loop` and `/goal` templates reference it instead of guessing.
 - **Missing infrastructure is a phase, not a wish**: if the user asked for a layer the project lacks (no e2e harness, no CI), building it becomes an early plan phase, sequenced BEFORE the phases that depend on it.
 - New tests added by a phase belong INSIDE that phase's gate (test added → gate runs it), keeping tests inline with the change per the testing philosophy.
+
+---
+
+## Required: Post-implementation section IN plan.md (ALL tiers)
+
+The post-impl steps (Phase 5+ below) are executed by the IMPLEMENTING session — often a fresh `/goal` or `/loop` session that never loaded this skill. plan.md is the only instruction surface it is guaranteed to read. So every plan.md MUST end with a self-contained "Post-implementation" section — the steps written out, not referenced ("see the blueprint skill" fails the approval gate) — specifying, in order:
+
+1. **`/code-review max --fix`** on the implementation diff → skim the applied fixes → commit them separately from implementation commits.
+2. **Codex post-impl audit** (`/codex xhigh`): net diff from plan baseline + summary of the code-review commits + plan.md + decision ledger + the adversarial/security ask + the no-over-engineering rule below.
+3. **Iterative fix loop**: triage findings (verify codex's factual claims against the repo first — it can misread code), apply the accepted fixes, commit, log the round (consult + verdict) in lessons/, then RESUME the same codex session with the fix diff and ask it to re-review. Repeat until a round yields no new material findings — rejected nitpicks don't count as churn. Still producing material findings after 3 rounds? Stop and surface to the user: that's a scope smell, not a polish loop.
+4. **Delivery** per the plan's Delivery section (below): submit/refresh the PR stack, mark arc PRs ready.
+
+**The no-over-engineering rule** (include verbatim in every post-impl codex prompt, initial and resumed): *"Report bugs and small, targeted improvements only. Do not propose speculative abstractions, extra configuration surface, new layers, or rewrites — the smallest change that fixes each real problem. If code works and is clear, leave it alone."*
+
+---
+
+## Required: Delivery section — arcs → stacked PRs (ALL tiers)
+
+Phases are the unit of validation; **arcs** are the unit of review — a contiguous group of phases that ships as one PR. Every plan.md MUST include a "Delivery" section declaring the mapping: arc name → phases included → what it stacks on.
+
+- **Single-arc plan** (typical `light`, many `mid`): one branch, one PR, plain `gh pr create`. Say so explicitly; no stack ceremony.
+- **Multi-arc plan**: one branch per arc, stacked via the `gh stack` extension (`gh extension list` to confirm; `gh extension install github/gh-stack` if missing) so each PR stays a reviewable slice while later arcs build on earlier ones.
+
+Sizing rule: an arc must be independently revertable and reviewable in one sitting — if its diff wouldn't be, split it.
+
+### `gh stack` mechanics (agent-safe forms)
+
+`gh stack` prompts interactively when underspecified — always pass branches and flags explicitly:
+
+- **Start** (arc 1): `gh stack init --adopt <current-branch>` to make the worktree branch layer 1, or `gh stack init <arc-1-branch>`; add `--base <trunk>` if trunk isn't the repo's default branch.
+- **Arc boundary** (previous arc's phases all green): `gh stack add <arc-N-branch>` — subsequent commits land on the new layer.
+- **Publish**: `gh stack submit --draft --auto` (titles auto-generate from commits; conventional commits make them right), then `gh pr edit` each PR with a proper body. Submit drafts early so CI runs per arc; mark PRs ready only after the post-impl fix loop converges.
+- **Stay current**: `gh stack sync` after trunk moves or fixes land on a lower arc — it cascade-rebases and pushes `--force-with-lease --atomic`. On conflict: `gh stack rebase`, resolve, `--continue`.
+- Post-impl fixes land on the arc branch they belong to when that's cheap (`gh stack down`/`up` to navigate), otherwise on the top arc; either way run `gh stack sync` afterwards.
+- **`gh stack merge` merges the named PR AND every PR below it** — a land-to-trunk action: the user's call, never autonomous/AFK.
+
+Caution: sync/rebase rewrite arc-branch history. Fine while the agent owns every arc branch; the moment another human pushes to one, stop syncing autonomously and surface it.
 
 ---
 
@@ -337,6 +374,7 @@ UI/UX: simple, clean, uncluttered. Plain typography, generous whitespace, no fla
       <li>Confirm scope and exclusions.</li>
       <li>Confirm tier (`mid` / `deep` / etc.) based on the rubric above.</li>
       <li>Confirm the validation plan: which layers gate which phases (unit / integration / e2e / live-network e2e).</li>
+      <li>Confirm the delivery topology: which phases group into which arcs / stacked PRs (or the single-PR call).</li>
       <li>Decide whether to schedule `/harden security` or `/harden quality` post-implementation (if applicable).</li>
       <li>Approve, conditionally approve (with conditions), or reject (with blocking findings).</li>
     </ul>
@@ -382,7 +420,7 @@ These live IN the ELI5 companion (the Artifact, or the fallback `eli5.html`) as 
 Replace `<test>` and `<lint>` with the project's actual commands (e.g. `bun run test` / `bun run lint:actions`, `pnpm test` / `pnpm lint`, `cargo test` / `cargo clippy`, `go test ./...` / `golangci-lint run`):
 
 ```
-/goal All phases marked ✓ in plan.md (the per-phase headers in the file, not just the chat), each ✓ backed by its phase's validation gate (as defined in plan.md) reported passing in the transcript; for each phase the agent has printed `LESSONS_FILE=implementations-plan/<plan>/lessons/phase-N.md` in the transcript; `/code-review max --fix` complete with findings applied and committed; codex post-impl audit complete with high/critical findings addressed (including modularity / architecture concerns); `<test>` and `<lint>` both report exit 0 in the transcript.
+/goal All phases marked ✓ in plan.md (the per-phase headers in the file, not just the chat), each ✓ backed by its phase's validation gate (as defined in plan.md) reported passing in the transcript; for each phase the agent has printed `LESSONS_FILE=implementations-plan/<plan>/lessons/phase-N.md` in the transcript; `/code-review max --fix` complete with findings applied and committed; the codex post-impl fix loop converged (a resumed codex pass reported no new material findings, quoted in the transcript); the Delivery section's PR topology exists on GitHub (stack submitted, arc PRs marked ready — `gh stack view` or `gh pr view` output in the transcript); `<test>` and `<lint>` both report exit 0 in the transcript.
 ```
 
 ### `/loop` template
@@ -391,13 +429,13 @@ Replace `<test>` and `<lint>` with the project's actual commands (e.g. `bun run 
 
 ```
 /loop 15m Drive implementations-plan/<plan> forward. Never idle waiting for my input. Each firing:
-1. **Reality check**: read implementations-plan/<plan>/plan.md and lessons/ (authoritative state — not the chat); run `git status` and `git log --oneline -5`. If a PR exists, `gh pr view --json statusCheckRollup` (no --watch). Without a PR but with CI configured, `gh run list --branch $(git branch --show-current) --limit 1 --json status,databaseId`.
+1. **Reality check**: read implementations-plan/<plan>/plan.md and lessons/ (authoritative state — not the chat); run `git status` and `git log --oneline -5`. If a PR exists, `gh pr view --json statusCheckRollup` (no --watch; multi-arc plans: `gh stack view` for the whole stack). Without a PR but with CI configured, `gh run list --branch $(git branch --show-current) --limit 1 --json status,databaseId`.
 2. **Waiting on CI is fine** — confirm it's actually progressing (`gh run watch <run-id>` up to 10 minutes; queued or stuck past that → inspect logs, log it as blocked in lessons). Use the wait productively: review the diff, prep the next phase, strengthen tests. Don't start work that would conflict with the in-flight change.
-3. **No task in hand?** Pick the next pending step from plan.md and start it. After each meaningful edit, run the fast validation layers (`<lint>` + `<test>` for the touched packages) — catch mistakes in-step, not phases later. Then commit → push.
+3. **No task in hand?** Pick the next pending step from plan.md and start it. After each meaningful edit, run the fast validation layers (`<lint>` + `<test>` for the touched packages) — catch mistakes in-step, not phases later. Then commit → push (multi-arc plans: `gh stack push`; `gh stack sync` if trunk or a lower arc moved).
 4. **Stuck, or facing a decision you'd normally bring to me?** Don't wait. Call `/codex xhigh` with full context and go back and forth until you two reach a defensible decision, then act on it. Log every consult + verdict in lessons/phase-N.md. Exception — hard limits stay hard: never merge to main or release branches, never publish or deploy, never expand scope beyond plan.md; if the decision requires crossing one, surface it and hold.
 5. **Same step failed 5 times?** Stop retrying; reassess the approach with codex, then continue down the agreed path.
-6. **Phase green?** "Green" means THE PHASE'S VALIDATION GATE as written in plan.md passes (commands + pass criteria — not generic vibes). Run the full gate, paste the result, mark ✓ in plan.md, file the lessons entry, print `LESSONS_FILE=implementations-plan/<plan>/lessons/phase-N.md` in the transcript, advance to the next phase.
-7. **All phases ✓ in plan.md?** Run the post-impl sequence: `/code-review max --fix` → skim applied fixes → commit separately (so code-review changes stay first-class) → codex post-impl audit (`/codex xhigh`, net diff from plan baseline + summary of code-review commits + adversarial / security ask) → address high/critical findings. Then write the wrap-up report: what shipped, every contentious decision codex and I debated — each with ELI5 context (what the question was, the options, why we picked ours) — and open items. Surface and stop.
+6. **Phase green?** "Green" means THE PHASE'S VALIDATION GATE as written in plan.md passes (commands + pass criteria — not generic vibes). Run the full gate, paste the result, mark ✓ in plan.md, file the lessons entry, print `LESSONS_FILE=implementations-plan/<plan>/lessons/phase-N.md` in the transcript, advance to the next phase. Arc boundary crossed (per plan.md's Delivery section)? `gh stack add <next-arc-branch>` before the next phase's work.
+7. **All phases ✓ in plan.md?** Run plan.md's Post-implementation section: `/code-review max --fix` → skim applied fixes → commit separately (so code-review changes stay first-class) → codex post-impl audit (`/codex xhigh`, net diff from plan baseline + summary of code-review commits + adversarial / security ask + the plan's no-over-engineering rule) → apply accepted fixes, commit, then RESUME the same codex session with the fix diff for a re-review — loop until a round yields no new material findings (still churning after 3 rounds → surface and stop). Then Delivery per plan.md: submit/refresh the stack (`gh stack submit --draft --auto` / `gh stack sync`), mark arc PRs ready. Then write the wrap-up report: what shipped, every contentious decision codex and I debated — each with ELI5 context (what the question was, the options, why we picked ours) — and open items. Surface and stop.
 
 Keep the ASCII checklist visible each firing (human readability only; plan.md is the source of truth).
 ```
@@ -421,8 +459,9 @@ Maintain an ASCII to-do list in your responses showing current phase, done / pen
 [ ] 4. ELI5 companion (Artifact / file fallback)
 [ ] 5. Approval gate
 [ ] 6. Implementation
-[ ] 7. Post-impl codex audit
-[ ] 8. Fix loop
+[ ] 7. /code-review max --fix
+[ ] 8. Codex fix loop (resume until no new material findings)
+[ ] 9. Delivery: stack submitted, arc PRs ready
 ```
 
 Adjust steps per the tier you're running.
@@ -435,7 +474,7 @@ Adjust steps per the tier you're running.
 
 Required deliverables present:
 
-1. `plan.md` (with Architecture & Implementation, Security & Adversarial Considerations, and Assumptions sections, AND a validation gate on every implementation phase) + `recon.md` from Phase 0.4
+1. `plan.md` (with Architecture & Implementation, Security & Adversarial Considerations, and Assumptions sections, a validation gate on every implementation phase, a self-contained Post-implementation section, AND a Delivery section mapping phases → arcs/PRs) + `recon.md` from Phase 0.4
 2. Codex's final verdict in **explicit format**: `approve` | `conditional approve (with conditions: ...)` | `reject (with blocking findings: ...)`. Freeform / vague verdicts do NOT count as approval.
 3. ELI5 companion — a published Artifact (primary) or `eli5.html` (fallback) — embedding the `/goal` + `/loop` seed strings, with one marked Recommended
 4. For `/blueprint mid`, `/blueprint deep`, `/blueprint mega-deep`: fable audit verdicts inline in `plan.md`
@@ -448,6 +487,7 @@ Required deliverables present:
 - **Missing adopted-vs-rejected logs** from any audit cycle.
 - **Any implementation phase missing a concrete validation gate** (commands + pass criteria from the project's real tooling).
 - **Missing `recon.md` (Phase 0.4) or the Architecture & Implementation section in `plan.md`.**
+- **Post-implementation section missing or not self-contained** (references the skill instead of spelling out the steps), or **Delivery section missing the arc → phase mapping**.
 
 **ELI5 visibility (mandatory when asking for approval)**: the user must never have to hunt for the plan. How you present it depends on which ELI5 form you produced:
 
@@ -498,16 +538,18 @@ Blueprint sits in a specific phase of the development cycle. Other skills cover 
 
 - **`/code-review` is NOT replaced by Blueprint, and Blueprint is NOT replaced by `/code-review`.** They cover different phases:
   - Plan-time audits (codex + fable during Blueprint) gate plan APPROVAL.
-  - `/code-review max --fix` then codex post-impl audit gate IMPLEMENTATION (these run inside Blueprint's post-impl steps, but the same `/code-review` is independently useful on any diff).
+  - `/code-review max --fix` then the iterative codex fix loop gate IMPLEMENTATION (these run from plan.md's embedded Post-implementation section, but the same `/code-review` is independently useful on any diff).
 - **`/harden` is NOT auto-scheduled by Blueprint.** It's an expensive whole-codebase audit, typically run before a release/library publish, not after every plan. Blueprint surfaces the question during Phase 0 (clarifying questions) so the user can decide whether the plan's surface (auth / secrets / CI/CD / publishing / repo-wide security posture) warrants a `/harden` pass at release-time. The user decides; Blueprint records the decision in the plan's "Post-implementation hardening" note.
 
 ---
 
-## Phase 5+: Implementation, lessons, post-impl audit, fix loop
+## Phase 5+: Implementation, lessons, post-impl review loop, delivery
+
+These steps are duplicated INTO every plan.md as its required Post-implementation + Delivery sections — the implementing session executes them from there, not from this skill.
 
 ### Implementation + lesson tracking
 
-Implement per the plan. Log meaningful attempts in `implementations-plan/<plan>/lessons/phase-N.md`. At each phase-gate pass, refresh the workspace manifest: `agent-worktree status <slug> "phase N green: <next>"` (see Phase 0.75 status discipline).
+Implement per the plan. Log meaningful attempts in `implementations-plan/<plan>/lessons/phase-N.md`. At each phase-gate pass, refresh the workspace manifest: `agent-worktree status <slug> "phase N green: <next>"` (see Phase 0.75 status discipline). At arc boundaries (per the plan's Delivery section), `gh stack add <next-arc-branch>` before starting the next phase's work.
 
 **Failure-retry policy** (explicit, not parenthetical):
 - **Human-driven implementation**: after **3 failures** on the same step, stop and reassess. The human is in the loop and can re-scope quickly.
@@ -534,12 +576,17 @@ After `/code-review max --fix` has been applied and committed in separate commit
 2. **A separate summary of code-review-applied commits** listing what `/code-review` changed and why. This lets codex audit BOTH the original implementation AND the cleanup as distinct artifacts.
 3. The original plan.md + decision ledger for reference.
 4. Explicit adversarial / security ask.
+5. **The no-over-engineering rule**, verbatim from the plan's Post-implementation section — the ask is bugs and small targeted improvements, not redesigns.
 
 This preserves provenance: codex can see what was originally implemented vs what was tweaked by `/code-review`, and can audit structural changes from `/code-review` as first-class changes rather than as a silently-cleaned final state.
 
-### Evaluate + fix loop
+### Iterative fix loop
 
-Triage codex's review feedback. Implement real fixes. Close the loop. Maintain `implementations-plan/index.md` with the completed marker.
+Triage codex's findings — verify factual claims against the repo before acting (codex can misread code). Apply the accepted fixes, commit, log the round (consult + verdict) in lessons/, then **resume the same codex session** with the fix diff and ask for a re-review under the same no-over-engineering rule. Loop until a round yields no new material findings — rejected nitpicks don't count as churn. Still producing material findings after 3 rounds? Stop and surface to the user: that's a scope smell (the implementation diverged from the plan, or the plan under-specified), not a polish problem.
+
+### Delivery
+
+Ship per plan.md's Delivery section: single-arc → plain `gh pr create`; multi-arc → `gh stack submit --draft --auto` early (CI runs per arc), `gh stack sync` to cascade fixes, mark arc PRs ready once the fix loop converges. `gh stack merge` (lands the named PR and everything below it) stays the user's call. Then maintain `implementations-plan/index.md` with the completed marker.
 
 ---
 
@@ -553,7 +600,7 @@ When the plan touches UI, **copywriting is part of the design surface**. Clear, 
 
 ```
 implementations-plan/<plan-name>/
-├── plan.md           # The plan: Architecture & Implementation + Security & Adversarial + Assumptions sections, per-phase validation gates, audit verdicts inline (mid/deep/mega-deep), decision ledger (mid+), Seeds section at bottom
+├── plan.md           # The plan: Architecture & Implementation + Security & Adversarial + Assumptions sections, per-phase validation gates, Post-implementation section (code-review → codex fix loop), Delivery section (arcs → PRs), audit verdicts inline (mid/deep/mega-deep), decision ledger (mid+), Seeds at bottom
 ├── recon.md          # Phase 0.4 codebase-recon findings (reuse / adapt / dedup-risk map) — feeds the draft + every audit
 ├── audit-codex.md    # Codex audit transcript(s)
 ├── audit-fable.md    # Fable audit transcript (mid/deep/mega-deep only)

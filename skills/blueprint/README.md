@@ -31,6 +31,8 @@ flowchart TD
     S --> I["Implement — /goal session or /loop 15m"]
     I --> V["/code-review max --fix, committed separately"]
     V --> P["Codex post-implementation audit (net diff + review-commit summary)"]
+    P --> F["Fix loop: apply → resume Codex with the fix diff → repeat until no new material findings"]
+    F --> T["Delivery: arcs ship as stacked PRs (gh stack); merging is the human's call"]
 ```
 
 Key mechanics, independent of tier:
@@ -46,7 +48,8 @@ Key mechanics, independent of tier:
 - **Model fallback**: the top-tier Claude leg ("fable") runs on Fable when available, else **Opus 4.8 (1M context)**. "fable" is the role name (the independent top-tier reviewer alongside Codex), not a hard model pin.
 - **The ELI5 companion is a hard prerequisite** — a plain-language view (why this tier, the phases, the approval ask, the seeds), no jargon and no technical detail (that's in `plan.md`). Primary form is a **shareable Claude Artifact** (a claude.ai URL, default-private, share when you choose); the fallback is a standalone `eli5.html` for when the Artifact tool isn't available or the plan must stay on your infrastructure — and that file is what the `BLUEPRINT_VIEW_CMD` remote-viewing hook serves (torn down right after the verdict; see SKILL.md "Remote viewing"). No ELI5, no approval ask.
 - **Seeds are drafts until you approve.** After the gate (especially conditional approvals), the `/goal` and `/loop` strings are regenerated against the scope you actually approved, and delivered paste-ready.
-- **Post-implementation**: `/code-review max --fix` runs first and commits separately, so the final Codex audit sees both the net diff and what the review pass changed — provenance preserved.
+- **Post-implementation**: `/code-review max --fix` runs first and commits separately, so the Codex audit sees both the net diff and what the review pass changed — provenance preserved. The Codex review is then a *loop*, not a pass: accepted fixes go back to the same Codex session with an explicit no-over-engineering rule, until a round yields nothing material (3 churning rounds → stop and surface). The whole protocol is written INTO plan.md, so a fresh implementing session can't forget it.
+- **Arcs → stacked PRs**: phases are the unit of validation, arcs the unit of review. plan.md's Delivery section maps phases into arcs; multi-arc plans ship as a `gh stack` PR stack (drafts early for per-arc CI, cascade-rebase via `gh stack sync`), each PR one reviewable, revertable slice. `gh stack merge` lands a PR and everything under it — always the human's call.
 
 ## What each tier adds
 
