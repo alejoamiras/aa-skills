@@ -9,6 +9,8 @@
 #   model        Optional. Defaults to $CODEX_MODEL, else gpt-5.6-sol.
 #                (gpt-5.6-sol became the default 2026-07-11: it works on
 #                ChatGPT-account auth, unlike the earlier-blocked gpt-5.6.
+#                Verified still the flagship 2026-08-03; family variants
+#                gpt-5.6-terra / gpt-5.6-luna are the valid overrides.
 #                Pass a 5th arg or set $CODEX_MODEL to override per call.)
 #
 # Output: human-readable progress on stderr, codex log redirected to a file.

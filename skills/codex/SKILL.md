@@ -85,7 +85,9 @@ Resume whenever you disagree with codex, need clarification, want to point out a
 
 Always run codex at `xhigh` reasoning effort — that's what the helper scripts default to, and what the third positional argument controls. The whole point of asking codex is to get its strongest critique; lower effort defeats the purpose. The codex banner in `LOG_FILE` will echo `reasoning effort: xhigh` when wired up correctly.
 
-The scripts pass `-c model_reasoning_effort=<effort>` on every call and default the model to **`gpt-5.6-sol`** (hardcoded in both scripts), overridable per-call via the scripts' fifth positional argument or `CODEX_MODEL`. `gpt-5.6-sol` became the default on 2026-07-11: it runs on ChatGPT-account auth, unlike the earlier `gpt-5.6` which OpenAI restricted to API-key-only. Only override the model when the user explicitly asks.
+The scripts pass `-c model_reasoning_effort=<effort>` on every call and default the model to **`gpt-5.6-sol`** (hardcoded in both scripts), overridable per-call via the scripts' fifth positional argument or `CODEX_MODEL`. `gpt-5.6-sol` became the default on 2026-07-11: it runs on ChatGPT-account auth, unlike the bare `gpt-5.6` alias (which just routes to sol but is API-key-only under ChatGPT auth). Only override the model when the user explicitly asks.
+
+Model lineup, verified current 2026-08-03: the GPT-5.6 family is `gpt-5.6-sol` (flagship), `gpt-5.6-terra` (balanced), `gpt-5.6-luna` (fast) — those are the valid override names. Nothing newer exists; `gpt-5.4`/`gpt-5.4-mini` retire for ChatGPT-auth users 2026-08-31. `xhigh` remains the top of the `model_reasoning_effort` enum (`minimal|low|medium|high|xhigh`). If sol ever 400s with "not supported when using Codex with a ChatGPT account", that's a known intermittent entitlement-sync bug, not a policy change — update the CLI, re-auth, then retry before switching models.
 
 ## Writing the prompt
 
