@@ -257,7 +257,7 @@ The post-impl steps (Phase 5+ below) are executed by the IMPLEMENTING session �
 1. **`/code-review max --fix`** on the implementation diff → skim the applied fixes → commit them separately from implementation commits.
 2. **Codex post-impl audit** (`/codex xhigh`): net diff from plan baseline + summary of the code-review commits + plan.md + decision ledger + the adversarial/security ask + the no-over-engineering rule below.
 3. **Iterative fix loop**: triage findings (verify codex's factual claims against the repo first — it can misread code), apply the accepted fixes, commit, log the round (consult + verdict) in lessons/, then RESUME the same codex session with the fix diff and ask it to re-review. Repeat until a round yields no new material findings — rejected nitpicks don't count as churn. Still producing material findings after 3 rounds? Stop and surface to the user: that's a scope smell, not a polish loop.
-4. **Delivery** per the plan's Delivery section (below): submit/refresh the PR stack, mark arc PRs ready.
+4. **Delivery** per the plan's Delivery section (below): create the PRs — the FIRST time any PR is opened. Never open PRs (even drafts) during implementation: they burn CI minutes on code the loops above will still change.
 
 **The no-over-engineering rule** (include verbatim in every post-impl codex prompt, initial and resumed): *"Report bugs and small, targeted improvements only. Do not propose speculative abstractions, extra configuration surface, new layers, or rewrites — the smallest change that fixes each real problem. If code works and is clear, leave it alone."*
 
@@ -272,13 +272,15 @@ Phases are the unit of validation; **arcs** are the unit of review — a contigu
 
 Sizing rule: an arc must be independently revertable and reviewable in one sitting — if its diff wouldn't be, split it.
 
+**PR timing — no PR before the quality loops.** PRs (drafts included) are opened ONLY in the post-implementation Delivery step, after `/code-review max --fix` AND the codex fix loop have converged. An open PR re-runs CI on every push, burning CI minutes on code the loops will still change. During implementation the per-phase validation gates are the feedback loop; branches still get pushed (checkpointing, `gh stack push`) — under the PR-gate CI convention a branch push without a PR triggers nothing.
+
 ### `gh stack` mechanics (agent-safe forms)
 
 `gh stack` prompts interactively when underspecified — always pass branches and flags explicitly:
 
 - **Start** (arc 1): `gh stack init --adopt <current-branch>` to make the worktree branch layer 1, or `gh stack init <arc-1-branch>`; add `--base <trunk>` if trunk isn't the repo's default branch.
 - **Arc boundary** (previous arc's phases all green): `gh stack add <arc-N-branch>` — subsequent commits land on the new layer.
-- **Publish**: `gh stack submit --draft --auto` (titles auto-generate from commits; conventional commits make them right), then `gh pr edit` each PR with a proper body. Submit drafts early so CI runs per arc; mark PRs ready only after the post-impl fix loop converges.
+- **Publish — only in the Delivery step, after the quality loops converge** (see PR timing above): `gh stack submit --auto` (titles auto-generate from commits; conventional commits make them right), then `gh pr edit` each PR with a proper body, then watch checks. Never submit during implementation, not even as drafts.
 - **Stay current**: `gh stack sync` after trunk moves or fixes land on a lower arc — it cascade-rebases and pushes `--force-with-lease --atomic`. On conflict: `gh stack rebase`, resolve, `--continue`.
 - Post-impl fixes land on the arc branch they belong to when that's cheap (`gh stack down`/`up` to navigate), otherwise on the top arc; either way run `gh stack sync` afterwards.
 - **`gh stack merge` merges the named PR AND every PR below it** — a land-to-trunk action: the user's call, never autonomous/AFK.
@@ -420,7 +422,7 @@ These live IN the ELI5 companion (the Artifact, or the fallback `eli5.html`) as 
 Replace `<test>` and `<lint>` with the project's actual commands (e.g. `bun run test` / `bun run lint:actions`, `pnpm test` / `pnpm lint`, `cargo test` / `cargo clippy`, `go test ./...` / `golangci-lint run`):
 
 ```
-/goal All phases marked ✓ in plan.md (the per-phase headers in the file, not just the chat), each ✓ backed by its phase's validation gate (as defined in plan.md) reported passing in the transcript; for each phase the agent has printed `LESSONS_FILE=implementations-plan/<plan>/lessons/phase-N.md` in the transcript; `/code-review max --fix` complete with findings applied and committed; the codex post-impl fix loop converged (a resumed codex pass reported no new material findings, quoted in the transcript); the Delivery section's PR topology exists on GitHub (stack submitted, arc PRs marked ready — `gh stack view` or `gh pr view` output in the transcript); `<test>` and `<lint>` both report exit 0 in the transcript.
+/goal All phases marked ✓ in plan.md (the per-phase headers in the file, not just the chat), each ✓ backed by its phase's validation gate (as defined in plan.md) reported passing in the transcript; for each phase the agent has printed `LESSONS_FILE=implementations-plan/<plan>/lessons/phase-N.md` in the transcript; `/code-review max --fix` complete with findings applied and committed; the codex post-impl fix loop converged (a resumed codex pass reported no new material findings, quoted in the transcript); the Delivery section's PR topology exists on GitHub, created only AFTER the fix loop converged (`gh stack view` or `gh pr view` output in the transcript); `<test>` and `<lint>` both report exit 0 in the transcript.
 ```
 
 ### `/loop` template
@@ -435,7 +437,7 @@ Replace `<test>` and `<lint>` with the project's actual commands (e.g. `bun run 
 4. **Stuck, or facing a decision you'd normally bring to me?** Don't wait. Call `/codex xhigh` with full context and go back and forth until you two reach a defensible decision, then act on it. Log every consult + verdict in lessons/phase-N.md. Exception — hard limits stay hard: never merge to main or release branches, never publish or deploy, never expand scope beyond plan.md; if the decision requires crossing one, surface it and hold.
 5. **Same step failed 5 times?** Stop retrying; reassess the approach with codex, then continue down the agreed path.
 6. **Phase green?** "Green" means THE PHASE'S VALIDATION GATE as written in plan.md passes (commands + pass criteria — not generic vibes). Run the full gate, paste the result, mark ✓ in plan.md, file the lessons entry, print `LESSONS_FILE=implementations-plan/<plan>/lessons/phase-N.md` in the transcript, advance to the next phase. Arc boundary crossed (per plan.md's Delivery section)? `gh stack add <next-arc-branch>` before the next phase's work.
-7. **All phases ✓ in plan.md?** Run plan.md's Post-implementation section: `/code-review max --fix` → skim applied fixes → commit separately (so code-review changes stay first-class) → codex post-impl audit (`/codex xhigh`, net diff from plan baseline + summary of code-review commits + adversarial / security ask + the plan's no-over-engineering rule) → apply accepted fixes, commit, then RESUME the same codex session with the fix diff for a re-review — loop until a round yields no new material findings (still churning after 3 rounds → surface and stop). Then Delivery per plan.md: submit/refresh the stack (`gh stack submit --draft --auto` / `gh stack sync`), mark arc PRs ready. Then write the wrap-up report: what shipped, every contentious decision codex and I debated — each with ELI5 context (what the question was, the options, why we picked ours) — and open items. Surface and stop.
+7. **All phases ✓ in plan.md?** Run plan.md's Post-implementation section: `/code-review max --fix` → skim applied fixes → commit separately (so code-review changes stay first-class) → codex post-impl audit (`/codex xhigh`, net diff from plan baseline + summary of code-review commits + adversarial / security ask + the plan's no-over-engineering rule) → apply accepted fixes, commit, then RESUME the same codex session with the fix diff for a re-review — loop until a round yields no new material findings (still churning after 3 rounds → surface and stop). Then Delivery per plan.md — the FIRST time any PR is opened: `gh pr create` (single-arc) or `gh stack sync` then `gh stack submit --auto` + `gh pr edit` bodies (multi-arc), then `gh pr checks --watch`. Then write the wrap-up report: what shipped, every contentious decision codex and I debated — each with ELI5 context (what the question was, the options, why we picked ours) — and open items. Surface and stop.
 
 Keep the ASCII checklist visible each firing (human readability only; plan.md is the source of truth).
 ```
@@ -461,7 +463,7 @@ Maintain an ASCII to-do list in your responses showing current phase, done / pen
 [ ] 6. Implementation
 [ ] 7. /code-review max --fix
 [ ] 8. Codex fix loop (resume until no new material findings)
-[ ] 9. Delivery: stack submitted, arc PRs ready
+[ ] 9. Delivery: PRs created (only now), checks green
 ```
 
 Adjust steps per the tier you're running.
@@ -586,7 +588,7 @@ Triage codex's findings — verify factual claims against the repo before acting
 
 ### Delivery
 
-Ship per plan.md's Delivery section: single-arc → plain `gh pr create`; multi-arc → `gh stack submit --draft --auto` early (CI runs per arc), `gh stack sync` to cascade fixes, mark arc PRs ready once the fix loop converges. `gh stack merge` (lands the named PR and everything below it) stays the user's call. Then maintain `implementations-plan/index.md` with the completed marker.
+Ship per plan.md's Delivery section — PRs are created ONLY here, after `/code-review max --fix` and the codex fix loop have both converged (opening them earlier burns CI on every push while the loops are still changing the code). Single-arc → plain `gh pr create`; multi-arc → `gh stack sync` first if trunk moved, then `gh stack submit --auto` + `gh pr edit` bodies. Watch checks (`gh pr checks --watch`). `gh stack merge` (lands the named PR and everything below it) stays the user's call. Then maintain `implementations-plan/index.md` with the completed marker.
 
 ---
 
