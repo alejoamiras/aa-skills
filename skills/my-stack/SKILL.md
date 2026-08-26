@@ -1,6 +1,6 @@
 ---
 name: my-stack
-description: "Use when scaffolding a new repository, configuring development tooling, setting up CI/CD pipelines, or when working on owned repositories. Covers the preferred stack: bun, biome, husky, commitlint, lint-staged, shellcheck, actionlint, sort-package-json, playwright, vitest, OpenTofu, monorepo structure, trusted publisher for npm, OIDC, React + Vite frontend defaults, supply-chain hardening (7-day min-age, frozen lockfile), and parallel-safe E2E patterns."
+description: "Use when scaffolding a new repository, configuring development tooling, setting up CI/CD pipelines, or when working on owned repositories. Covers the preferred stack: bun 1.4+ (native-first — Bun.cron, Bun.Image, node:sqlite, Bun.Archive, isolated linker, test --parallel/--shard/--changed — before reaching for deps), biome, husky, commitlint, lint-staged, shellcheck, actionlint, sort-package-json, playwright, vitest, monorepo structure, trusted publisher for npm, OIDC, React + Vite frontend defaults, supply-chain hardening (7-day min-age, frozen lockfile), parallel-safe E2E patterns, and tiered infrastructure (Cloudflare Workers/Pages by default; OpenTofu only once there's real cloud infra to track)."
 ---
 
 # My Preferred Development Stack
@@ -11,7 +11,7 @@ Tooling, conventions, scaffolding, and CI/CD for repositories I own. Use when sc
 
 | Tool | Purpose | Replaces |
 |------|---------|----------|
-| **bun** | Package manager, runtime, test runner, workspaces | npm/yarn/pnpm, jest |
+| **bun** | Package manager, runtime, test runner, workspaces | npm/yarn/pnpm, jest, and (as of 1.4) a pile of small deps — see Bun 1.4 baseline |
 | **biome** | Linting + formatting (single tool) | eslint + prettier |
 | **vitest** | React component test runner (when Vite is in play) | jest |
 | **husky** | Git hooks | n/a |
@@ -23,7 +23,47 @@ Tooling, conventions, scaffolding, and CI/CD for repositories I own. Use when sc
 | **playwright** | E2E testing (browser) | cypress, puppeteer |
 | **storybook** | Component catalog / visual docs (frontend) | n/a |
 | **ncu** (npm-check-updates) | Dependency update checking | npm outdated |
-| **OpenTofu** | Infrastructure as Code | Terraform |
+| **Cloudflare (Workers/Pages + wrangler)** | Default hosting for anything that's "just a web thing" | a VPS you'd have to patch |
+| **OpenTofu** | Infrastructure as Code — only once real infra exists (see Infrastructure) | Terraform |
+
+## Bun 1.4 baseline (new projects)
+
+**Minimum Bun is 1.4.** Pin it and prefer built-ins over dependencies: every dep not installed is one that can't be compromised, can't rot, and costs no install time. Bun 1.4 is a large release (the runtime itself was rewritten in Rust) — the practical rule is *check whether Bun already does it before adding a package*.
+
+```jsonc
+// package.json
+{ "engines": { "bun": ">=1.4.0" }, "packageManager": "bun@1.4.0" }
+```
+
+CI pins the same floor: `oven-sh/setup-bun@v2` with `bun-version: 1.4.0` (or `latest` once the floor is old news).
+
+**Replace deps with built-ins** (all stable in 1.4 unless noted):
+
+| Instead of | Use | Notes |
+|---|---|---|
+| `node-cron`, a systemd timer | `Bun.cron()` | Registers with the OS scheduler (crontab / launchd / Task Scheduler), so jobs survive process death |
+| `sharp`, `jimp` | `Bun.Image` | decode/resize/rotate/encode JPEG, PNG, WebP, GIF, BMP |
+| `better-sqlite3` | `node:sqlite` (or `bun:sqlite`) | built in, no native build step |
+| `tar`, `adm-zip` | `Bun.Archive` | tarball create/extract |
+| `json5`, `jsonc-parser`, `fast-xml-parser`, `@iarna/toml` | `Bun.JSON5` / `Bun.JSONC` / `Bun.JSONL` / `Bun.XML` / `Bun.TOML` | `Bun.TOML.stringify()` is new |
+| `zlib` wrappers, `pako` | `CompressionStream` / `DecompressionStream` | web-standard; gzip, deflate, deflate-raw, brotli, zstd |
+| `string-width`, `wrap-ansi`, `slice-ansi` | `Bun.stringWidth()`, `Bun.wrapAnsi()`, `Bun.sliceAnsi()` | CLI output formatting |
+| `marked` + a renderer | `Bun.markdown` (`.html()` / `.react()` / `.render()`) | |
+| `express` + `serve-static` for static files | `Bun.serve()` routes with `{ dir: "./public" }` | sendfile, range requests (206), conditional 304/412 built in |
+
+**Do NOT swap Playwright for `Bun.WebView`.** It is real headless browser automation built into Bun, but Playwright still owns cross-browser coverage, the test runner, tracing, and the fixtures our E2E patterns are built on. `Bun.WebView` is the right tool for scripting/scraping side-tasks, not for the E2E suite.
+
+**Test runner** — use the 1.4 flags in CI:
+
+- `bun test --parallel` — test files across worker processes (per-worker `BUN_TEST_WORKER_ID`).
+- `bun test --isolate` — fresh global per file; use when tests leak state, not by default (slower).
+- `bun test --shard=M/N` — split across CI runners; pair with `--timings=<path>` for balanced shards.
+- `bun test --changed` — only files affected by uncommitted changes; the fast local pre-commit loop. `--changed=main` for branch-aware diffs.
+- Flaky externals: `{ retry: n }`; stress: `{ repeats: n }`; time control: `jest.useFakeTimers()` / `jest.setSystemTime()`.
+
+**Package manager** — `bun audit fix` (upgrades vulnerable deps and installs) in the security loop, `bun pm licenses --json` for license review, `bun dedupe` when the lockfile bloats, `bun prune --production` for slim deploy images, `bun pm diff` to see what a version bump actually changed.
+
+**Bundler** — `optimizeImports` for barrel-heavy packages, `--react-compiler` (stable, ~20x faster than the Babel plugin) on React builds, `--metafile-md` when investigating bundle size.
 
 ## Frontend defaults (when project has UI)
 
@@ -54,7 +94,8 @@ Tooling, conventions, scaffolding, and CI/CD for repositories I own. Use when sc
 │   │   ├── e2e/                      # E2E tests
 │   │   └── package.json
 │   └── <package-b>/
-├── infra/tofu/                       # OpenTofu IaC (when needed)
+├── wrangler.jsonc                    # Cloudflare config (web-only projects — this IS the infra)
+├── infra/tofu/                       # OpenTofu IaC (ONLY once real infra exists — see Infrastructure)
 ├── implementations-plan/             # Committed plan artifacts
 │   ├── index.md                      # Plans + lessons index (kept up to date)
 │   └── <plan-name>/
@@ -115,10 +156,13 @@ Create `bunfig.toml`:
 [install]
 minimumReleaseAge = 604800        # 7 days — blocks fresh npm publishes (supply-chain protection)
 # minimumReleaseAgeExcludes = ["@org/internal-pkg"]  # CVE bypass: add here, install, follow-up PR removes
+linker = "isolated"               # 1.4 global virtual store: symlink dedup, no phantom deps. Opt-in, so set it explicitly
 
 [install.lockfile]
 frozen = false                    # local dev allows lockfile updates
 ```
+
+The isolated linker also kills phantom dependencies (a package can only import what it declares), which is worth more than the install speedup on a monorepo. If a stubborn dep breaks under symlinks, drop `linker` for that repo and note why.
 
 In CI workflows, use `bun install --frozen-lockfile` (or `bun ci`) so any un-committed dependency change fails the pipeline.
 
@@ -524,7 +568,7 @@ bunx storybook@latest init
 }
 ```
 
-Add `lint:tofu` if using OpenTofu:
+Add `lint:tofu` only on Tier 3 projects (see Infrastructure):
 
 ```json
 { "lint:tofu": "cd infra/tofu && tofu fmt -check -diff && tofu validate" }
@@ -545,15 +589,26 @@ Create `CLAUDE.md` at repo root describing:
 
 Create `docs/roadmap.md` for tracking phases, decisions, and backlog.
 
-### 12. OpenTofu (if infrastructure needed)
+### 12. Infrastructure — pick the tier, don't default to IaC
+
+IaC is not a starter-kit checkbox. OpenTofu means state files, backends, locking, drift, plan/apply review, and a permanent maintenance surface. Most projects never earn it. Pick by what the thing actually is:
+
+**Tier 1 — it's a web thing (default).** Static site, SPA, landing page, docs, an API that fits an edge function: **Cloudflare Pages/Workers, configured by `wrangler.jsonc`, deployed from CI**. That file *is* the infrastructure definition (routes, bindings, KV/R2/D1, env vars) — version-controlled, reviewable, no state backend. **No `infra/tofu/` at all.** Skip to the CI section. Deploy via `cloudflare/wrangler-action` with a scoped API token; use the Cloudflare skills for anything beyond a plain deploy.
+
+**Tier 2 — managed platform.** Needs a long-running server, a real database, or a container: Railway / Fly / Vercel with a committed config file. Still no OpenTofu; the platform's config is the source of truth. Deployment stays CI-driven and reviewable.
+
+**Tier 3 — real cloud infrastructure.** EC2/VPC/IAM/RDS, multi-environment, anything with security groups or where a click-op is unrecoverable: **now** OpenTofu is correct, because at this point untracked infra IS the risk.
 
 ```bash
 mkdir -p infra/tofu
 ```
 
-- Remote state in S3
+- Remote state in S3 with locking; one state per environment
 - `tofu fmt` + `tofu validate` in lint-staged + CI
-- OIDC for AWS credentials in CI (see CI section)
+- OIDC for AWS credentials in CI, never static keys (see CI section)
+- `tofu plan` on PRs, `apply` gated on an environment approval
+
+**Moving up a tier is a decision, not a drift.** If a Tier 1 project sprouts a VPS, that's a plan-worthy change (blueprint it) — retrofitting IaC over hand-clicked resources is the expensive path.
 
 ---
 
@@ -740,7 +795,13 @@ If the package isn't eligible for trusted publishing, fall back to `NPM_TOKEN` �
 
 Default workflow `permissions:` to `contents: read`. Grant write scopes only on the specific job that needs it (and only the specific scope — e.g. `id-token: write` for OIDC, not blanket `write-all`).
 
-### OpenTofu in CI
+### Cloudflare deploy in CI (Tier 1 — the common case)
+
+- `cloudflare/wrangler-action` with a scoped API token (Workers/Pages edit only, never a global key), stored as a repo secret
+- Preview deploy on PR, production deploy on merge to main
+- `wrangler.jsonc` is reviewed like code — a binding or route change is a diff, not a console click
+
+### OpenTofu in CI (Tier 3 only)
 
 - `tofu plan` in CI for PRs (read-only preview)
 - `tofu apply` on merge to main (or manual trigger)
