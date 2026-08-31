@@ -175,7 +175,7 @@ bun add -d @biomejs/biome
 bunx biome init
 ```
 
-In `biome.json`, enable `noExplicitAny` as error:
+In `biome.json`, enable `noExplicitAny` as error, plus the complexity budgets:
 
 ```json
 {
@@ -183,11 +183,41 @@ In `biome.json`, enable `noExplicitAny` as error:
     "rules": {
       "suspicious": {
         "noExplicitAny": "error"
+      },
+      "complexity": {
+        "noExcessiveCognitiveComplexity": { "level": "error", "options": { "maxAllowedComplexity": 15 } },
+        "noExcessiveLinesPerFunction": {
+          "level": "error",
+          "options": { "maxLines": 80, "skipBlankLines": true, "skipIifes": false }
+        },
+        "noExcessiveNestedTestSuites": "error"
       }
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["**/*.test.*", "**/*.spec.*", "**/tests/**", "**/e2e/**"],
+      "linter": { "rules": { "complexity": { "noExcessiveLinesPerFunction": "off" } } }
+    }
+  ]
 }
 ```
+
+#### Complexity budgets — why these three, at these ceilings
+
+LLM-generated code trends verbose and over-branched; error-severity budgets in the local lint loop are the counterweight — an agent hits the ceiling *while writing* and refactors, instead of an audit finding slop after merge. Warnings shape nothing (agent loops react to failures).
+
+- **Cognitive complexity 15** (Sonar's S3776 spec + default, Biome's default): the understandability metric — charges nesting pyramids, forgives flat `switch`/`&&`-run dispatch. Applies everywhere, tests included (complex test logic is a real smell).
+- **80 non-blank lines per production function**: length is the *most* documented LLM-slop signature (more than branching). `skipBlankLines: true` is anti-gaming — counting blanks would reward deleting whitespace instead of shortening. Tests are exempt (declarative bodies are legitimately long); adjust the override globs to the repo's test taxonomy.
+- **`noExcessiveNestedTestSuites`** (depth 5): free guard against describe-pyramids.
+
+Deliberately NOT added: a cyclomatic gate (near-total overlap with cognitive — it measures testability, over-charges readable dispatch, and needs a second linter), max-params (API-shape churn), Maintainability Index (unexplained 1994 coefficients, no maintained JS tooling), dashboards/SonarQube (slower than the edit loop).
+
+Also state the budgets in the project's CLAUDE.md — the cheapest enforcement ring is the agent never exceeding them in the first draft:
+
+> Complexity budgets: cognitive ≤ 15 everywhere; ≤ 80 non-blank lines per production function. Never suppress complexity rules in new code.
+
+**Retrofitting an existing repo** (greenfield needs none of this): don't weaken the ceilings and don't fix everything up front — generate function-scoped `// biome-ignore lint/complexity/<rule>: baseline YYYY-MM (score N) — refactor when touched` directives from `biome lint --reporter=json` output for current offenders, plus a checked-in shrink-only manifest (per-rule × per-file directive counts + the pinned Biome version) enforced by a small test: counts may only decrease, and a Biome version bump forces deliberate regeneration (implementations drift — scores are not portable across tools or versions). New code is gated at full strictness from day one; the backlog burns down when touched.
 
 ### 5. Commit hygiene
 
