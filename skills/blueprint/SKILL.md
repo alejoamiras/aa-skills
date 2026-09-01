@@ -445,7 +445,7 @@ These live IN the ELI5 companion (the Artifact, or the fallback `eli5.html`) as 
 Replace `<test>` and `<lint>` with the project's actual commands (e.g. `bun run test` / `bun run lint:actions`, `pnpm test` / `pnpm lint`, `cargo test` / `cargo clippy`, `go test ./...` / `golangci-lint run`):
 
 ```
-/goal All phases marked ✓ in plan.md (the per-phase headers in the file, not just the chat), each ✓ backed by its phase's validation gate (as defined in plan.md) reported passing in the transcript; for each phase the agent has printed `LESSONS_FILE=implementations-plan/<plan>/lessons/phase-N.md` in the transcript; `/code-review` complete at the plan's stated level with findings applied and committed (once per arc on multi-arc plans; skipped only where plan.md says the diff was too trivial to warrant it); the codex fix loop converged for EVERY reviewed diff — each arc at its boundary plus the final cross-arc pass on multi-arc plans, the whole diff on single-arc — each convergence evidenced by a resumed codex pass reporting no new material findings, quoted in the transcript; the Delivery section's PR topology exists on GitHub, created only AFTER all loops converged (`gh stack view` or `gh pr view` output in the transcript); `<test>` and `<lint>` both report exit 0 in the transcript.
+/goal All phases marked ✓ in plan.md (the per-phase headers in the file — not the chat, not the task list), each ✓ backed by its phase's validation gate (as defined in plan.md) reported passing in the transcript; for each phase the agent has printed `LESSONS_FILE=implementations-plan/<plan>/lessons/phase-N.md` in the transcript; `/code-review` complete at the plan's stated level with findings applied and committed (once per arc on multi-arc plans; skipped only where plan.md says the diff was too trivial to warrant it); the codex fix loop converged for EVERY reviewed diff — each arc at its boundary plus the final cross-arc pass on multi-arc plans, the whole diff on single-arc — each convergence evidenced by a resumed codex pass reporting no new material findings, quoted in the transcript; the Delivery section's PR topology exists on GitHub, created only AFTER all loops converged (`gh stack view` or `gh pr view` output in the transcript); `<test>` and `<lint>` both report exit 0 in the transcript.
 ```
 
 ### `/loop` template
@@ -454,7 +454,7 @@ Replace `<test>` and `<lint>` with the project's actual commands (e.g. `bun run 
 
 ```
 /loop 15m Drive implementations-plan/<plan> forward. Never idle waiting for my input. Each firing:
-1. **Reality check**: read implementations-plan/<plan>/plan.md and lessons/ (authoritative state — not the chat); run `git status` and `git log --oneline -5`. If a PR exists, `gh pr view --json statusCheckRollup` (no --watch; multi-arc plans: `gh stack view` for the whole stack). Without a PR but with CI configured, `gh run list --branch $(git branch --show-current) --limit 1 --json status,databaseId`.
+1. **Reality check**: read implementations-plan/<plan>/plan.md and lessons/ (authoritative state — not the chat); native task list empty (fresh session)? rebuild it from plan.md, one task per remaining step; run `git status` and `git log --oneline -5`. If a PR exists, `gh pr view --json statusCheckRollup` (no --watch; multi-arc plans: `gh stack view` for the whole stack). Without a PR but with CI configured, `gh run list --branch $(git branch --show-current) --limit 1 --json status,databaseId`.
 2. **Waiting on CI is fine** — confirm it's actually progressing (`gh run watch <run-id>` up to 10 minutes; queued or stuck past that → inspect logs, log it as blocked in lessons). Use the wait productively: review the diff, prep the next phase, strengthen tests. Don't start work that would conflict with the in-flight change.
 3. **No task in hand?** Pick the next pending step from plan.md and start it. After each meaningful edit, run the fast validation layers (`<lint>` + `<test>` for the touched packages) — catch mistakes in-step, not phases later. Then commit → push (multi-arc plans: `gh stack push`; `gh stack sync` if trunk or a lower arc moved).
 4. **Stuck, or facing a decision you'd normally bring to me?** Don't wait. Call `/codex xhigh` with full context and go back and forth until you two reach a defensible decision, then act on it. Log every consult + verdict in lessons/phase-N.md. Exception — hard limits stay hard: never merge to main or release branches, never publish or deploy, never expand scope beyond plan.md; if the decision requires crossing one, surface it and hold.
@@ -462,7 +462,7 @@ Replace `<test>` and `<lint>` with the project's actual commands (e.g. `bun run 
 6. **Phase green?** "Green" means THE PHASE'S VALIDATION GATE as written in plan.md passes (commands + pass criteria — not generic vibes). Run the full gate, paste the result, mark ✓ in plan.md, file the lessons entry, print `LESSONS_FILE=implementations-plan/<plan>/lessons/phase-N.md` in the transcript, advance to the next phase. Arc boundary crossed (per plan.md's Delivery section)? Run the arc's quality loop FIRST — `/code-review <level> --fix` on the arc diff (level per plan.md; never `max` unless I asked) → commit separately → codex loop with the arc map and the plan's no-over-engineering + comment-quality rules until a round yields nothing material — THEN `gh stack add <next-arc-branch>` before the next arc's work.
 7. **All phases ✓ in plan.md?** Close out per plan.md's Post-implementation section. Single-arc: run the full quality loop now — `/code-review <level> --fix` (level per plan.md; never `max` unless I asked) → skim applied fixes → commit separately (so code-review changes stay first-class) → codex audit (`/codex xhigh`, net diff from plan baseline + summary of code-review commits + adversarial / security ask + the plan's no-over-engineering + comment-quality rules) → apply accepted fixes, commit, then RESUME the same codex session with the fix diff for a re-review — loop until a round yields no new material findings (still churning after 3 rounds → surface and stop). Multi-arc: every arc already looped at its boundary (step 6) — run only the final cross-arc integration pass: FRESH codex session over the net diff + code-review commit summaries + cross-arc ask (seams between arcs, duplication across arcs, plan drift) + the no-over-engineering + comment-quality rules, same loop-until-clean. Then Delivery per plan.md — the FIRST time any PR is opened: `gh pr create` (single-arc) or `gh stack sync` then `gh stack submit --auto` + `gh pr edit` bodies (multi-arc), then `gh pr checks --watch`. Then write the wrap-up report: what shipped, every contentious decision codex and I debated — each with ELI5 context (what the question was, the options, why we picked ours) — and open items. Surface and stop.
 
-Keep the ASCII checklist visible each firing (human readability only; plan.md is the source of truth).
+Keep the native task list current (`TaskUpdate` as steps start/finish; plan.md stays the source of truth). No task tools in this session → print the step checklist only when a step changes state.
 ```
 
 Adjust both templates to match the specific plan (phase names, quality calibration) and project (concrete lint/test commands).
@@ -471,7 +471,14 @@ Adjust both templates to match the specific plan (phase names, quality calibrati
 
 ## Status visibility (throughout)
 
-Maintain an ASCII to-do list in your responses showing current phase, done / pending. The ASCII checklist is for HUMAN readability only; it is NOT authoritative state (repo artifacts are). The `/goal` evaluator should check plan.md, not the chat checklist.
+Track protocol progress in the **native task list** (`TaskCreate` / `TaskUpdate`), not a checklist re-typed into every response: the harness renders it (spinner text + `ctrl+t` panel), nothing is re-printed per turn, and it survives compaction and `claude --continue` (stored per session under `~/.claude/tasks/<session-id>/`).
+
+- Create the tasks once the tier is set (0.5): one per step below, adjusted to the tier, with 0 / 0.4 / 0.5 backfilled as completed. At approval add one per implementation phase; on multi-arc plans also one per arc quality loop, one for the cross-arc pass, one for Delivery. Chain them with `blockedBy` so `TaskList` answers "what's next".
+- `in_progress` on entry; `completed` only when the step's exit condition holds — a phase's task completes when its validation gate passes and plan.md carries the ✓, never before.
+- **plan.md stays authoritative.** The list is per session: a fresh implementing session rebuilds it from plan.md's phase headers (the `/loop` template does this in its reality check). The `/goal` evaluator checks plan.md, never the task list.
+- No task tools in the session? They're off by default on Opus 4.8, Sonnet 5, Fable 5 and newer since Claude Code 2.1.233 (`CLAUDE_CODE_ENABLE_TODO_TOOLS=1`, e.g. in `settings.json` → `env`, restores them). Don't emulate them in prose every turn: print the step list below only when a step changes state.
+
+Canonical steps (adjust per tier):
 
 ```
 [✓] 0. Clarifying questions
@@ -488,8 +495,6 @@ Maintain an ASCII to-do list in your responses showing current phase, done / pen
 [ ] 8. Final cross-arc integration pass (multi-arc only)
 [ ] 9. Delivery: PRs created (only now), checks green
 ```
-
-Adjust steps per the tier you're running.
 
 ---
 
