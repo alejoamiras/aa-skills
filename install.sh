@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Symlinks this repo's skills, bin/ CLIs, and (from the private submodule)
-# CLAUDE.md + the status line into ~/.claude, and wires the status line into
-# settings.json. Idempotent: existing non-symlink targets are moved to a
-# timestamped backup dir first.
+# CLAUDE.md + the status line into ~/.claude, and overlays the managed settings
+# keys onto ~/.claude/settings.json. Idempotent: existing non-symlink targets
+# are moved to a timestamped backup dir first.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,29 +53,54 @@ else
   echo "skip    CLAUDE.md (private submodule not initialized — fine for non-owner clones)"
 fi
 
-# Personal status line (private submodule too): symlink the script AND point
-# settings.json at it — both are needed for it to render. Idempotent.
+# Personal status line (private submodule too): symlink the script; the
+# settings.json pointer at it ships in settings.managed.json below.
 if [ -f "${REPO_DIR}/claude/statusline.sh" ]; then
   chmod +x "${REPO_DIR}/claude/statusline.sh"
   link "${REPO_DIR}/claude/statusline.sh" "${CLAUDE_DIR}/statusline.sh"
-  SETTINGS="${CLAUDE_DIR}/settings.json"
-  if command -v jq > /dev/null 2>&1; then
-    current="$(jq -r '.statusLine.command // ""' "${SETTINGS}" 2>/dev/null || echo "")"
-    # Literal comparison: this IS the string stored in settings.json (Claude Code
-    # expands the ~ at runtime, not us), so the tilde must stay unexpanded here.
-    # shellcheck disable=SC2088
-    if [ "${current}" = "~/.claude/statusline.sh" ]; then
-      echo "ok      settings.json statusLine"
-    else
-      [ -f "${SETTINGS}" ] || echo '{}' > "${SETTINGS}"
-      mkdir -p "${BACKUP_DIR}" && cp "${SETTINGS}" "${BACKUP_DIR}/settings.json" 2>/dev/null || true
-      tmp="$(mktemp)"
-      jq '.statusLine = {type: "command", command: "~/.claude/statusline.sh", refreshInterval: 30}' \
-        "${SETTINGS}" > "${tmp}" && mv "${tmp}" "${SETTINGS}"
-      echo "wire    settings.json statusLine -> ~/.claude/statusline.sh"
-    fi
+fi
+
+# Managed settings keys (private submodule): overlay claude/settings.managed.json
+# onto ~/.claude/settings.json. Managed keys win; everything else (permission
+# rules, model, plugins) stays machine-local. Overlay, not sync: a key dropped
+# from the managed file keeps its last installed value until removed by hand.
+# Claude Code rewrites this file itself (/model, /config, "always allow"), so
+# run with sessions closed to avoid racing one of those writes.
+MANAGED="${REPO_DIR}/claude/settings.managed.json"
+SETTINGS="${CLAUDE_DIR}/settings.json"
+if [ ! -f "${MANAGED}" ]; then
+  echo "skip    settings.managed.json (private submodule not initialized)"
+elif ! command -v jq > /dev/null 2>&1; then
+  echo "note    jq not found — merge claude/settings.managed.json into ~/.claude/settings.json yourself"
+elif [ -L "${SETTINGS}" ] || { [ -e "${SETTINGS}" ] && [ ! -f "${SETTINGS}" ]; }; then
+  echo "error   ${SETTINGS} is not a regular file — refusing to replace it" >&2
+  exit 1
+else
+  for f in "${MANAGED}" "${SETTINGS}"; do
+    [ -e "${f}" ] || continue
+    jq -e -s 'length == 1 and (.[0] | type == "object")' "${f}" > /dev/null \
+      || { echo "error   ${f}: expected exactly one JSON object" >&2; exit 1; }
+  done
+  if [ -f "${SETTINGS}" ]; then
+    merged="$(jq --slurpfile m "${MANAGED}" '. * $m[0]' "${SETTINGS}")"
+    current="$(jq -S . "${SETTINGS}")"
   else
-    echo 'note    jq not found — add "statusLine":{"type":"command","command":"~/.claude/statusline.sh"} to settings.json yourself'
+    merged="$(jq -n --slurpfile m "${MANAGED}" '$m[0]')"
+    current='{}'
+  fi
+  if [ "${current}" = "$(printf '%s\n' "${merged}" | jq -S .)" ]; then
+    echo "ok      settings.json managed keys"
+  else
+    if [ -f "${SETTINGS}" ]; then
+      mkdir -p "${BACKUP_DIR}"
+      cp "${SETTINGS}" "${BACKUP_DIR}/settings.json"
+    fi
+    tmp="$(mktemp "${CLAUDE_DIR}/settings.json.XXXXXX")"
+    trap 'rm -f "${tmp}"' EXIT
+    printf '%s\n' "${merged}" > "${tmp}"
+    mv "${tmp}" "${SETTINGS}"
+    trap - EXIT
+    echo "merge   settings.json <- claude/settings.managed.json"
   fi
 fi
 
