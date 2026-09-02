@@ -385,10 +385,13 @@ cmd_done() {
 
   # Whole lifecycle under one lock: re-resolve the row, verify everything
   # against git (never trust manifest fields for destructive ops), remove,
-  # then drop the row. All ops are local + fast.
-  lock; ensure_manifest; prune_dead_rows
+  # then drop the row. All ops are local + fast. Resolve BEFORE pruning: a
+  # worktree already removed by hand must still resolve, so the "already
+  # gone" branch below drops its row instead of dying "unknown workspace".
+  lock; ensure_manifest
   local slug path suffix root live_branch expected_branch
   resolve_row "$arg"
+  prune_dead_rows
   slug="$RESOLVED_SLUG"
   path="$(field_of "$RESOLVED_ROW" 7)"
   expected_branch="worktree-$slug"
