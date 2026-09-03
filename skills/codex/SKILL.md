@@ -1,6 +1,6 @@
 ---
 name: codex
-description: Invokes the Codex CLI to get a second opinion from a different model family on a plan, design, analysis, or piece of code. Use ONLY when the user explicitly asks to involve codex (e.g. "ask codex", "have codex review", "get codex's take", "check with codex"). Does not invoke proactively.
+description: Invokes the Codex CLI for two things. (1) A second opinion from a different model family on a plan, design, analysis, or piece of code — ONLY when the user explicitly asks to involve codex ("ask codex", "have codex review", "get codex's take", "check with codex"). (2) Raster image generation or editing (PNG/JPEG — icons, hero images, banners, mockups, textures, sprites, photos) through Codex's built-in image_gen tool (gpt-image-2 on the ChatGPT plan, no API key) — whenever the user asks to generate, render, draw or edit an image ("generate an image", "make me a banner", "draw a…", "use codex to create a picture"). Does not invoke proactively.
 ---
 
 # Ask Codex for Review
@@ -13,10 +13,11 @@ Use the `codex` CLI to get a second opinion from a different model family. Codex
 
 ## How invocation works (read this first)
 
-This skill ships with two helper scripts under `~/.claude/skills/codex/scripts/`:
+This skill ships with three helper scripts under `~/.claude/skills/codex/scripts/`:
 
 - `run-codex.sh` — starts a fresh codex session
 - `resume-codex.sh` — appends a follow-up to an existing session
+- `image-codex.sh` — generates or edits raster images via Codex's built-in `image_gen` tool (see "Generating images" below)
 
 **Why scripts and not raw `codex exec` calls?** The Bash tool runs each command in a fresh shell — environment variables and shell state do **not** persist between calls. A multi-step pattern like "mktemp a dir, run codex, grep the log, resume later" is impossible to do safely across separate Bash calls without a global file. Earlier versions of this skill tried, and the workaround (fixed-path files like `/tmp/codex-dir-current.txt`) caused cross-contamination between concurrent Claude sessions.
 
@@ -144,6 +145,27 @@ Don't just relay codex's response to the user. Do your own pass:
 - **Resume rather than start over**: if you have a specific pushback or clarifying question, run `resume-codex.sh` with the saved session id instead of opening a new session.
 - **Summarize for the user**: a short digest ("codex flagged X and Y, I think X is valid and Y is a misread because...") is more useful than pasting the raw response. Offer the `RESPONSE_FILE` path in case they want to read it directly.
 
+## Generating images
+
+Codex CLI (≥ 0.123, verified on 0.150.1) ships a built-in `image_gen` tool backed by **gpt-image-2**, billed to the ChatGPT account — no `OPENAI_API_KEY`, no Images API credits. `codex exec` reaches it the same way the TUI does, which is what `image-codex.sh` wraps.
+
+```bash
+~/.claude/skills/codex/scripts/image-codex.sh <prompt-file> <out-dir> [effort] [model] [ref-image ...]
+```
+
+1. **Write the spec to a `mktemp` file** (`mktemp -t codex-image-XXXX`), one paragraph per asset: subject; style (photo / flat illustration / 3D render / pixel art …); size or aspect ratio; any exact text **quoted verbatim**; an avoid-list; and the filename to save as (`hero.png`, `favicon-512.png`). Generic prompts get worse images than specific ones — say what the image is *for*.
+2. **Pick `out-dir` deliberately.** Previews and one-offs go to the session scratchpad. Only write into a repository when the user named the destination (asset dir, `public/`, docs images); the sandbox is `workspace-write` on that directory, so codex can touch nothing else.
+3. **Run it.** Defaults are `effort=low` and `model=gpt-5.6-luna` — the reasoning model only orchestrates the image tool, so pay the fast tier. Override the model with a 4th argument or `CODEX_IMAGE_MODEL`. Budget 1–2 minutes per image. Run in the background when several assets are requested (each asset is its own `image_gen` call inside one session).
+4. **Read the trailer** — same four lines as `run-codex.sh` plus `OUT_DIR=` and `IMAGE_FILES=` (`;`-separated absolute paths, verified to exist). Exit 3 = codex says image generation is unavailable (usage limit, policy refusal); exit 4 = it finished without saving anything — read `RESPONSE_FILE` before retrying.
+5. **Look at every image with the `Read` tool before handing it over** and check it against the spec (subject, text accuracy, avoid-list). Off-spec → resume the session with `resume-codex.sh` and ONE targeted change ("same image, replace the blue background with white"), not a rewritten prompt.
+6. **Report** the saved paths and the session id, like any other codex consult.
+
+**Editing an existing image** — pass it as a trailing `ref-image` argument (repeatable). The script attaches it with `codex exec -i`, which is the only way the built-in tool can see a local file; state in the prompt which attachment is the edit target and which are style references, and ask to "preserve everything except …".
+
+**Know the tool's shape.** Output dimensions are approximate (a "1024×1024" ask came back 1254×1254) — resize locally (`sips`, `Bun.Image`) when exact pixels matter. Transparent backgrounds: ask for one explicitly and keep the PNG's alpha. The tool renders dense text well (vendor claim, spot-check it). Codex keeps the original of every generation under `~/.codex/generated_images/<session-id>/` (~0.8 MB each) in addition to the copy in `out-dir` — prune that directory occasionally. Never use the skill's `scripts/image_gen.py` CLI fallback: it needs `OPENAI_API_KEY`, and the standing rule is no API secrets on this machine.
+
+**Not for**: SVG icons that should match an existing vector system, diagrams, charts, or anything better produced as code (HTML/CSS, canvas, `artifact-diagramming`). Those stay deterministic and reviewable; a bitmap is the wrong artifact.
+
 ## Hard rules
 
 These exist because past sessions invented unsafe workarounds. Don't.
@@ -152,6 +174,6 @@ These exist because past sessions invented unsafe workarounds. Don't.
 
 2. **Never use `codex exec resume --last`.** It picks the most recent session in the current cwd globally — across all Claude sessions, not just yours. Use the `SESSION_ID` you captured from `run-codex.sh`. If you don't have it but you do have CODEX_DIR, pass `""` as the first arg to `resume-codex.sh` (it will read the id from `$CODEX_DIR/session_id`). If you have neither, tell the user and start a new session rather than gambling on `--last`.
 
-3. **Never invoke `codex exec` directly from the Bash tool.** Use the helper scripts. Direct invocation forces you back into the multi-call mktemp/grep dance that caused the original cross-contamination bug.
+3. **Never invoke `codex exec` directly from the Bash tool.** Use the helper scripts (`run-codex.sh`, `resume-codex.sh`, `image-codex.sh`). Direct invocation forces you back into the multi-call mktemp/grep dance that caused the original cross-contamination bug.
 
 4. **Don't override the model unless the user explicitly asks** — the scripts default to `gpt-5.6-sol`; a user-requested override goes through the fifth positional argument (or `CODEX_MODEL`), never by editing the scripts ad hoc.
