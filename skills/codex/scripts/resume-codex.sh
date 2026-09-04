@@ -11,8 +11,8 @@
 #                are supplied, the script verifies they match and refuses to run
 #                if they do not. If codex-dir is omitted, a fresh dir is created.
 #   effort       Optional. Defaults to xhigh.
-#   model        Optional. Defaults to $CODEX_MODEL, else gpt-5.6-sol.
-#                (See run-codex.sh header; verified still current 2026-08-03.
+#   model        Optional. Defaults to $CODEX_MODEL, else gpt-6-astra.
+#                (See run-codex.sh header; verified current 2026-09-04.
 #                Pass a 5th arg or $CODEX_MODEL to override.)
 #
 # Output: same structured trailer as run-codex.sh.
@@ -26,7 +26,7 @@ SID="${1-}"
 PROMPT_FILE="${2:?prompt file required}"
 CODEX_DIR="${3:-}"
 EFFORT="${4:-xhigh}"
-MODEL="${5:-${CODEX_MODEL:-gpt-5.6-sol}}"
+MODEL="${5:-${CODEX_MODEL:-gpt-6-astra}}"
 MODEL_ARGS=()
 [[ -n "$MODEL" ]] && MODEL_ARGS=(-m "$MODEL")
 

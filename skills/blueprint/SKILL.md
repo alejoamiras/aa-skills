@@ -31,7 +31,7 @@ Blueprint's ceremony is the plan's rigor, NOT agent headcount. Subagent fan-out 
 
 **Announce the budget shape** with the tier recommendation (0.5): "recon: 2 agents; code-review: off (per your Phase 0 answer)" — so the user can dial it before spend happens, not after. If the user gives a budget instruction ("keep it cheap", "go wide"), it overrides these defaults for the whole run; record it in `plan.md` next to `eli5_mode`.
 
-**Model note — Fable → Opus fallback.** The "fable" subagent is the top-tier Claude planning/audit leg that runs in parallel with Codex in every tier. Run it on **Fable** when available; **while Fable is deactivated, run it on Opus 4.8 (1M context)** (`Agent` tool: `model: 'opus'`). "fable" names the *role* — the independent top-tier Claude reviewer alongside Codex — not a hard model requirement, so `audit-fable.md` and the "codex + fable" terminology stay as-is regardless of which model fills the role.
+**Model note — the two review legs (current 2026-09-04).** The "fable" subagent is the top-tier Claude planning/audit leg that runs in parallel with Codex in every tier. Run it on **Fable 5.1** when available (`Agent` tool: `model: 'fable'`); **while Fable is deactivated, run it on Opus 5 (1M context)** (`model: 'opus'`). "fable" names the *role* — the independent top-tier Claude reviewer alongside Codex — not a hard model requirement, so `audit-fable.md` and the "codex + fable" terminology stay as-is regardless of which model fills the role. The **Codex leg runs on GPT-6 Astra** — the codex skill's default model — at `xhigh`; every `/codex xhigh` in this skill (plan audits, the post-implementation fix loop, the cross-arc pass) means Astra unless the user names another model.
 
 ---
 
@@ -136,7 +136,7 @@ Blueprint work lives in its own git worktree, named after the plan. Home the ses
 2. Draft `plan.md` (main agent). **Then generate one competing outline as an alternative approach** (main agent, different angle: cheapest-first vs safest-first, monolithic vs split, etc.). This forces actual plan-space search, not just one author + reviews. Both go into the audit.
 3. **Dual audit in parallel**:
    - Codex via `/codex xhigh` with explicit adversarial / security / assumption-attack asks. Codex sees BOTH outlines.
-   - Fable subagent via the `Agent` tool, configured as a top-tier Claude subagent specialized for architectural planning (today: `subagent_type: 'Plan'`, `model: 'fable'`, fallback `model: 'opus'` (Opus 4.8 1M) while Fable is unavailable; capability matters more than the literal name). Same asks. Sees both outlines.
+   - Fable subagent via the `Agent` tool, configured as a top-tier Claude subagent specialized for architectural planning (today: `subagent_type: 'Plan'`, `model: 'fable'`, fallback `model: 'opus'` (Opus 5, 1M) while Fable is unavailable; capability matters more than the literal name). Same asks. Sees both outlines.
 4. Iterate on feedback; produce a **decision ledger**: which outline was chosen, what alternatives were rejected and why, what's still disputed.
 5. **Final fresh-context codex pass**: open a NEW codex session (not a resume). Provide the **consolidated plan, the decision ledger (rejected alternatives + unresolved disagreements)**, and the adversarial + assumption-attack asks. Fresh codex now has the full decision trail and can genuinely re-evaluate, not just review the surface again.
 6. Generate the ELI5 companion — Artifact (primary) or `eli5.html` fallback — with DRAFT `/goal` + `/loop` embedded.
@@ -150,7 +150,7 @@ Blueprint work lives in its own git worktree, named after the plan. Home the ses
 2. **Three independent plans in parallel** (different perspectives, separate context):
    - **Main agent**: drafts against the clarifying answers.
    - **Codex**: invoked via `/codex xhigh` with clarifying answers + task statement + explicit adversarial / security / assumption-attack asks.
-   - **Fable subagent** (top-tier Claude subagent specialized for architectural planning; today via `subagent_type: 'Plan'`, `model: 'fable'`, fallback `model: 'opus'` (Opus 4.8 1M) while Fable is unavailable): given clarifying answers + adversarial / security / assumption-attack asks.
+   - **Fable subagent** (top-tier Claude subagent specialized for architectural planning; today via `subagent_type: 'Plan'`, `model: 'fable'`, fallback `model: 'opus'` (Opus 5, 1M) while Fable is unavailable): given clarifying answers + adversarial / security / assumption-attack asks.
 3. **Consolidate** (by main): take the strongest pieces, verify factual claims against the repo, produce a **decision ledger** documenting which decisions came from which source, which were rejected and why, what's still disputed.
 4. **Contradiction-check** (NEW): send the consolidated plan + the decision ledger back to BOTH codex and the fable subagent for one round of contradiction-checking. They look for: choices that contradict each other across phases, rejected alternatives that should have been kept, disputed items that were silently resolved. This catches main's consolidation blind spots before the gate.
 5. **Double audit** on the contradiction-checked plan:
@@ -477,7 +477,7 @@ Track protocol progress in the **native task list** (`TaskCreate` / `TaskUpdate`
 - Create the tasks once the tier is set (0.5): one per step below, adjusted to the tier, with 0 / 0.4 / 0.5 backfilled as completed. At approval add one per implementation phase; on multi-arc plans also one per arc quality loop, one for the cross-arc pass, one for Delivery. Chain them with `blockedBy` so `TaskList` answers "what's next".
 - `in_progress` on entry; `completed` only when the step's exit condition holds — a phase's task completes when its validation gate passes and plan.md carries the ✓, never before.
 - **plan.md stays authoritative.** The list is per session: a fresh implementing session rebuilds it from plan.md's phase headers (the `/loop` template does this in its reality check). The `/goal` evaluator checks plan.md, never the task list.
-- No task tools in the session? They're off by default on Opus 4.8, Sonnet 5, Fable 5 and newer since Claude Code 2.1.233 (`CLAUDE_CODE_ENABLE_TODO_TOOLS=1`, e.g. in `settings.json` → `env`, restores them). Don't emulate them in prose every turn: print the step list below only when a step changes state.
+- No task tools in the session? They're off by default on Opus 4.8+, Sonnet 5, Fable 5/5.1 and newer since Claude Code 2.1.233 (`CLAUDE_CODE_ENABLE_TODO_TOOLS=1`, e.g. in `settings.json` → `env`, restores them). Don't emulate them in prose every turn: print the step list below only when a step changes state.
 
 Canonical steps (adjust per tier):
 

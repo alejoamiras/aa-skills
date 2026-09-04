@@ -50,7 +50,7 @@ Effort scales **agent intelligence and depth, never phase composition** — all 
 
 The coordinator deliberately switches family at `max`+: the map phase becomes Claude-heavy there, so a Codex judge at the reduce stage catches what Anthropic-family models share as blind spots.
 
-> **Model availability:** Fable is the intended top-tier model in the table above. While Fable is deactivated, runs substitute **Opus 4.8 (1M context)** everywhere the table says Fable.
+> **Model availability:** Fable (today Fable 5.1) is the intended top-tier model in the table above. While Fable is deactivated, runs substitute **Opus 5 (1M context)** everywhere the table says Fable. The Codex legs run on **GPT-6 Astra** (the codex skill's default).
 
 ## Severity, per focus
 

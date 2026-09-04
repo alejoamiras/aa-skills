@@ -74,7 +74,7 @@ This prevents one bad map from poisoning all downstream phases on large repos.
 
 Save to `audit/<focus>/<run-id>/raw/repo-map.md` (flat) or `audit/<focus>/<run-id>/raw/repo-map/<package>.md` (hierarchical, per package).
 
-Effort scales which model is used (Haiku at `low`, Sonnet at `medium`+, Fable at `max`+). **While Fable is deactivated, use Opus 4.8 (1M context) in its place** — see the Model note under Effort knob.
+Effort scales which model is used (Haiku at `low`, Sonnet at `medium`+, Fable 5.1 at `max`+). **While Fable is deactivated, use Opus 5 (1M context) in its place** — see the Model note under Effort knob. The Codex legs run on GPT-6 Astra (the codex skill's default).
 
 ### Phase 2: Map (parallel agents per cluster)
 
@@ -460,7 +460,7 @@ DO NOT FLAG:
 
 The effort knob scales agent intelligence and depth, NOT phase composition. All phases run at every level (Codex is never skipped, even at `low`).
 
-**Model note — Fable → Opus fallback.** This ladder names **Fable** as the top-tier Claude model (Phase 1 map and Phase 2 cluster agents at `max`/`ultra`; the Phase 3 coordinator at `high`). **Fable is currently deactivated — wherever this skill says "Fable", substitute Opus 4.8 (1M context)** (`Agent` tool: `model: 'opus'`) until Fable returns, then prefer Fable again. This swaps only the concrete model; the map-reduce shape, per-cluster agent counts, and the cross-family Codex coordination (footnote ¹) are unchanged. The Codex legs are unaffected.
+**Model note — Fable → Opus fallback (current 2026-09-04).** This ladder names **Fable** (today Fable 5.1) as the top-tier Claude model (Phase 1 map and Phase 2 cluster agents at `max`/`ultra`; the Phase 3 coordinator at `high`). Run it on Fable when available (`Agent` tool: `model: 'fable'`); **whenever Fable is deactivated, substitute Opus 5 (1M context)** (`model: 'opus'`) wherever this skill says "Fable", then prefer Fable again once it returns. This swaps only the concrete model; the map-reduce shape, per-cluster agent counts, and the cross-family Codex coordination (footnote ¹) are unchanged. The Codex legs run on **GPT-6 Astra** (the codex skill's default) at the effort the table states.
 
 | Effort | Phase 1 model | Phase 2 agents per cluster | Phase 2.5 cross-rebuttal | Phase 3 coordinator | Phase 4 verifier depth | Wall-clock (rough, 10 clusters) |
 |--------|---------------|----------------------------|--------------------------|---------------------|-------------------------|----------------------------------|

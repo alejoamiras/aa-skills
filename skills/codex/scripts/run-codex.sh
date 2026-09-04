@@ -6,12 +6,13 @@
 #   cwd          Optional. Defaults to $PWD. Passed to codex via -C.
 #   effort       Optional. Defaults to xhigh. Passed via -c model_reasoning_effort=...
 #   sandbox      Optional. Defaults to read-only. Passed via --sandbox.
-#   model        Optional. Defaults to $CODEX_MODEL, else gpt-5.6-sol.
-#                (gpt-5.6-sol became the default 2026-07-11: it works on
-#                ChatGPT-account auth, unlike the earlier-blocked gpt-5.6.
-#                Verified still the flagship 2026-08-03; family variants
-#                gpt-5.6-terra / gpt-5.6-luna are the valid overrides.
-#                Pass a 5th arg or set $CODEX_MODEL to override per call.)
+#   model        Optional. Defaults to $CODEX_MODEL, else gpt-6-astra.
+#                (gpt-6-astra became the default 2026-09-04: OpenAI's
+#                flagship since 2026-09-03 (Codex CLI >= 0.153.1), runs on
+#                ChatGPT-account auth, verified end to end at xhigh. The
+#                GPT-5.6 family — gpt-5.6-sol / -terra / -luna — stays
+#                valid as cheaper overrides. Pass a 5th arg or set
+#                $CODEX_MODEL to override per call.)
 #
 # Output: human-readable progress on stderr, codex log redirected to a file.
 # The last 4 lines of stdout are guaranteed to be:
@@ -30,7 +31,7 @@ PROMPT_FILE="${1:?prompt file required}"
 CWD="${2:-$PWD}"
 EFFORT="${3:-xhigh}"
 SANDBOX="${4:-read-only}"
-MODEL="${5:-${CODEX_MODEL:-gpt-5.6-sol}}"
+MODEL="${5:-${CODEX_MODEL:-gpt-6-astra}}"
 MODEL_ARGS=()
 [[ -n "$MODEL" ]] && MODEL_ARGS=(-m "$MODEL")
 

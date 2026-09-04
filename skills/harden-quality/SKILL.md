@@ -284,7 +284,7 @@ DO NOT FLAG:
 
 The effort knob scales agent intelligence and depth, NOT phase composition. All phases run at every level (Codex is never skipped, even at `low`).
 
-**Model note.** This ladder names **Fable** as the top-tier Claude model (Phase 1 map and Phase 2 cluster agents at `max`/`ultra`; the Phase 3 coordinator at `high`). Run it on Fable when available (`Agent` tool: `model: 'fable'`); fall back to Opus 4.8 (1M context) (`model: 'opus'`) only when Fable is unavailable. This skill loads a single audit dimension (maintainability only), so Fable runs every leg without falling back — that is the whole reason it exists as a separate skill. The Codex legs are unaffected either way.
+**Model note.** This ladder names **Fable** as the top-tier Claude model (Phase 1 map and Phase 2 cluster agents at `max`/`ultra`; the Phase 3 coordinator at `high`). Run it on Fable (today Fable 5.1) when available (`Agent` tool: `model: 'fable'`); fall back to Opus 5 (1M context) (`model: 'opus'`) only when Fable is unavailable. This skill loads a single audit dimension (maintainability only), so Fable runs every leg without falling back — that is the whole reason it exists as a separate skill. The Codex legs run on GPT-6 Astra (the codex skill's default) either way.
 
 | Effort | Phase 1 model | Phase 2 agents per cluster | Phase 2.5 cross-rebuttal | Phase 3 coordinator | Phase 4 verifier depth | Wall-clock (rough, 10 clusters) |
 |--------|---------------|----------------------------|--------------------------|---------------------|-------------------------|----------------------------------|
