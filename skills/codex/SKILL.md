@@ -9,6 +9,8 @@ Use the `codex` CLI to get a second opinion from a different model family. Codex
 
 **Only invoke this skill when the user explicitly asks for codex.** Do not reach for it on your own initiative.
 
+**This is the foreign-reviewer leg for a Claude Code driver.** Its mirror is the `claude` skill (`run-claude.sh` / `resume-claude.sh`, same positional contract and trailer), which a Codex-driven session uses to consult Claude. Protocols such as blueprint name the role, not the CLI — whichever harness drives, the review comes from the other family.
+
 **Codex is not an oracle.** It can be confidently wrong, miss context, hallucinate APIs, or misread the code. Treat its response as input to your own reasoning, not a verdict. Be critical: if codex disagrees with you, weigh the argument on its merits; if codex agrees, don't assume that confirms your position.
 
 ## How invocation works (read this first)
