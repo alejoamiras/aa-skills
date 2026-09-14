@@ -50,6 +50,21 @@ for skill in "${REPO_DIR}"/skills/*/; do
   link "${REPO_DIR}/skills/${name}" "${AGENTS_DIR}/skills/${name}"
 done
 
+# A skill removed from the repo leaves a dangling link in each discovery root;
+# both harnesses would keep listing it. Prune links that point into this repo
+# and no longer resolve. Links to anything else are left alone.
+for root in "${CLAUDE_DIR}/skills" "${AGENTS_DIR}/skills"; do
+  for entry in "${root}"/*; do
+    [ -L "${entry}" ] || continue
+    target="$(readlink "${entry}")"
+    case "${target}" in
+      "${REPO_DIR}/skills/"*|"${REPO_REAL}/skills/"*)
+        [ -e "${entry}" ] || { rm "${entry}"; echo "prune   ${entry} (skill removed from repo)"; }
+        ;;
+    esac
+  done
+done
+
 # ~/.codex/skills was the pre-~/.agents Codex location. A link there that points
 # into this repo now duplicates the ~/.agents one (Codex lists both), so retire
 # it. Anything not pointing into this repo is left alone.

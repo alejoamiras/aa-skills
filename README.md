@@ -4,16 +4,14 @@ Personal agent skills in the [Agent Skills](https://agentskills.io) format, vers
 
 The real files live **here**; `~/.claude/skills/<name>` and `~/.agents/skills/<name>` are symlinks to the same directories. Editing a skill in place is editing this repo — backup is just `git commit && git push`.
 
-`blueprint` is written in terms of a **driver** (the harness running the session) and a **foreign reviewer** (the other model family's CLI): `/codex` when Claude Code drives, `/claude` when Codex drives. The `harden*` skills still assume a Claude Code driver.
+`blueprint` is written in terms of a **driver** (the harness running the session) and a **foreign reviewer** (the other model family's CLI): `/codex` when Claude Code drives, `/claude` when Codex drives. `harden` still assumes a Claude Code driver for its agents; only its stakeholder report is driver-aware (Claude Artifact on Claude Code, `report.html` elsewhere).
 
 ## Skills
 
 | Skill | What it does |
 |---|---|
 | [`blueprint`](skills/blueprint/) | Plan-creation protocol with four ceremony tiers (light / mid / deep / mega-deep), cross-model audits from either harness (driver + foreign reviewer), ELI5 Artifact / HTML deliverables |
-| [`harden`](skills/harden/) | Whole-codebase audit, all three focuses (security / bugs / quality) — map-reduce over parallel Claude + Codex agents, five effort levels |
-| [`harden-bugs`](skills/harden-bugs/) | Correctness-only clone of the harden harness with zero security language, so it runs clean on any model (Fable included) |
-| [`harden-quality`](skills/harden-quality/) | Maintainability-only clone of the harden harness with zero security language, so it runs clean on any model (Fable included) |
+| [`harden`](skills/harden/) | Whole-codebase audit, all three focuses (security / bugs / quality) — map-reduce over parallel Claude + Codex agents, five effort levels; stakeholder report as a Claude Artifact or standalone HTML |
 | [`claude`](skills/claude/) | Second-opinion consults via the headless Claude Code CLI (Fable 5.1 by default) — the foreign-reviewer leg for Codex-driven sessions; mirror of `codex` with the same script contract |
 | [`codex`](skills/codex/) | Second-opinion consults via the Codex CLI (GPT-6 Astra by default) — the foreign-reviewer leg for Claude Code-driven sessions; plus raster image generation/editing through Codex's built-in `image_gen` (gpt-image-2, ChatGPT plan, no API key) |
 | [`kimi`](skills/kimi/) | Second-opinion consults via the Kimi Code CLI (Moonshot K3/K2.x) — codex-style harness with a worktree-change tripwire (kimi has no read-only sandbox) |

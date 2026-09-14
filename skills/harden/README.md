@@ -24,7 +24,7 @@ flowchart TD
     B --> R
     R --> S3["Phase 3 — coordinator reduce: dedupe by root cause, resolve cross-model disagreements, assign severity"]
     S3 --> S4["Phase 4 — verifier pass, by severity bucket"]
-    S4 --> S5["Phase 5 — report.md + report.html"]
+    S4 --> S5["Phase 5 — report.md + stakeholder report (Claude Artifact on Claude Code, report.html elsewhere)"]
 ```
 
 The design decisions that matter:
@@ -65,10 +65,10 @@ audit/<focus>/<YYYY-MM-DD>-<run-id>/
 ├── raw/         # repo map + per-cluster agent outputs (+ rebuttals)
 ├── findings/    # consolidated.md, verified.md
 ├── report.md    # engineering-facing
-└── report.html  # stakeholder-facing (security focus; see report-template.html)
+└── report.html  # stakeholder-facing source, every focus (see report-template.html)
 ```
 
-The HTML report leads each finding with a three-paragraph plain-language ELI5 (what it is, what an attacker would do, the fix) and tucks the technical trace behind a collapsible — built for the person who must prioritize fixes without reading code. A generic scaffold ships with this skill as [`report-template.html`](report-template.html).
+The stakeholder report leads each finding with a three-paragraph plain-language ELI5 (what it is; what an attacker would do / a user would trigger / gets harder to change, per focus; the fix) and tucks the technical trace behind a collapsible — built for the person who must prioritize fixes without reading code. When Claude Code drives and the user allows it, the page is published as a default-private **Claude Artifact** (URL recorded in `report.md`); on Codex, without the Artifact tool, or when findings must stay on the machine, it is the standalone `report.html` — decided once at Phase 0. A generic scaffold ships with this skill as [`report-template.html`](report-template.html).
 
 ## What it is NOT
 

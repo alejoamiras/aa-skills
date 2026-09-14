@@ -1,6 +1,6 @@
 ---
 name: harden
-description: Whole-codebase audit skill with three focuses (security / bugs / quality) and five effort levels (low / medium / high / max / ultra). Map-reduce protocol with parallel Claude + Codex agents per cluster, coordinator-of-specialists shape (Cloudflare-style). Produces impact-bucketed reports under `audit/<focus>/<date-run-id>/`. Use when finishing a vibecoded project that needs cleanup passes before shipping, or any time the user wants a whole-codebase scan rather than a diff review. Trigger phrases include "/harden security", "/harden bugs", "/harden quality", "audit this codebase for X", "whole repo review", "bug hunt", "security pass", "maintainability audit", "scan this repo". Auto-fire ONLY on explicit audit verbs (audit / scan / whole repo review / bug hunt / security pass / maintainability audit), NOT on generic "shipping prep" or "implementation help" language. If the user invokes bare `/harden` or "harden this app" without specifying focus, ask which focus they want (security / bugs / quality / all three sequentially) before proceeding. NOT for diff-only review (use /code-review).
+description: Whole-codebase audit skill with three focuses (security / bugs / quality) and five effort levels (low / medium / high / max / ultra). Map-reduce protocol with parallel Claude + Codex agents per cluster, coordinator-of-specialists shape (Cloudflare-style). Produces impact-bucketed reports under `audit/<focus>/<date-run-id>/` plus a stakeholder report — a Claude Artifact when Claude Code drives, a standalone `report.html` otherwise. Use when finishing a vibecoded project that needs cleanup passes before shipping, or any time the user wants a whole-codebase scan rather than a diff review. Trigger phrases include "/harden security", "/harden bugs", "/harden quality", "audit this codebase for X", "whole repo review", "bug hunt", "security pass", "maintainability audit", "scan this repo". Auto-fire ONLY on explicit audit verbs (audit / scan / whole repo review / bug hunt / security pass / maintainability audit), NOT on generic "shipping prep" or "implementation help" language. If the user invokes bare `/harden` or "harden this app" without specifying focus, ask which focus they want (security / bugs / quality / all three sequentially) before proceeding. NOT for diff-only review (use /code-review).
 ---
 
 # Harden
@@ -45,8 +45,9 @@ Before any scanning, briefly confirm with the user (use `AskUserQuestion` for cl
 - Anything to exclude (third-party, generated code, vendor dirs)?
 - Known concerns to flag early?
 - What is the project type (web app, CLI, library, backend service)?
+- **Where may the stakeholder report live?** Decide the `report_mode` ONCE here: **Artifact** (the default when the driver is Claude Code, the `Artifact` tool is present, and the report may be published to claude.ai as a default-private page) or **file** (`report.html` next to `report.md`: Codex or any other driver, no Artifact tool, or the report must stay on this machine). A security audit is a vulnerability inventory — if the user hesitates, choose file.
 
-**Unattended fallback** (CI, scheduled runs, AFK mode, or any non-interactive context): if no answer arrives within a reasonable wait, default to the whole repo minus generated/vendor/`node_modules`/`dist`/`build` directories. State the assumptions explicitly in the report's Methodology section so the user knows what was scanned.
+**Unattended fallback** (CI, scheduled runs, AFK mode, or any non-interactive context): if no answer arrives within a reasonable wait, default to the whole repo minus generated/vendor/`node_modules`/`dist`/`build` directories, and to **file** mode (never publish findings nobody approved). State the assumptions explicitly in the report's Methodology section so the user knows what was scanned.
 
 ### Phase 1: Repo map (with monorepo hierarchical option)
 
@@ -154,7 +155,7 @@ Save to `audit/<focus>/<run-id>/findings/verified.md`.
 
 ### Phase 5: Report
 
-Two artifacts: a structured `report.md` (always), and a standalone `report.html` companion (currently security focus only; see "HTML companion" below for extension to bugs/quality).
+Two deliverables, for every focus: the engineering `report.md` (always, on disk), and the **stakeholder report**, delivered in the `report_mode` fixed at Phase 0 — a published Claude **Artifact** (Claude Code driver) or a standalone `report.html` **file** (any other driver, no Artifact tool, or on-infra only). Same content shape in both modes; see "Stakeholder report" below.
 
 #### Markdown report — `audit/<focus>/<run-id>/report.md`
 
@@ -208,11 +209,15 @@ One line each. Things the agents flagged that were dropped during reduce or veri
 Patterns that span multiple clusters and are worth tracking even if not actionable per-finding.
 ```
 
-#### HTML companion — `audit/<focus>/<run-id>/report.html`
+#### Stakeholder report — Artifact, or `audit/<focus>/<run-id>/report.html`
 
-**Currently scoped to security focus.** Bugs and quality should follow the same shape later (per-finding ELI5 + collapsible technical trace) — but the language inside each section needs to change for those focuses ("what an attacker would do" → "what a user would trigger" for bugs; → "what gets harder to change" for quality). Don't ship the HTML companion for bugs/quality with security wording.
+**All three focuses, always.** The shape is identical (per-finding ELI5 + collapsible technical trace); only the middle ELI5 paragraph's framing changes per focus — "what an attacker would do" (security), "what a user would trigger" (bugs), "what gets harder to change" (quality). Never ship a bugs or quality report with security wording.
 
-The HTML companion is a **standalone single-file HTML** (no external CSS, no JavaScript dependencies, no build step) optimized for stakeholders who need to read findings without reading code. It complements the markdown by:
+**Two modes, one source.** Author the page as ONE HTML source file, then deliver it in the mode recorded at Phase 0:
+- **Artifact mode** (Claude Code driver): load the `artifact-design` skill BEFORE building the page (a hard requirement of the `Artifact` tool), then publish the source file with the `Artifact` tool → a default-private claude.ai URL. An Artifact is a single hosted page: it CANNOT relatively link to `report.md`, `findings/` or `raw/` — inline what a reader needs and name those files as repo-relative plain text. Record the Artifact URL and the source path in `report.md`'s Executive summary; republishing the same source file keeps the same URL. Keep the source file on disk as `report.html` too, so the audit dir stays complete offline.
+- **File mode** (Codex or any other driver, Artifact tool absent, or on-infra only): `report.html` next to `report.md`, built from `report-template.html`. It is what `BLUEPRINT_VIEW_CMD` serves on headless boxes.
+
+The page is a **standalone single-file HTML** (no external CSS, no JavaScript dependencies, no build step) optimized for stakeholders who need to read findings without reading code. It complements the markdown by:
 
 1. **Per-finding ELI5 block** (3 short paragraphs, before the technical trace):
    - **What it is** — plain-language explanation of the issue with enough background context that a non-engineer understands what's wrong. Avoid jargon; if a term is unavoidable, define it inline.
@@ -229,7 +234,7 @@ The HTML companion is a **standalone single-file HTML** (no external CSS, no Jav
 
 6. **Cross-cutting observations** rendered as their own H3 sections (not nested inside any finding), with the architectural theme explained in 1-2 paragraphs.
 
-7. **Footer** linking to the markdown report, consolidated/verified findings, and raw cluster outputs. Use **relative links** — the HTML file lives alongside these artifacts in the audit dir; never write absolute paths into committed HTML.
+7. **Footer** pointing at the markdown report, consolidated/verified findings, and raw cluster outputs. File mode: **relative links** — the HTML file lives alongside these artifacts in the audit dir; never write absolute paths into committed HTML. Artifact mode: the same paths as plain repo-relative text (a hosted page cannot resolve them).
 
 **Design constraints** (do not deviate without a reason):
 - Plain typography (system font stack), generous whitespace, max-width ~820px for readability.
@@ -271,11 +276,11 @@ The HTML companion is a **standalone single-file HTML** (no external CSS, no Jav
 </div>
 ```
 
-**When to write the HTML companion**: ALWAYS for security focus. Mark "TODO" in the report.md if bugs/quality and skip the HTML for now — the per-finding ELI5 language needs domain-specific phrasing the security shape doesn't cover.
+**When to produce the stakeholder report**: always, for every focus, in the Phase 0 mode. A run is not finished until it exists — never leave a "TODO" in its place.
 
-**Reporting back to the user at end-of-task**: give the absolute path to `report.html` so they can click-to-open from the terminal. The HTML is the primary stakeholder-facing artifact; the markdown is the engineering-facing artifact.
+**Reporting back to the user at end-of-task**: give the Artifact URL (Artifact mode) or the absolute path to `report.html` (file mode) so they can open it from the terminal. The stakeholder report is the primary artifact; the markdown is the engineering-facing companion.
 
-**Remote viewing (headless boxes)**: if `BLUEPRINT_VIEW_CMD` is set, additionally run `$BLUEPRINT_VIEW_CMD <absolute path to audit/<focus>/<run-id>>` and print the returned URL + `/report.html` on its own standalone line — full contract (stdout validation, failure notice, `--down`) is defined once in the blueprint skill's "Remote viewing" section; same rules apply here. **Teardown discipline is stricter than blueprint's**: audit reports are a vulnerability inventory, so serve only while the user is actually reading — run `$BLUEPRINT_VIEW_CMD --down <same dir>` as soon as the user acknowledges the report (their next instruction counts), or at session end, whichever comes first, and confirm the teardown in chat. Note the mount covers the repo's whole `audit/` tree (all runs), mirroring blueprint's whole-tree behavior.
+**Remote viewing (headless boxes, file mode only)**: if `BLUEPRINT_VIEW_CMD` is set, additionally run `$BLUEPRINT_VIEW_CMD <absolute path to audit/<focus>/<run-id>>` and print the returned URL + `/report.html` on its own standalone line — full contract (stdout validation, failure notice, `--down`) is defined once in the blueprint skill's "Remote viewing" section; same rules apply here. **Teardown discipline is stricter than blueprint's**: audit reports are a vulnerability inventory, so serve only while the user is actually reading — run `$BLUEPRINT_VIEW_CMD --down <same dir>` as soon as the user acknowledges the report (their next instruction counts), or at session end, whichever comes first, and confirm the teardown in chat. Note the mount covers the repo's whole `audit/` tree (all runs), mirroring blueprint's whole-tree behavior.
 
 ## Per-focus prompts
 
@@ -530,13 +535,13 @@ audit/<focus>/<YYYY-MM-DD>-<run-id>/
 ├── findings/
 │   ├── consolidated.md               # after Phase 3 reduce
 │   └── verified.md                   # after Phase 4 verifier
-├── report.md                         # Phase 5 markdown report (always)
-└── report.html                       # Phase 5 HTML companion (security focus only today; extend to bugs/quality later)
+├── report.md                         # Phase 5 markdown report (always; in Artifact mode it also records the Artifact URL)
+└── report.html                       # Phase 5 stakeholder report source (every focus; the published page in file mode)
 ```
 
 Multiple runs on the same codebase get separate dated directories; they do not overwrite each other. Compare runs by reading multiple `report.md` files side by side.
 
-**`report.html` is the stakeholder-facing primary artifact for security audits.** Always write it (for security focus). It gets opened by non-engineers and engineers alike to triage and prioritize; the markdown is the engineering-detail companion. For bugs/quality, the HTML companion needs domain-specific phrasing (see Phase 5) and should NOT be written until the language is adapted — security wording on a quality report misleads readers.
+**The stakeholder report is the primary artifact for every focus.** It gets opened by non-engineers and engineers alike to triage and prioritize; the markdown is the engineering-detail companion. Its ELI5 framing follows the focus (attacker / user / future change — see Phase 5), and its delivery mode follows the driver and the Phase 0 privacy answer: a Claude Artifact on Claude Code, `report.html` everywhere else.
 
 ## Known failure modes (avoid these)
 
