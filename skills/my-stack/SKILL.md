@@ -847,9 +847,28 @@ Default workflow `permissions:` to `contents: read`. Grant write scopes only on 
 
 ### Cloudflare deploy in CI (Tier 1 — the common case)
 
-- `cloudflare/wrangler-action@v4` with an API token scoped to **Workers Scripts:Edit on the one account**, never a global key. Cloudflare has no GitHub OIDC path for Workers deploys, so this is the documented exception to the OIDC-everywhere default — revisit if that changes.
-- **Preview per PR, production on merge.** `wrangler versions upload` publishes a new version and returns a preview URL *without* touching what production serves; `wrangler deploy` is what promotes. `--preview-alias` gives the PR a stable URL instead of a new hash each push.
-- `wrangler.jsonc` is reviewed like code — a binding or route change is a diff, not a console click
+**Default: connect the repo to Workers Builds, and keep no Cloudflare credential in GitHub at all.**
+
+Cloudflare has no OIDC or workload-identity path for Workers deploys — an API token is a long-lived static credential, exactly what the OIDC-everywhere rule exists to avoid. Deploying from Actions means that token sits in repo secrets, reachable by every workflow and every future contributor with the right access. Letting Cloudflare pull the repo removes the credential instead of protecting it.
+
+**Setup:** Workers & Pages → your Worker → Settings → Builds → Connect. Point it at the repo; the Worker `name` in the dashboard must match `name` in the Wrangler config or builds fail.
+
+- **Production**: push to `main` builds and deploys.
+- **PR previews**: non-production branches swap the deploy command for a preview deploy command (default `npx wrangler versions upload`), creating a preview version without promoting it.
+- **GitHub Actions still runs `test`, `lint`, `typecheck` — and needs no Cloudflare secret to do it.** Deployment is the only step that ever wanted the token, and it has moved.
+
+What actually moves to the dashboard is narrow: build command, root directory, preview deploy command. **The infrastructure stays committed** — Cloudflare's builder runs `wrangler deploy` against the repo, so routes, bindings, `vars` and asset config are still `wrangler.jsonc`, still reviewed as a diff. Three low-churn build fields is the whole price.
+
+**Take the Actions path instead when:**
+- the project uses **Durable Objects or Containers** — preview URLs are not generated for those, so dashboard-driven PR previews simply do not exist; or
+- the build command genuinely needs review (an unusual multi-step build), and you accept holding the token.
+
+If you do hold a token: scope it to **Workers Scripts:Edit on the one account**, never a global key, set a TTL, and rotate on schedule.
+
+<details>
+<summary>Fallback: deploy from GitHub Actions</summary>
+
+`wrangler versions upload` publishes a version and returns its URL without touching production; `wrangler deploy` is what promotes. `--preview-alias` gives the PR a stable URL instead of a new hash per push.
 
 ```yaml
 # .github/workflows/app.yml (excerpt — gate on `changes` as usual)
@@ -900,25 +919,14 @@ jobs:
           command: deploy
 ```
 
-Preview URLs are on by default (`preview_urls` follows `workers_dev`); set `"preview_urls": false` in `wrangler.jsonc` to turn them off for a Worker that must not be publicly reachable pre-merge.
+
+Preview URLs are on by default (`preview_urls` follows `workers_dev`); set `"preview_urls": false` in `wrangler.jsonc` for a Worker that must not be publicly reachable pre-merge.
+
+</details>
+
+- `wrangler.jsonc` is reviewed like code — a binding or route change is a diff, not a console click
 
 **What lives in `wrangler.jsonc`, and what must not.** Routes, bindings (KV/R2/D1/DO/queues), `compatibility_date`, `vars`, asset config: all committed, all reviewed as a diff. **Secrets never go in it** — it is a tracked file. Use `wrangler secret put` (or the dashboard) so the value lives in Cloudflare and only its *name* appears in code. `vars` is for non-sensitive config; the moment a value would hurt if it leaked, it is a secret.
-
-#### Alternative: Workers Builds (dashboard-connected repo)
-
-Cloudflare can watch the repo directly — **Workers & Pages → your Worker → Settings → Builds → Connect** — instead of deploying from GitHub Actions. Non-production branches then build automatically, with the deploy command replaced by a preview deploy command (default `npx wrangler versions upload`), so PRs get preview versions without promotion.
-
-It is a genuine trade, not a free upgrade:
-
-| | GitHub Actions (default) | Workers Builds |
-|---|---|---|
-| Build config | committed, reviewed in the diff | **dashboard only** — Workers Builds does not honor Custom Builds in the Wrangler config |
-| Cloudflare credential | scoped API token in repo secrets | **none** — Cloudflare pulls the repo |
-| Builds run | once, alongside test/lint | a second time, in Cloudflare |
-
-**Default to GitHub Actions**, because the build command belongs in the diff like everything else and the repo already builds there for tests. Reach for Workers Builds when not holding a long-lived Cloudflare token matters more than a committed build command — a fair trade for a personal project, and the reason to keep the option in mind.
-
-Two gotchas either way: the Worker `name` in the dashboard must match `name` in the Wrangler config or builds fail, and **preview URLs are not generated for Durable Object Workers** (including Containers) — if the project uses DOs, PR previews need the Actions path or another plan.
 
 ### OpenTofu in CI (Tier 3 only)
 
