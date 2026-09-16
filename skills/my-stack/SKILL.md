@@ -902,6 +902,24 @@ jobs:
 
 Preview URLs are on by default (`preview_urls` follows `workers_dev`); set `"preview_urls": false` in `wrangler.jsonc` to turn them off for a Worker that must not be publicly reachable pre-merge.
 
+**What lives in `wrangler.jsonc`, and what must not.** Routes, bindings (KV/R2/D1/DO/queues), `compatibility_date`, `vars`, asset config: all committed, all reviewed as a diff. **Secrets never go in it** — it is a tracked file. Use `wrangler secret put` (or the dashboard) so the value lives in Cloudflare and only its *name* appears in code. `vars` is for non-sensitive config; the moment a value would hurt if it leaked, it is a secret.
+
+#### Alternative: Workers Builds (dashboard-connected repo)
+
+Cloudflare can watch the repo directly — **Workers & Pages → your Worker → Settings → Builds → Connect** — instead of deploying from GitHub Actions. Non-production branches then build automatically, with the deploy command replaced by a preview deploy command (default `npx wrangler versions upload`), so PRs get preview versions without promotion.
+
+It is a genuine trade, not a free upgrade:
+
+| | GitHub Actions (default) | Workers Builds |
+|---|---|---|
+| Build config | committed, reviewed in the diff | **dashboard only** — Workers Builds does not honor Custom Builds in the Wrangler config |
+| Cloudflare credential | scoped API token in repo secrets | **none** — Cloudflare pulls the repo |
+| Builds run | once, alongside test/lint | a second time, in Cloudflare |
+
+**Default to GitHub Actions**, because the build command belongs in the diff like everything else and the repo already builds there for tests. Reach for Workers Builds when not holding a long-lived Cloudflare token matters more than a committed build command — a fair trade for a personal project, and the reason to keep the option in mind.
+
+Two gotchas either way: the Worker `name` in the dashboard must match `name` in the Wrangler config or builds fail, and **preview URLs are not generated for Durable Object Workers** (including Containers) — if the project uses DOs, PR previews need the Actions path or another plan.
+
 ### OpenTofu in CI (Tier 3 only)
 
 - `tofu plan` in CI for PRs (read-only preview)
