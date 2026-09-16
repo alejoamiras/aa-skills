@@ -53,8 +53,14 @@ recent_files() {
 # Every field in ONE jq pass: a status line cannot afford an interpreter start
 # per value. Selection is structural — session files also contain message text,
 # and a prompt mentioning rate limits must not be parsed as data.
+# Codex reports several limit buckets under the same event; "codex" is the
+# subscription's own weekly window + credit balance. A "premium" bucket (a
+# separate model tier, usually empty) can land as the last record of a session
+# and would read as 0 credits if taken at face value. Records without a
+# limit_id predate the field and are kept.
 JQ_FIELDS='select(.type == "event_msg" and .payload.type == "token_count")
   | .payload.rate_limits | select(. != null)
+  | select(.limit_id == null or .limit_id == "codex")
   | [ (.plan_type // "?"),
       (if .primary   then ((100 - (.primary.used_percent   // 0)) | floor) else "-" end),
       (.primary.resets_at // "-"),
