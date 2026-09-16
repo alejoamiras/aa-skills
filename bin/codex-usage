@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# codex-usage — Codex weekly limit and credit balance, for the Claude Code
+# status line.
+#
+# Codex records its own rate limits into the session rollout it writes on every
+# turn, so this reads them off disk: no API call, no tokens, no credits. The
+# corollary is that the numbers are exactly as fresh as your last Codex run —
+# refreshing them would mean spending credits to ask, which is not worth it for
+# a status bar. Age is shown whenever the data is not recent.
+#
+#   codex-usage              summary
+#   codex-usage --json       machine-readable
+#   codex-usage statusline   compact segment for statusline.sh
+#
+# The record lives at payload.rate_limits of an event_msg whose payload.type is
+# "token_count". It is selected structurally on purpose: session files also hold
+# message text, and a prompt that merely mentions rate limits would poison any
+# grep-based parser.
+
+set -uo pipefail
+
+CODEX_DIR="${CODEX_HOME:-${HOME}/.codex}"
+SESSIONS="${CODEX_DIR}/sessions"
+# A round of foreign-reviewer consults costs roughly 40 credits, so under 100
+# means "not enough for another one" and under 400 means "watch it".
+CRED_LOW="${CODEX_USAGE_CRED_LOW:-100}"
+CRED_MID="${CODEX_USAGE_CRED_MID:-400}"
+STALE_AFTER="${CODEX_USAGE_STALE_AFTER:-21600}"   # 6h
+
+if [[ -t 1 ]]; then
+  DIM=$'\033[2m'; RST=$'\033[0m'; BOLD=$'\033[1m'
+  GRN=$'\033[32m'; YEL=$'\033[33m'; RED=$'\033[31m'
+else
+  DIM=''; RST=''; BOLD=''; GRN=''; YEL=''; RED=''
+fi
+
+command -v jq > /dev/null || { printf 'codex-usage: jq is required\n' >&2; exit 1; }
+
+# Newest rollout files, newest first. Walks the dated directory tree rather than
+# stat-ing every session (there are thousands after a while).
+recent_files() {
+  local y m d
+  [[ -d ${SESSIONS} ]] || return 0
+  for y in $(printf '%s\n' "${SESSIONS}"/*/ | sort -r | head -3); do
+    for m in $(printf '%s\n' "${y}"*/ | sort -r | head -2); do
+      for d in $(printf '%s\n' "${m}"*/ | sort -r | head -3); do
+        ls -t "${d}"*.jsonl 2> /dev/null
+      done
+    done
+  done
+}
+
+# Every field in ONE jq pass: a status line cannot afford an interpreter start
+# per value. Selection is structural — session files also contain message text,
+# and a prompt mentioning rate limits must not be parsed as data.
+JQ_FIELDS='select(.type == "event_msg" and .payload.type == "token_count")
+  | .payload.rate_limits | select(. != null)
+  | [ (.plan_type // "?"),
+      (if .primary   then ((100 - (.primary.used_percent   // 0)) | floor) else "-" end),
+      (.primary.resets_at // "-"),
+      (if .secondary then ((100 - (.secondary.used_percent // 0)) | floor) else "-" end),
+      (.secondary.resets_at // "-"),
+      (.credits.balance // "-"),
+      (.credits.unlimited // false) ] | @tsv'
+
+# Last record from the newest session that has one; a session can end before its
+# first API turn, so keep looking past empty ones.
+latest_record() {
+  local f rec n=0
+  while IFS= read -r f; do
+    [[ -f ${f} ]] || continue
+    ((n++ > 8)) && break
+    rec=$(jq -r "${JQ_FIELDS}" "${f}" 2> /dev/null | tail -1)
+    if [[ -n ${rec} ]]; then
+      printf '%s\t%s\n' "${rec}" "$(mtime "${f}")"
+      return 0
+    fi
+  done < <(recent_files)
+  return 1
+}
+
+mtime() {
+  local t
+  t=$(stat -c %Y "$1" 2> /dev/null)
+  [[ ${t} =~ ^[0-9]+$ ]] || t=$(stat -f %m "$1" 2> /dev/null)
+  [[ ${t} =~ ^[0-9]+$ ]] && printf '%s' "${t}" || printf '0'
+}
+
+# Compact "time until <epoch>": 3d4h, 2h13m, 7m, now.
+until_reset() {
+  local rem d h m
+  rem=$(( $1 - $(date +%s) ))
+  ((rem <= 0)) && { printf 'now'; return; }
+  d=$((rem / 86400)); h=$(((rem % 86400) / 3600)); m=$(((rem % 3600) / 60))
+  if   ((d > 0)); then printf '%dd%dh' "${d}" "${h}"
+  elif ((h > 0)); then printf '%dh%dm' "${h}" "${m}"
+  else                 printf '%dm' "${m}"
+  fi
+}
+
+# Elapsed, for staleness: the data only moves when Codex runs.
+since() {
+  local rem=$(( $(date +%s) - $1 )) d h m
+  ((rem < 0)) && rem=0
+  d=$((rem / 86400)); h=$(((rem % 86400) / 3600)); m=$(((rem % 3600) / 60))
+  if   ((d > 0)); then printf '%dd' "${d}"
+  elif ((h > 0)); then printf '%dh' "${h}"
+  else                 printf '%dm' "${m}"
+  fi
+}
+
+paint_left() {
+  local left="$1"
+  if   ((left <= 15)); then printf '%s%s%%%s' "${RED}" "${left}" "${RST}"
+  elif ((left <= 50)); then printf '%s%s%%%s' "${YEL}" "${left}" "${RST}"
+  else                      printf '%s%s%%%s' "${GRN}" "${left}" "${RST}"
+  fi
+}
+
+paint_credits() {
+  local c="$1" colour
+  if   ((${c%.*} < CRED_LOW)); then colour="${RED}"
+  elif ((${c%.*} < CRED_MID)); then colour="${YEL}"
+  else                              colour="${GRN}"
+  fi
+  printf '%s%s%s' "${colour}" "${c%.*}" "${RST}"
+}
+
+# Sets: PLAN WK_LEFT WK_RESET FIVE_LEFT FIVE_RESET CREDITS UNLIMITED AGE
+load() {
+  local raw ts
+  raw=$(latest_record) || return 1
+  IFS=$'\t' read -r PLAN WK_LEFT WK_RESET FIVE_LEFT FIVE_RESET CREDITS UNLIMITED ts <<< "${raw}"
+  AGE=$(( $(date +%s) - ts ))
+  return 0
+}
+
+summary() {
+  load || { printf 'no Codex usage recorded yet (run codex once)\n'; return 0; }
+  printf '%sCodex%s  %splan%s %s\n' "${BOLD}" "${RST}" "${DIM}" "${RST}" "${PLAN}"
+  if [[ ${WK_LEFT} != "-" ]]; then
+    printf '  %-16s %s %sresets %s%s\n' "weekly limit" "$(paint_left "${WK_LEFT}")" \
+      "${DIM}" "$(until_reset "${WK_RESET}")" "${RST}"
+  fi
+  if [[ ${FIVE_LEFT} != "-" ]]; then
+    printf '  %-16s %s %sresets %s%s\n' "rolling limit" "$(paint_left "${FIVE_LEFT}")" \
+      "${DIM}" "$(until_reset "${FIVE_RESET}")" "${RST}"
+  fi
+  if [[ ${UNLIMITED} == true ]]; then
+    printf '  %-16s %sunlimited%s\n' "credits" "${GRN}" "${RST}"
+  elif [[ ${CREDITS} != "-" ]]; then
+    printf '  %-16s %s\n' "credits" "$(paint_credits "${CREDITS}")"
+  fi
+  printf '  %-16s %s%s ago%s\n' "last seen" "${DIM}" "$(since $(( $(date +%s) - AGE )))" "${RST}"
+}
+
+json() {
+  if ! load; then printf 'null\n'; return 0; fi
+  printf '{"plan":"%s","week_left_pct":%s,"week_resets_at":%s,"rolling_left_pct":%s,"rolling_resets_at":%s,"credits":%s,"unlimited":%s,"age_seconds":%s}\n' \
+    "${PLAN}" "${WK_LEFT//-/null}" "${WK_RESET//-/null}" "${FIVE_LEFT//-/null}" \
+    "${FIVE_RESET//-/null}" "${CREDITS//-/null}" "${UNLIMITED}" "${AGE}"
+}
+
+# One compact segment. Weekly headroom first; credits matter most once the
+# weekly limit is spent, because that is what keeps Codex answering.
+statusline() {
+  load || return 0
+  local out="${DIM}codex${RST}"
+  [[ ${WK_LEFT} != "-" ]] && out="${out} $(paint_left "${WK_LEFT}")"
+  [[ ${WK_RESET} != "-" ]] && out="${out} ${DIM}$(until_reset "${WK_RESET}")${RST}"
+  if [[ ${UNLIMITED} == true ]]; then
+    out="${out} ${GRN}∞${RST}"
+  elif [[ ${CREDITS} != "-" ]]; then
+    out="${out} $(paint_credits "${CREDITS}")${DIM}cr${RST}"
+  fi
+  ((AGE > STALE_AFTER)) && out="${out} ${DIM}($(since $(( $(date +%s) - AGE ))) old)${RST}"
+  printf '%s\n' "${out}"
+}
+
+case "${1:-summary}" in
+  summary|'')  summary ;;
+  --json)      json ;;
+  statusline)  statusline ;;
+  -h|--help)   sed -n '2,/^$/p' "$0" | sed 's/^#\{1,\} \{0,1\}//;s/^#$//' ;;
+  *)           printf 'unknown command: %s (try --help)\n' "$1" >&2; exit 1 ;;
+esac
