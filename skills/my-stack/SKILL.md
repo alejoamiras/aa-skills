@@ -1,6 +1,6 @@
 ---
 name: my-stack
-description: "Use when scaffolding a new repository, configuring development tooling, setting up CI/CD pipelines, or when working on owned repositories. Covers the preferred stack: bun 1.4+ (native-first — Bun.cron, Bun.Image, node:sqlite, Bun.Archive, isolated linker, test --parallel/--shard/--changed — before reaching for deps), biome, husky, commitlint, lint-staged, shellcheck, actionlint, sort-package-json, playwright, vitest, monorepo structure, trusted publisher for npm, OIDC, React + Vite frontend defaults, supply-chain hardening (7-day min-age, frozen lockfile), parallel-safe E2E patterns, and tiered infrastructure (Cloudflare Workers/Pages by default; OpenTofu only once there's real cloud infra to track)."
+description: "Use when scaffolding a new repository, configuring development tooling, setting up CI/CD pipelines, or when working on owned repositories. Covers the preferred stack: bun 1.4+ (native-first — Bun.cron, Bun.Image, node:sqlite, Bun.Archive, isolated linker, test --parallel/--shard/--changed — before reaching for deps), biome, husky, commitlint, lint-staged, shellcheck, actionlint, sort-package-json, playwright, vitest, monorepo structure, trusted publisher for npm, OIDC, React + Vite frontend defaults, supply-chain hardening (7-day min-age, frozen lockfile), parallel-safe E2E patterns, and tiered infrastructure (Cloudflare Workers with static assets by default — not Pages; OpenTofu only once there's real cloud infra to track)."
 ---
 
 # My Preferred Development Stack
@@ -23,7 +23,7 @@ Tooling, conventions, scaffolding, and CI/CD for repositories I own. Use when sc
 | **playwright** | E2E testing (browser) | cypress, puppeteer |
 | **storybook** | Component catalog / visual docs (frontend) | n/a |
 | **ncu** (npm-check-updates) | Dependency update checking | npm outdated |
-| **Cloudflare (Workers/Pages + wrangler)** | Default hosting for anything that's "just a web thing" | a VPS you'd have to patch |
+| **Cloudflare Workers (static assets + wrangler)** | Default hosting for anything that's "just a web thing" | Pages for a new project; a VPS you'd have to patch |
 | **OpenTofu** | Infrastructure as Code — only once real infra exists (see Infrastructure) | Terraform |
 
 ## Bun 1.4 baseline (new projects)
@@ -623,7 +623,27 @@ Create `docs/roadmap.md` for tracking phases, decisions, and backlog.
 
 IaC is not a starter-kit checkbox. OpenTofu means state files, backends, locking, drift, plan/apply review, and a permanent maintenance surface. Most projects never earn it. Pick by what the thing actually is:
 
-**Tier 1 — it's a web thing (default).** Static site, SPA, landing page, docs, an API that fits an edge function: **Cloudflare Pages/Workers, configured by `wrangler.jsonc`, deployed from CI**. That file *is* the infrastructure definition (routes, bindings, KV/R2/D1, env vars) — version-controlled, reviewable, no state backend. **No `infra/tofu/` at all.** Skip to the CI section. Deploy via `cloudflare/wrangler-action` with a scoped API token; use the Cloudflare skills for anything beyond a plain deploy.
+**Tier 1 — it's a web thing (default).** Static site, SPA, landing page, docs, an API that fits an edge function: **a Cloudflare Worker with static assets, configured by `wrangler.jsonc`, deployed from CI**. That file *is* the infrastructure definition (routes, bindings, KV/R2/D1, env vars) — version-controlled, reviewable, no state backend. **No `infra/tofu/` at all.** Skip to the CI section. Use the Cloudflare skills for anything beyond a plain deploy.
+
+**Workers, not Pages.** Cloudflare's own guidance on the Pages docs: *"Workers supports most Pages use cases and offers a broader feature set. It is Cloudflare's primary platform for building applications. Start new projects with Workers."* Pages is not deprecated and existing Pages projects can stay put, but new ones start on Workers — which also gets the newer platform features, and versioned preview URLs (below) rather than Pages' branch deploys.
+
+A static-only site needs no Worker code at all — omit `main` and the assets are served directly:
+
+```jsonc
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "my-app",
+  "compatibility_date": "2026-09-16",
+  "assets": {
+    "directory": "./dist",
+    // SPA routing: serve index.html instead of 404 so client-side routes resolve.
+    // Use "404-page" for a static site with a real 404.html.
+    "not_found_handling": "single-page-application"
+  }
+}
+```
+
+Add `main` plus `"binding": "ASSETS"` only when you need code in front of the assets (an API route, auth, headers) — the binding lets the Worker serve them via `env.ASSETS.fetch(request)`, and `run_worker_first` takes the route patterns that must hit the Worker before the asset lookup.
 
 **Tier 2 — managed platform.** Needs a long-running server, a real database, or a container: Railway / Fly / Vercel with a committed config file. Still no OpenTofu; the platform's config is the source of truth. Deployment stays CI-driven and reviewable.
 
@@ -827,9 +847,60 @@ Default workflow `permissions:` to `contents: read`. Grant write scopes only on 
 
 ### Cloudflare deploy in CI (Tier 1 — the common case)
 
-- `cloudflare/wrangler-action` with a scoped API token (Workers/Pages edit only, never a global key), stored as a repo secret
-- Preview deploy on PR, production deploy on merge to main
+- `cloudflare/wrangler-action@v4` with an API token scoped to **Workers Scripts:Edit on the one account**, never a global key. Cloudflare has no GitHub OIDC path for Workers deploys, so this is the documented exception to the OIDC-everywhere default — revisit if that changes.
+- **Preview per PR, production on merge.** `wrangler versions upload` publishes a new version and returns a preview URL *without* touching what production serves; `wrangler deploy` is what promotes. `--preview-alias` gives the PR a stable URL instead of a new hash each push.
 - `wrangler.jsonc` is reviewed like code — a binding or route change is a diff, not a console click
+
+```yaml
+# .github/workflows/app.yml (excerpt — gate on `changes` as usual)
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    # Forks cannot read secrets; skip rather than fail the PR.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write        # solely to post the preview link
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - id: preview
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: versions upload --preview-alias pr-${{ github.event.number }}
+      # gh is preinstalled on runners — one less third-party action in the supply chain.
+      # Folded scalar: the body contains ": ", which breaks an unquoted run:.
+      - run: >-
+          gh pr comment "$PR" --edit-last --create-if-none
+          --body "Preview: $URL"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.number }}
+          URL: ${{ steps.preview.outputs.deployment-url }}
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
+```
+
+Preview URLs are on by default (`preview_urls` follows `workers_dev`); set `"preview_urls": false` in `wrangler.jsonc` to turn them off for a Worker that must not be publicly reachable pre-merge.
 
 ### OpenTofu in CI (Tier 3 only)
 
