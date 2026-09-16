@@ -24,6 +24,14 @@
 set -uo pipefail
 
 ACCOUNTS_ROOT="${CLAUDE_ACCOUNTS_ROOT:-${HOME}/.claude-accounts}"
+# Resolve before anything hashes or compares it: two worktrees each passing a
+# relative "accounts" would otherwise share one snapshot and serve each other's
+# numbers.
+case "${ACCOUNTS_ROOT}" in
+  /*) ;;
+  *)  ACCOUNTS_ROOT="$(pwd -P)/${ACCOUNTS_ROOT}" ;;
+esac
+[[ -d ${ACCOUNTS_ROOT} ]] && ACCOUNTS_ROOT=$(cd "${ACCOUNTS_ROOT}" && pwd -P)
 MAIN_DIR="${HOME}/.claude"
 # Display names live here as "<dir-key>=<label>" rather than in the directory
 # names themselves: Claude Code keys each keychain entry to the config dir PATH,
@@ -51,6 +59,8 @@ else
 fi
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
+
+UNKNOWN='?'   # rejected by valid_name, so no real account can collide with it
 
 # Names become path components and JSON strings, so a leading dot (".."), a
 # quote, or a tab are all disqualifying.
@@ -120,7 +130,7 @@ parse_reset() {
 # flavour: BSD wants -j -f <fmt>, GNU wants -d.
 parse_when() {
   local s="$1" y="$2" fmt out
-  for fmt in "%b %d %I:%M%p %Y" "%b %d %I%p %Y" "%b %d %H:%M %Y"; do
+  for fmt in "%b %d %I:%M:%S%p %Y" "%b %d %I:%M%p %Y" "%b %d %I%p %Y" "%b %d %H:%M:%S %Y" "%b %d %H:%M %Y"; do
     out=$(date -j -f "${fmt}" "${s} ${y}" +%s 2> /dev/null)
     if [[ ${out} =~ ^[0-9]+$ ]]; then printf '%s' "${out}"; return 0; fi
   done
@@ -136,7 +146,7 @@ to_epoch() {
   norm=${when/ at / }
   # BSD date fills unspecified fields from the current clock, so a bare "6am"
   # would inherit this minute and seconds. Pin them.
-  norm=$(sed -E 's/ ([0-9]{1,2})(am|pm)$/ \1:00\2/' <<< "${norm}")
+  norm=$(sed -E -e 's/ ([0-9]{1,2})(am|pm)$/ \1:00\2/' -e 's/ ([0-9]{1,2}):([0-9]{2})(am|pm)$/ \1:\2:00\3/' <<< "${norm}")
   now=$(date +%s); year=$(date +%Y)
   out=$(parse_when "${norm}" "${year}") || { printf '%s' "${NEVER}"; return; }
   # Reset strings carry no year, so a "Jan 2" read on Dec 30 parses as THIS
@@ -163,11 +173,35 @@ paint_left() {
 # Run the CLI against one account. CLAUDE_CONFIG_DIR namespaces the keychain
 # entry, so the primary account is only reachable with the variable UNSET —
 # exporting it, even pointed at ~/.claude, looks like a different account.
+# Bounded execution without coreutils. Polls in one-second steps instead of
+# sleeping for the whole timeout, so when the probe finishes normally the
+# watchdog notices and exits by itself — killing the subshell would orphan a
+# long sleep, and a burst of probes would leave a pile of them behind.
+watchdog() {
+  local pid rc
+  "$@" &
+  pid=$!
+  # stdout MUST be closed here: run_claude runs inside $(...), and command
+  # substitution blocks until every process holding that pipe exits.
+  (
+    waited=0
+    while ((waited < TIMEOUT)); do
+      kill -0 "${pid}" 2> /dev/null || exit 0
+      sleep 1
+      waited=$((waited + 1))
+    done
+    kill -TERM "${pid}" 2> /dev/null && sleep 5 && kill -KILL "${pid}" 2> /dev/null
+  ) > /dev/null 2>&1 &
+  wait "${pid}"; rc=$?
+  return "${rc}"
+}
+
 run_claude() {
   local dir="$1"; shift
   local -a runner=() envcmd=(env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN)
-  # A stock macOS has no `timeout`; without this check every probe would fail
-  # instantly and report the account as logged out.
+  # A stock macOS has no `timeout`; watchdog() is the fallback, because an
+  # unbounded probe would hang gather forever and, since its pid stays alive,
+  # make the refresh lock permanently unreclaimable.
   command -v timeout > /dev/null && runner=(timeout -k 5 "${TIMEOUT}")
   if [[ ${dir} == "${MAIN_DIR}" ]]; then
     # -u, not merely "don't set it": a refresh spawned from a session running
@@ -177,7 +211,11 @@ run_claude() {
   else
     envcmd+=("CLAUDE_CONFIG_DIR=${dir}")
   fi
-  ${runner[@]+"${runner[@]}"} "${envcmd[@]}" claude "$@" < /dev/null
+  if ((${#runner[@]})); then
+    "${runner[@]}" "${envcmd[@]}" claude "$@" < /dev/null
+  else
+    watchdog "${envcmd[@]}" claude "$@" < /dev/null
+  fi
 }
 
 # One tab-separated record per account, prefixed with a sort key. Runs in a
@@ -286,7 +324,11 @@ table() {
   while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv note; do
     [[ -z ${name} ]] && continue
     [[ -n ${note} ]] && notes+=("${name}: ${note}")
-    [[ ${pl} != "-" && -n ${pl} ]] && plabel=$(tr '[:lower:]' '[:upper:]' <<< "${pl}")
+    if [[ ${pl} != "-" && -n ${pl} ]]; then
+      local up; up=$(tr '[:lower:]' '[:upper:]' <<< "${pl}")
+      # Accounts metering different premium models cannot share a column name.
+      if [[ ${plabel} == PREMIUM || ${plabel} == "${up}" ]]; then plabel="${up}"; else plabel="PREMIUM"; fi
+    fi
 
     when=${wr/ at / }
     n_c+=("${name}"); p_c+=("${plan}")
@@ -343,6 +385,8 @@ table() {
   return 0
 }
 
+jq_str() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/ /g'; }
+
 json() {
   local rows first=1 key name email plan sl sr wl wr pl pv note
   rows=$(gather) || exit 1
@@ -352,9 +396,9 @@ json() {
     ((first)) || printf ','
     first=0
     printf '\n  {"account":"%s","email":"%s","plan":"%s","session_left_pct":%s,"session_resets":"%s","week_left_pct":%s,"week_resets":"%s","premium_model":"%s","premium_left_pct":%s,"note":"%s"}' \
-      "${name}" "${email}" "${plan}" \
-      "${sl//-/null}" "${sr}" "${wl//-/null}" "${wr}" \
-      "${pl}" "${pv//-/null}" "${note}"
+      "$(jq_str "${name}")" "$(jq_str "${email}")" "$(jq_str "${plan}")" \
+      "${sl//-/null}" "$(jq_str "${sr}")" "${wl//-/null}" "$(jq_str "${wr}")" \
+      "$(jq_str "${pl}")" "${pv//-/null}" "$(jq_str "${note}")"
   done <<< "${rows}"
   printf '\n]\n'
   return 0
@@ -386,12 +430,21 @@ release_lock() {
 cmd_refresh() {
   mkdir -p "${CACHE_DIR}"
   if ! mkdir "${LOCK_DIR}" 2> /dev/null; then
-    local holder; holder=$(cat "${LOCK_DIR}/pid" 2> /dev/null)
-    # Reclaim only from a holder that is provably gone. A slow refresher keeps
-    # its lock however long it takes.
-    [[ ${holder} =~ ^[0-9]+$ ]] && kill -0 "${holder}" 2> /dev/null && return 0
-    [[ -n $(find "${LOCK_DIR}" -maxdepth 0 -mmin +5 2> /dev/null) ]] || return 0
-    rm -rf "${LOCK_DIR}"
+    local holder aged capped
+    holder=$(cat "${LOCK_DIR}/pid" 2> /dev/null)
+    [[ -n $(find "${LOCK_DIR}" -maxdepth 0 -mmin +5 2> /dev/null) ]] && aged=1 || aged=""
+    # A recycled pid could otherwise keep a dead lock alive forever, so age
+    # eventually wins regardless of liveness.
+    [[ -n $(find "${LOCK_DIR}" -maxdepth 0 -mmin +30 2> /dev/null) ]] && capped=1 || capped=""
+    if [[ -z ${capped} ]]; then
+      [[ ${holder} =~ ^[0-9]+$ ]] && kill -0 "${holder}" 2> /dev/null && return 0
+      [[ -n ${aged} ]] || return 0
+    fi
+    # Claim the stale lock by renaming it: mv is atomic, so of N racers exactly
+    # one succeeds and the losers back off instead of all recreating it.
+    local grave="${LOCK_DIR}.dead.$$"
+    mv "${LOCK_DIR}" "${grave}" 2> /dev/null || return 0
+    rm -rf "${grave}"
     mkdir "${LOCK_DIR}" 2> /dev/null || return 0
   fi
   printf '%s' "$$" > "${LOCK_DIR}/pid"
@@ -423,22 +476,24 @@ cached_rows() {
 # carries no account identity, so the config dir is the only signal — and an
 # unset variable means the primary account.
 current_account() {
-  local d="${CLAUDE_CONFIG_DIR:-}" root
+  local d="${CLAUDE_CONFIG_DIR:-}"
   [[ -z ${d} ]] && { label_for main; return; }
-  d=$(cd "${d}" 2> /dev/null && pwd -P) || { printf 'unknown'; return; }
-  root=$(cd "${ACCOUNTS_ROOT}" 2> /dev/null && pwd -P) || root=""
-  if [[ -n ${root} && ${d} == "${root}"/* ]]; then
+  d=$(cd "${d}" 2> /dev/null && pwd -P) || { printf '%s' "${UNKNOWN}"; return; }
+  # Immediate child only: $ACCOUNTS_ROOT/b/a is not the account "a".
+  if [[ -n ${ACCOUNTS_ROOT} && $(dirname "${d}") == "${ACCOUNTS_ROOT}" ]]; then
     label_for "$(basename "${d}")"
   else
     # Includes CLAUDE_CONFIG_DIR=~/.claude, which is NOT the primary account:
     # setting the variable at all selects a different keychain entry.
-    printf 'unknown'
+    printf '%s' "${UNKNOWN}"
   fi
 }
 
 # gather() already sorts best-first: most premium headroom, ties broken by the
 # window that frees up soonest. So the recommendation is just the first usable
 # row, and "no premium anywhere" falls out of the same ordering.
+spent() { [[ $1 =~ ^[0-9]+$ ]] && (($1 == 0)); }
+
 best_row() {
   local key name email plan sl sr wl wr pl pv note rows
   rows=$(cat)
@@ -447,30 +502,32 @@ best_row() {
   # spent weekly budget cannot actually be used.
   while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv note; do
     [[ -z ${name} || -n ${note} ]] && continue
-    [[ ${wl} =~ ^[0-9]+$ ]] || continue
-    ((wl > 0)) || continue
-    printf '%s\t%s\t%s\t%s\n' "${name}" "${pv}" "${pl}" "${wr}"
+    spent "${wl}" && continue
+    spent "${sl}" && continue
+    printf '%s\t%s\t%s\t%s\tok\n' "${name}" "${pv}" "${pl}" "${wr}"
     return 0
   done <<< "${rows}"
   # Everything is spent, so the useful answer is whichever returns first. The
   # sort key is <premium><epoch>, so re-sorting from char 4 orders by reset.
   while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv note; do
     [[ -z ${name} || -n ${note} ]] && continue
-    printf '%s\t%s\t%s\t%s\n' "${name}" "${pv}" "${pl}" "${wr}"
+    printf '%s\t%s\t%s\t%s\tfallback\n' "${name}" "${pv}" "${pl}" "${wr}"
     return 0
   done < <(sort -k1.4 <<< "${rows}")
   return 1
 }
 
 cmd_best() {
-  local name pv pl wr rows
+  local name pv pl wr how rows
   rows=$(cached_rows) || die "no snapshot yet — run: claude-usage refresh"
-  IFS=$'\t' read -r name pv pl wr < <(best_row <<< "${rows}") ||
+  IFS=$'\t' read -r name pv pl wr how < <(best_row <<< "${rows}") ||
     die "no usable account (all logged out?) — run: claude-usage"
-  if [[ ${pv} == "-" ]]; then
+  if [[ ${how} == fallback ]]; then
+    printf '%s (nothing usable right now; frees up first, %s)\n' "${name}" "${wr}"
+  elif [[ ${pv} == "-" ]]; then
     printf '%s (%s usage unknown; resets %s)\n' "${name}" "${pl}" "${wr}"
   elif ((pv == 0)); then
-    printf '%s (no %s left anywhere; resets soonest, %s)\n' "${name}" "${pl}" "${wr}"
+    printf '%s (no %s left on any usable account; resets %s)\n' "${name}" "${pl}" "${wr}"
   else
     printf '%s (%s%% %s left)\n' "${name}" "${pv}" "${pl}"
   fi
@@ -480,7 +537,7 @@ cmd_best() {
 # Deliberately omits 5h/week percentages: the status line already gets those
 # live for the current account, and the snapshot's copy would only be staler.
 cmd_statusline() {
-  local rows cur best_name best_pv best_wr cur_pv cur_pl found=0 age
+  local rows cur best_name best_pv best_wr best_how cur_pv cur_pl found=0 age
   local key name email plan sl sr wl wr pl pv note out
 
   rows=$(cached_rows) || return 0
@@ -488,25 +545,32 @@ cmd_statusline() {
 
   # Both halves of the segment come from ONE snapshot read: two reads could
   # straddle a refresh and render a current/best pair that never coexisted.
-  IFS=$'\t' read -r best_name best_pv _ best_wr < <(best_row <<< "${rows}") || return 0
+  IFS=$'\t' read -r best_name best_pv _ best_wr best_how < <(best_row <<< "${rows}") || return 0
 
   while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv note; do
     [[ ${name} == "${cur}" ]] || continue
     cur_pv="${pv}"; cur_pl="${pl}"; found=1; break
   done <<< "${rows}"
 
-  out="${cur}"
+  # The sentinel is unspellable as an account name on purpose; spell it out
+  # for the human reading the bar.
+  if [[ ${cur} == "${UNKNOWN}" ]]; then out="${DIM}unknown acct${RST}"; else out="${cur}"; fi
   if ((found)) && [[ ${cur_pv} != "-" ]]; then
     out="${out} ${DIM}$(tr '[:upper:]' '[:lower:]' <<< "${cur_pl}")${RST} $(paint_left "${cur_pv}")"
   fi
   if [[ ${best_name} != "${cur}" ]]; then
     out="${out} ${YEL}→${RST} ${best_name}"
-    if [[ ${best_pv} != "-" ]] && ((best_pv > 0)); then
+    if [[ ${best_how} == fallback ]]; then
+      # A fallback pick is not usable yet; quoting its premium headroom would
+      # read as "switch here now".
+      out="${out} ${DIM}back ${best_wr/ at */}${RST}"
+    elif [[ ${best_pv} != "-" ]] && ((best_pv > 0)); then
       out="${out} $(paint_left "${best_pv}")"
     else
-      # Nothing left anywhere, so the useful number is when it comes back.
       out="${out} ${DIM}${best_wr/ at */}${RST}"
     fi
+  elif [[ ${best_how} == fallback ]]; then
+    out="${out} ${DIM}all spent, back ${best_wr/ at */}${RST}"
   else
     out="${out} ${GRN}✓${RST}"
   fi
@@ -533,10 +597,23 @@ cmd_add() {
   fi
 }
 
+# Remove one mapping by exact key match, never by pattern.
+drop_label() {
+  local key="$1" line tmp
+  [[ -f ${LABELS_FILE} ]] || return 0
+  tmp="${LABELS_FILE}.$$"
+  : > "${tmp}"
+  while IFS= read -r line; do
+    [[ ${line} == "${key}="* ]] && continue
+    printf '%s\n' "${line}" >> "${tmp}"
+  done < "${LABELS_FILE}"
+  mv -f "${tmp}" "${LABELS_FILE}"
+}
+
 cmd_rename() {
   local old="${1:-}" new="${2:-}" key line
   [[ -n ${old} && -n ${new} ]] || die "usage: claude-usage rename <current-name> <new-name>"
-  [[ ${new} =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid name: ${new} (letters, digits, . _ - only)"
+  valid_name "${new}" || die "invalid name: ${new} (letters, digits, . _ - only; no leading dot)"
 
   key=$(key_for "${old}")
   if [[ ${key} != main ]]; then
@@ -547,16 +624,8 @@ cmd_rename() {
     die "name already in use: ${new}"
 
   mkdir -p "${ACCOUNTS_ROOT}"
-  local tmp="${LABELS_FILE}.$$"
-  : > "${tmp}"
-  if [[ -f ${LABELS_FILE} ]]; then
-    while IFS= read -r line; do
-      [[ ${line} == "${key}="* ]] && continue
-      printf '%s\n' "${line}" >> "${tmp}"
-    done < "${LABELS_FILE}"
-  fi
-  [[ ${new} != "${key}" ]] && printf '%s=%s\n' "${key}" "${new}" >> "${tmp}"
-  mv -f "${tmp}" "${LABELS_FILE}"
+  drop_label "${key}"
+  [[ ${new} != "${key}" ]] && printf '%s=%s\n' "${key}" "${new}" >> "${LABELS_FILE}"
 
   rm -f "${SNAPSHOT}"   # the cached rows carry the old name
   printf '%s → %s\n' "${old}" "${new}"
@@ -575,7 +644,7 @@ cmd_remove() {
     die "refusing: ${dir} is outside ${ACCOUNTS_ROOT}"
   run_claude "${dir}" auth logout > /dev/null 2>&1
   rm -rf "${dir}"
-  [[ -f ${LABELS_FILE} ]] && sed -i.bak "/^${key}=/d" "${LABELS_FILE}" && rm -f "${LABELS_FILE}.bak"
+  drop_label "${key}"
   rm -f "${SNAPSHOT}"
   printf 'removed %s\n' "${name}"
 }
