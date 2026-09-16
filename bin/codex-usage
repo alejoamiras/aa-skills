@@ -35,7 +35,7 @@
 #   codex-usage refresh         re-probe every account into the snapshot cache
 #
 # Accepted limits: two refreshers can overlap if one is stolen from mid-claim
-# (wasted work only — the snapshot swap is atomic); concurrent `rename` calls
+# (the loser's result is discarded); concurrent `rename` calls
 # are last-writer-wins; a `remove` landing between a refresh's roster check
 # and its publish can surface for one TTL; the probe needs the network, so
 # offline the snapshot just ages until it is flagged stale.
@@ -156,7 +156,7 @@ elapsed() { until_reset $(( 2 * $(date +%s) - $1 )); }
 # Headroom, not consumption: red is the "about to be cut off" band.
 paint_left() {
   local left="$1" colour
-  [[ ${left} == "-" ]] && { printf '%s-%s' "${DIM}" "${RST}"; return; }
+  [[ ${left} == "-" || ${left} == "?" ]] && { printf '%s%s%s' "${DIM}" "${left}" "${RST}"; return; }
   if   ((left <= 15)); then colour="${RED}"
   elif ((left <= 50)); then colour="${YEL}"
   else                      colour="${GRN}"
@@ -170,8 +170,8 @@ paint_credits() {
   local c="$1" u="$2" colour
   [[ ${u} == true ]] && { printf '%s∞%s' "${GRN}" "${RST}"; return; }
   [[ ${c} == "-" ]] && { printf '%s-%s' "${DIM}" "${RST}"; return; }
-  if   ((${c%.*} < CRED_LOW)); then colour="${RED}"
-  elif ((${c%.*} < CRED_MID)); then colour="${YEL}"
+  if   ((10#${c%.*} < CRED_LOW)); then colour="${RED}"
+  elif ((10#${c%.*} < CRED_MID)); then colour="${YEL}"
   else                              colour="${GRN}"
   fi
   printf '%s%s%s' "${colour}" "${c%.*}" "${RST}"
@@ -269,12 +269,17 @@ rpc_teardown() {
 # the 5H column, so neither is ever dropped. A lone window is placed by its
 # duration. Every field that reaches the shell is typed or cleaned here: these
 # values end up in arithmetic, TSV and JSON, and the API is a trust boundary.
+# A window with an unreadable usage value is "?" — reported but unknown, which
+# is not the same as "-" (not reported) and never counts as headroom. Strings
+# are never empty (a tab-separated empty field would shift every later one)
+# and the credit balance is bounded, so shell arithmetic cannot overflow or
+# read a leading zero as octal.
 JQ_PARSE='
   def res(i): (map(select(.id == i)) | first) // {};
-  def clean: if type == "string" then gsub("[[:cntrl:]]"; " ") else tostring end;
+  def clean: (if type == "string" then gsub("[[:cntrl:]]"; " ") else tostring end) | if . == "" then "-" else . end;
   def num(x): if (x | type) == "number" then x else null end;
-  def left(w): if w == null then "-" elif num(w.usedPercent // 0) == null then "-"
-               else ((100 - (w.usedPercent // 0)) | floor | if . < 0 then 0 elif . > 100 then 100 else . end) end;
+  def left(w): if w == null then "-" elif num(w.usedPercent) == null then "?"
+               else ((100 - w.usedPercent) | floor | if . < 0 then 0 elif . > 100 then 100 else . end) end;
   def reset(w): if w == null or num(w.resetsAt) == null then "-" else (w.resetsAt | floor) end;
   (res(2)) as $a | (res(3)) as $l
   | ($a.result.account) as $acct
@@ -286,7 +291,7 @@ JQ_PARSE='
       (($acct.planType // $rl.planType // "-") | clean),
       left($wk), reset($wk), left($ro), reset($ro),
       (if ($rl.credits | type) != "object" then "-"
-       else (($rl.credits.balance // "0") | tostring | if test("^[0-9]+(\\.[0-9]+)?$") then . else "-" end) end),
+       else (($rl.credits.balance // "0") | tostring | if test("^(0|[1-9][0-9]{0,8})(\\.[0-9]{1,6})?$") then . else "-" end) end),
       (if $rl.credits.unlimited == true then "true" else "false" end),
       (if ($a | length) == 0 then "noreply"
        elif $a.error != null then "error:" + (($a.error.message // "?") | clean)
@@ -331,7 +336,7 @@ probe() {
 
   # Unlimited credits sort as the largest balance; an unreported balance as 0.
   if [[ ${un} == true ]]; then cred_key=0
-  elif [[ ${cr} =~ ^[0-9]+ ]]; then cred_key=$((999999999 - ${cr%.*})); ((cred_key < 0)) && cred_key=0
+  elif [[ ${cr} =~ ^[0-9]+ ]]; then cred_key=$((999999999 - 10#${cr%.*})); ((cred_key < 0)) && cred_key=0
   else cred_key=999999999; fi
   # Included quota outranks paid credits: an account that would answer on
   # credits sorts below every account that still answers on its subscription.
@@ -347,11 +352,11 @@ probe() {
 # stays as "main", active, so the numbers are still shown.
 mark_active() {
   local rows line key name email plan wl wr rl rr cr un seen active note
-  local main_email="" main_line="" main_note="" matched=""
+  local main_email="" main_line="" main_note="" main_seen="" matched=""
   rows=$(cat)
   while IFS= read -r line; do
     IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note <<< "${line}"
-    [[ ${name} == main ]] && { main_email="${email}"; main_line="${line}"; main_note="${note}"; break; }
+    [[ ${name} == main ]] && { main_email="${email}"; main_line="${line}"; main_note="${note}"; main_seen="${seen}"; break; }
   done <<< "${rows}"
   if [[ -n ${main_email} && ${main_email} != "-" ]]; then
     while IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note; do
@@ -366,9 +371,11 @@ mark_active() {
       active=1
     elif [[ ${name} == "${matched}" ]]; then
       active=1
-      # The same login probed twice: when only the slot's probe succeeded,
-      # its numbers are the account's numbers — carry them under the roster name.
-      if [[ -n ${note} && -z ${main_note} ]]; then
+      # The same login seen twice: a real answer (numbers, logged out, blocked)
+      # beats a transport failure, and between two real answers the newer
+      # observation wins — a retained old roster row must not outrank a fresh
+      # slot probe. The winner is carried under the roster name.
+      if slot_wins "${note}" "${seen}" "${main_note}" "${main_seen}"; then
         IFS=$'\t' read -r key _ email plan wl wr rl rr cr un seen _ note <<< "${main_line}"
       fi
     else
@@ -377,6 +384,16 @@ mark_active() {
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "${key}" "${name}" "${email}" "${plan}" "${wl}" "${wr}" "${rl}" "${rr}" "${cr}" "${un}" "${seen}" "${active}" "${note}"
   done <<< "${rows}" | sort
+}
+
+# transient(note): a transport failure, not a statement about the account.
+transient() { [[ $1 == "no answer from codex app-server"* || $1 == "rpc error: "* ]]; }
+
+slot_wins() {   # <roster-note> <roster-seen> <slot-note> <slot-seen>
+  local rn="$1" rs="$2" sn="$3" ss="$4"
+  transient "${sn}" && return 1
+  transient "${rn}" && return 0
+  [[ ${ss} =~ ^[0-9]+$ && ${rs} =~ ^[0-9]+$ ]] && ((ss > rs))
 }
 
 gather_raw() {
@@ -421,14 +438,14 @@ hrule() {
 }
 
 pct_plain() {
-  if [[ $1 == "-" ]]; then printf -- '-'; else printf '%s%%' "$1"; fi
+  if [[ $1 == "-" || $1 == "?" ]]; then printf '%s' "$1"; else printf '%s%%' "$1"; fi
 }
 
 # "73%  3d2h" — headroom then time to reset, both plain and painted.
 window_cells() {
   local left="$1" reset="$2" when
   when=$(until_reset "${reset}")
-  if [[ ${left} == "-" || ${when} == "-" ]]; then
+  if [[ ${left} == "-" || ${left} == "?" || ${when} == "-" ]]; then
     printf '%s\t%s' "$(pct_plain "${left}")" "$(paint_left "${left}")"
   else
     printf '%4s  %s\t%*s%s  %s%s%s' "$(pct_plain "${left}")" "${when}" \
@@ -509,7 +526,7 @@ jq_str() {
   printf '%s' "$1" | tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
-json_num() { if [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]]; then printf '%s' "$1"; else printf 'null'; fi; }
+json_num() { if [[ $1 =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ]]; then printf '%s' "$1"; else printf 'null'; fi; }
 
 json() {
   local rows first=1 key name email plan wl wr rl rr cr un seen active note
@@ -593,6 +610,9 @@ cmd_refresh() {
   if ! grep -qvE $'\t(no answer from codex app-server|rpc error: )' <<< "${fresh}" && [[ -f ${SNAPSHOT} ]]; then
     touch -r "${SNAPSHOT}" "${tmp}" 2> /dev/null
   fi
+  # A refresher that stalled long enough to lose its lock has been superseded;
+  # its older observations must not land on top of the newer ones.
+  [[ $(cat "${LOCK_DIR}/pid" 2> /dev/null) == "$$" ]] || { rm -f "${tmp}"; return 0; }
   mv -f "${tmp}" "${SNAPSHOT}"   # atomic swap: readers never see a half-written file
   return 0
 }
@@ -650,7 +670,7 @@ cached_rows() {
 # the snapshot matched it to.
 current_account() {
   local d="${CODEX_HOME:-}" key name email plan wl wr rl rr cr un seen active note
-  if [[ -n ${CODEX_ACCOUNT:-} ]]; then
+  if [[ -n ${CODEX_ACCOUNT:-} && ${CODEX_ACCOUNT} != main ]]; then
     if [[ ${CODEX_ACCOUNT} == best ]]; then
       [[ -f ${SNAPSHOT} ]] && IFS=$'\t' read -r name _ < <(best_row < "${SNAPSHOT}") && { printf '%s' "${name}"; return; }
       printf '%s' "${UNKNOWN}"; return
@@ -659,6 +679,7 @@ current_account() {
     if valid_name "${key}" && [[ -d ${ACCOUNTS_ROOT}/${key} ]]; then label_for "${key}"; else printf '%s' "${UNKNOWN}"; fi
     return
   fi
+  [[ ${CODEX_ACCOUNT:-} == main ]] && d=""   # the slot by name, whatever CODEX_HOME says
   if [[ -n ${d} ]]; then
     d=$(cd "${d}" 2> /dev/null && pwd -P) || { printf '%s' "${UNKNOWN}"; return; }
     # Unlike CLAUDE_CONFIG_DIR, CODEX_HOME=~/.codex IS the slot: nothing is
@@ -690,16 +711,18 @@ spent() { [[ $1 =~ ^[0-9]+$ ]] && (($1 == 0)); }
 # 0 = answers on included quota (unlimited, or every reported window has
 # headroom), 1 = answers on credits only, 2 = nothing. A window the API did not
 # report is not a constraint; no windows at all means nothing to run on.
+# "?" is a reported window whose value could not be read: it blocks, like a
+# spent one — an unreadable limit is not headroom.
 eligibility() {   # <wl> <rl> <cr> <un>
   local wl="$1" rl="$2" cr="$3" un="$4" seen=0
   [[ ${un} == true ]] && { printf 0; return; }
   if [[ ${wl} =~ ^[0-9]+$ || ${rl} =~ ^[0-9]+$ ]]; then
     seen=1
-    spent "${wl}" && seen=0
-    spent "${rl}" && seen=0
+    { spent "${wl}" || [[ ${wl} == "?" ]]; } && seen=0
+    { spent "${rl}" || [[ ${rl} == "?" ]]; } && seen=0
   fi
   ((seen)) && { printf 0; return; }
-  [[ ${cr} =~ ^[0-9]+ ]] && ((${cr%.*} >= CRED_LOW)) && { printf 1; return; }
+  [[ ${cr} =~ ^[0-9]+ ]] && ((10#${cr%.*} >= CRED_LOW)) && { printf 1; return; }
   printf 2
 }
 
@@ -724,6 +747,7 @@ best_row() {
     [[ -z ${name} || -n ${note} ]] && continue
     [[ ${seen} =~ ^[0-9]+$ ]] && ((seen < limit)) && continue
     free_at=0
+    [[ ${wl} == "?" || ${rl} == "?" ]] && free_at="${NEVER}"
     if spent "${wl}"; then [[ ${wr} =~ ^[0-9]+$ ]] && ((wr > free_at)) && free_at="${wr}"; [[ ${wr} =~ ^[0-9]+$ ]] || free_at="${NEVER}"; fi
     if spent "${rl}"; then [[ ${rr} =~ ^[0-9]+$ ]] && ((rr > free_at)) && free_at="${rr}"; [[ ${rr} =~ ^[0-9]+$ ]] || free_at="${NEVER}"; fi
     ((free_at > 0)) || free_at="${NEVER}"
@@ -802,13 +826,13 @@ cmd_statusline() {
     out="${out} ${RED}${cur_note%% —*}${RST}"
   else
     [[ ${cur_wl} != "-" ]] && out="${out} $(paint_left "${cur_wl}")"
-    [[ ${cur_wr} != "-" ]] && out="${out} ${DIM}$(until_reset "${cur_wr}")${RST}"
+    [[ ${cur_wr} != "-" && ${cur_wl} != "?" ]] && out="${out} ${DIM}$(until_reset "${cur_wr}")${RST}"
     # Credits are only drawn on once the subscription windows are spent, so a
     # zero balance is noise while there is headroom; a positive one is worth
     # knowing about either way.
     if [[ ${cur_un} == true ]]; then
       out="${out} ${GRN}∞${RST}"
-    elif [[ ${cur_cr} =~ ^[0-9]+ ]] && { ((${cur_cr%.*} > 0)) || spent "${cur_wl}" || spent "${cur_rl}"; }; then
+    elif [[ ${cur_cr} =~ ^[0-9]+ ]] && { ((10#${cur_cr%.*} > 0)) || spent "${cur_wl}" || spent "${cur_rl}"; }; then
       out="${out} $(paint_credits "${cur_cr}" "${cur_un}")${DIM}cr${RST}"
     fi
   fi
@@ -872,6 +896,12 @@ cmd_add() {
   fi
   dir="${ACCOUNTS_ROOT}/${key}"
   [[ -e ${dir} && ! -d ${dir} ]] && die "${dir} exists and is not a directory"
+  # One login per account at a time: a second `add` for the same name could
+  # authenticate into the home this one then deletes on its own failure.
+  mkdir -p "${ACCOUNTS_ROOT}"
+  local guard="${ACCOUNTS_ROOT}/.adding-${key}"
+  mkdir "${guard}" 2> /dev/null || die "another add for ${name} is in progress (stale? rm -r ${guard})"
+  trap 'rm -rf "${guard}"' EXIT
   local created=""
   [[ -e ${dir} ]] || created=1
   mkdir -p "${dir}" || die "cannot create ${dir}"   # Codex refuses a CODEX_HOME that does not exist
