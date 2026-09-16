@@ -26,6 +26,8 @@ Each skill directory has a `README.md` explaining the concepts (blueprint and ha
 | Tool | What it does |
 |---|---|
 | [`bin/agent-worktree`](bin/agent-worktree) | Task-named git worktrees off one canonical clone + the `~/.agents/workspaces.md` manifest (who is working on what, where). `new` / `list` / `resume` / `status` / `done` / `register`. Blueprint's workspace homing registers through it. |
+| [`bin/claude-usage`](bin/claude-usage) | 5h / weekly / premium-model headroom across every Claude subscription you own, without logging in and out — each roster account keeps its own `CLAUDE_CONFIG_DIR` under `~/.claude-accounts/`. `~/.claude` is a *slot*: whichever roster account is logged into it is matched by email and marked **active**, so switching logins never mislabels a row. `add` / `list` / `best` / `show` / `rename` / `remove` / `statusline`. |
+| [`bin/codex-usage`](bin/codex-usage) | Codex weekly limit + credit balance, read off the session rollouts Codex already writes (no spend). `statusline` segment for the status line. |
 
 `install.sh` symlinks `bin/*` into `~/.local/bin`.
 

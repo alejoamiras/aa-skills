@@ -10,13 +10,20 @@
 # Everything reads as headroom LEFT, and rows sort best-account-first: most
 # premium-model headroom, ties broken by whichever window frees up soonest.
 #
+# ~/.claude ("main") is a SLOT, not an account: whatever is logged into it is
+# what a plain `claude` uses, and that changes whenever you log out and back in
+# as someone else. Named accounts under the accounts root are the roster —
+# each keeps its own login, so its identity never drifts. The table matches
+# the slot to the roster by email and marks that account ACTIVE; a slot login
+# nobody in the roster matches is listed as "main" until you `add` it.
+#
 #   claude-usage                 table for every account
 #   claude-usage --json          machine-readable (statusline, cron)
 #   claude-usage add <name>      one-time interactive login for a new account
 #   claude-usage show <name>     full /usage text, incl. what's burning the quota
 #   claude-usage list            configured accounts
 #   claude-usage remove <name>   forget an account (logs it out first)
-#   claude-usage rename <a> <b>  relabel an account, credentials untouched
+#   claude-usage rename <a> <b>  relabel a roster account, credentials untouched
 #   claude-usage best            which account to use right now, and why
 #   claude-usage statusline      compact cached segment for statusline.sh
 #   claude-usage refresh         re-probe every account into the snapshot cache
@@ -73,9 +80,11 @@ valid_name() { [[ $1 =~ ^[A-Za-z0-9._-]+$ && $1 != .* ]]; }
 
 command -v claude > /dev/null || die "claude CLI not on PATH"
 
-# Directory key -> display label ("main" when the primary is unlabelled).
+# Directory key -> display label. The slot is always "main": its display name
+# comes from the roster account matched to it, never from an alias.
 label_for() {
   local key="$1" k v
+  [[ ${key} == main ]] && { printf 'main'; return; }
   if [[ -f ${LABELS_FILE} ]]; then
     while IFS='=' read -r k v || [[ -n ${k} ]]; do
       [[ ${k} == "${key}" && -n ${v} ]] && { printf '%s' "${v}"; return; }
@@ -90,6 +99,7 @@ key_for() {
   local want="$1" k v
   if [[ -f ${LABELS_FILE} ]]; then
     while IFS='=' read -r k v || [[ -n ${k} ]]; do
+      [[ ${k} == main ]] && continue   # a pre-roster alias for the slot; ignored
       [[ ${v} == "${want}" && -n ${k} ]] && { printf '%s' "${k}"; return; }
     done < "${LABELS_FILE}"
   fi
@@ -240,7 +250,7 @@ probe() {
 
   auth=$(run_claude "${dir}" auth status --json 2> /dev/null)
   if [[ ${auth} != *'"loggedIn": true'* ]]; then
-    printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\t-\tlogged out — run: claude-usage add %s\n' \
+    printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\t-\t0\tlogged out — run: claude-usage add %s\n' \
       "${NEVER}" "${name}" "${name}"
     return
   fi
@@ -250,7 +260,7 @@ probe() {
 
   usage=$(run_claude "${dir}" -p "/usage" --allowed-tools "" 2> /dev/null)
   if [[ -z ${usage} || ${usage} != *"Current session:"* ]]; then
-    printf '%s\t%s\t%s\t%s\t-\t-\t-\t-\t-\t-\tno usage data (API-key auth or CLI error)\n' \
+    printf '%s\t%s\t%s\t%s\t-\t-\t-\t-\t-\t-\t0\tno usage data (API-key auth or CLI error)\n' \
       "${NEVER}" "${name}" "${email:--}" "${plan:--}"
     return
   fi
@@ -273,10 +283,42 @@ probe() {
 
   key=$(printf '%03d%s' "$((100 - ${p_left//-/0}))" "$(to_epoch "${w_reset}")")
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t\n' \
     "${key}" "${name}" "${email:--}" "${plan:--}" \
     "${s_left:--}" "${s_reset:--}" "${w_left:--}" "${w_reset:--}" \
     "${p_label:--}" "${p_left:--}"
+}
+
+# Resolve the slot against the roster. The "main" row and a roster row sharing
+# an email are the same account seen through two logins: keep the roster row
+# (that is the name the user chose) and mark it active. No match → the slot
+# stays as "main", active, so the numbers are still shown.
+mark_active() {
+  local rows line key name email plan sl sr wl wr pl pv active note
+  local main_email="" matched=""
+  rows=$(cat)
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
+    [[ ${name} == main ]] && { main_email="${email}"; break; }
+  done <<< "${rows}"
+  if [[ -n ${main_email} && ${main_email} != "-" ]]; then
+    while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
+      [[ ${name} != main && ${email} == "${main_email}" ]] && { matched="${name}"; break; }
+    done <<< "${rows}"
+  fi
+  while IFS= read -r line; do
+    [[ -z ${line} ]] && continue
+    IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note <<< "${line}"
+    if [[ ${name} == main ]]; then
+      [[ -n ${matched} ]] && continue
+      active=1
+    elif [[ ${name} == "${matched}" ]]; then
+      active=1
+    else
+      active=0
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "${key}" "${name}" "${email}" "${plan}" "${sl}" "${sr}" "${wl}" "${wr}" "${pl}" "${pv}" "${active}" "${note}"
+  done <<< "${rows}"
 }
 
 gather() {
@@ -290,7 +332,7 @@ gather() {
   done < <(account_rows)
   [[ ${i} -eq 0 ]] && die "no accounts found. Add one: claude-usage add <name>"
   wait
-  cat "${tmp}"/* | sort
+  cat "${tmp}"/* | sort | mark_active
 }
 
 # Pad a cell to a visible width: printf's %-Ns counts ANSI escapes as
@@ -327,7 +369,7 @@ pct_paint() {
 }
 
 table() {
-  local rows key name email plan sl sr wl wr pl pv note
+  local rows key name email plan sl sr wl wr pl pv active note
   rows=$(gather) || exit 1
 
   local -a n_c=() p_c=() s_pl=() s_pa=() w_pl=() w_pa=() x_pl=() x_pa=() notes=()
@@ -335,7 +377,7 @@ table() {
   local h0="ACCOUNT" h1="PLAN" h2="SESSION" h3="WEEK (all)"
   local w0=${#h0} w1=${#h1} w2=${#h2} w3=${#h3} w4
 
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv note; do
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
     [[ -z ${name} ]] && continue
     [[ -n ${note} ]] && notes+=("${name}: ${note}")
     if [[ ${pl} != "-" && -n ${pl} ]]; then
@@ -345,7 +387,13 @@ table() {
     fi
 
     when=${wr/ at / }
-    n_c+=("${name}"); p_c+=("${plan}")
+    if [[ ${active} == 1 ]]; then
+      n_c+=("▶ ${name}")
+      [[ ${name} == main ]] && notes+=("main: this login is not in the roster yet — claude-usage add <name> gives it a name")
+    else
+      n_c+=("  ${name}")
+    fi
+    p_c+=("${plan}")
     s_pl+=("$(pct_plain "${sl}")");  s_pa+=("$(pct_paint "${sl}")")
     x_pl+=("$(pct_plain "${pv}")");  x_pa+=("$(pct_paint "${pv}")")
     if [[ ${wl} == "-" || ${when} == "-" ]]; then
@@ -386,10 +434,10 @@ table() {
   hrule "└" "┴" "┘" "${w0}" "${w1}" "${w2}" "${w3}" "${w4}"
 
   if [[ -n ${GRN} ]]; then
-    printf '%s  all values = %% LEFT   %sgreen >50%s %s· %syellow ≤50%s %s· %sred ≤15%s\n' \
+    printf '%s  ▶ = active in ~/.claude · all values = %% LEFT   %sgreen >50%s %s· %syellow ≤50%s %s· %sred ≤15%s\n' \
       "${DIM}" "${GRN}" "${RST}${DIM}" "${DIM}" "${YEL}" "${RST}${DIM}" "${DIM}" "${RED}" "${RST}"
   else
-    printf '  all values = %% LEFT\n'
+    printf '  ▶ = active in ~/.claude · all values = %% LEFT\n'
   fi
   local n
   ((${#notes[@]})) || return 0
@@ -404,15 +452,15 @@ jq_str() {
 }
 
 json() {
-  local rows first=1 key name email plan sl sr wl wr pl pv note
+  local rows first=1 key name email plan sl sr wl wr pl pv active note
   rows=$(gather) || exit 1
   printf '['
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv note; do
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
     [[ -z ${name} ]] && continue
     ((first)) || printf ','
     first=0
-    printf '\n  {"account":"%s","email":"%s","plan":"%s","session_left_pct":%s,"session_resets":"%s","week_left_pct":%s,"week_resets":"%s","premium_model":"%s","premium_left_pct":%s,"note":"%s"}' \
-      "$(jq_str "${name}")" "$(jq_str "${email}")" "$(jq_str "${plan}")" \
+    printf '\n  {"account":"%s","active":%s,"email":"%s","plan":"%s","session_left_pct":%s,"session_resets":"%s","week_left_pct":%s,"week_resets":"%s","premium_model":"%s","premium_left_pct":%s,"note":"%s"}' \
+      "$(jq_str "${name}")" "$([[ ${active} == 1 ]] && printf true || printf false)" "$(jq_str "${email}")" "$(jq_str "${plan}")" \
       "${sl//-/null}" "$(jq_str "${sr}")" "${wl//-/null}" "$(jq_str "${wr}")" \
       "$(jq_str "${pl}")" "${pv//-/null}" "$(jq_str "${note}")"
   done <<< "${rows}"
@@ -493,11 +541,18 @@ cached_rows() {
 }
 
 # Which account this shell is pointed at. Claude Code's status-line payload
-# carries no account identity, so the config dir is the only signal — and an
-# unset variable means the primary account.
+# carries no account identity, so the config dir is the only signal. An unset
+# variable means the slot, whose name is whatever the snapshot matched it to.
 current_account() {
-  local d="${CLAUDE_CONFIG_DIR:-}"
-  [[ -z ${d} ]] && { label_for main; return; }
+  local d="${CLAUDE_CONFIG_DIR:-}" key name email plan sl sr wl wr pl pv active note
+  if [[ -z ${d} ]]; then
+    if [[ -f ${SNAPSHOT} ]]; then
+      while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
+        [[ ${active} == 1 ]] && { printf '%s' "${name}"; return; }
+      done < "${SNAPSHOT}"
+    fi
+    printf 'main'; return
+  fi
   d=$(cd "${d}" 2> /dev/null && pwd -P) || { printf '%s' "${UNKNOWN}"; return; }
   # Immediate child only: $ACCOUNTS_ROOT/b/a is not the account "a".
   if [[ -n ${ACCOUNTS_ROOT} && $(dirname "${d}") == "${ACCOUNTS_ROOT}" ]]; then
@@ -515,12 +570,12 @@ current_account() {
 spent() { [[ $1 =~ ^[0-9]+$ ]] && (($1 == 0)); }
 
 best_row() {
-  local key name email plan sl sr wl wr pl pv note rows
+  local key name email plan sl sr wl wr pl pv active note rows
   rows=$(cat)
   # Rows arrive sorted premium-desc then reset-asc, so the first usable one
   # wins. "Usable" requires weekly headroom: an account with Fable left but a
   # spent weekly budget cannot actually be used.
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv note; do
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
     [[ -z ${name} || -n ${note} ]] && continue
     [[ ${wl} =~ ^[0-9]+$ ]] || continue
     ((wl > 0)) || continue
@@ -530,7 +585,7 @@ best_row() {
   done <<< "${rows}"
   # Everything is spent, so the useful answer is whichever returns first. The
   # sort key is <premium><epoch>, so re-sorting from char 4 orders by reset.
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv note; do
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
     [[ -z ${name} || -n ${note} ]] && continue
     printf '%s\t%s\t%s\t%s\tfallback\n' "${name}" "${pv}" "${pl}" "${wr}"
     return 0
@@ -559,7 +614,7 @@ cmd_best() {
 # live for the current account, and the snapshot's copy would only be staler.
 cmd_statusline() {
   local rows cur best_name best_pv best_wr best_how cur_pv cur_pl found=0 age
-  local key name email plan sl sr wl wr pl pv note out
+  local key name email plan sl sr wl wr pl pv active note out
 
   rows=$(cached_rows) || return 0
   cur=$(current_account)
@@ -568,7 +623,7 @@ cmd_statusline() {
   # straddle a refresh and render a current/best pair that never coexisted.
   IFS=$'\t' read -r best_name best_pv _ best_wr best_how < <(best_row <<< "${rows}") || return 0
 
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv note; do
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
     [[ ${name} == "${cur}" ]] || continue
     cur_pv="${pv}"; cur_pl="${pl}"; found=1; break
   done <<< "${rows}"
@@ -616,6 +671,13 @@ cmd_add() {
   else
     CLAUDE_CONFIG_DIR="${dir}" claude auth login --claudeai
   fi
+  rm -f "${SNAPSHOT}"   # the roster changed; the next render re-matches the slot
+  local added main_email
+  added=$(run_claude "${dir}" auth status --json 2> /dev/null | sed -n 's/.*"email": "\([^"]*\)".*/\1/p' | head -1)
+  main_email=$(run_claude "${MAIN_DIR}" auth status --json 2> /dev/null | sed -n 's/.*"email": "\([^"]*\)".*/\1/p' | head -1)
+  if [[ -n ${added} && ${added} == "${main_email}" ]]; then
+    printf 'This is also the account logged into ~/.claude — it now shows as "%s" (active).\n' "${name}"
+  fi
 }
 
 # Remove one mapping by exact key match, never by pattern.
@@ -637,11 +699,11 @@ cmd_rename() {
   valid_name "${new}" || die "invalid name: ${new} (letters, digits, . _ - only; no leading dot)"
 
   key=$(key_for "${old}")
-  if [[ ${key} != main ]]; then
-    [[ -d ${ACCOUNTS_ROOT}/${key} ]] || die "unknown account: ${old} (try: claude-usage list)"
-  fi
+  [[ ${key} == main ]] && die "main is the ~/.claude slot, not an account: it takes the name of the roster account logged into it (claude-usage add <name>)"
+  [[ -d ${ACCOUNTS_ROOT}/${key} ]] || die "unknown account: ${old} (try: claude-usage list)"
+  [[ ${new} == main ]] && die "'main' is reserved for ~/.claude"
   local taken; taken=$(key_for "${new}")
-  [[ ${taken} != "${key}" && ( ${taken} == main || -d ${ACCOUNTS_ROOT}/${taken} ) ]] &&
+  [[ ${taken} != "${key}" && -d ${ACCOUNTS_ROOT}/${taken} ]] &&
     die "name already in use: ${new}"
 
   mkdir -p "${ACCOUNTS_ROOT}"
@@ -679,10 +741,16 @@ cmd_remove() {
 }
 
 cmd_list() {
-  local name dir
+  local name dir cur=""
+  # No snapshot means nothing has been matched yet — claim nothing.
+  [[ -f ${SNAPSHOT} ]] && cur=$(current_account)
   while IFS=$'\t' read -r name dir; do
     [[ -z ${name} ]] && continue
-    printf '%-14s %s\n' "${name}" "${dir}"
+    if [[ ${name} == "${cur}" ]]; then
+      printf '%-14s %s  (active in ~/.claude)\n' "${name}" "${dir}"
+    else
+      printf '%-14s %s\n' "${name}" "${dir}"
+    fi
   done < <(account_rows)
 }
 
