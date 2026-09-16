@@ -1,0 +1,611 @@
+#!/usr/bin/env bash
+# claude-usage — one table of 5h/weekly limits across every Claude subscription
+# you own, without logging in and out.
+#
+# Each account gets its own CLAUDE_CONFIG_DIR, which is what isolates the
+# credential (Claude Code namespaces its keychain entry per config dir). Usage
+# comes from `claude -p "/usage"`, which the CLI answers locally — no API call,
+# no token ever leaves the keychain, $0.00 per check.
+#
+# Everything reads as headroom LEFT, and rows sort best-account-first: most
+# premium-model headroom, ties broken by whichever window frees up soonest.
+#
+#   claude-usage                 table for every account
+#   claude-usage --json          machine-readable (statusline, cron)
+#   claude-usage add <name>      one-time interactive login for a new account
+#   claude-usage show <name>     full /usage text, incl. what's burning the quota
+#   claude-usage list            configured accounts
+#   claude-usage remove <name>   forget an account (logs it out first)
+#   claude-usage rename <a> <b>  relabel an account, credentials untouched
+#   claude-usage best            which account to use right now, and why
+#   claude-usage statusline      compact cached segment for statusline.sh
+#   claude-usage refresh         re-probe every account into the snapshot cache
+
+set -uo pipefail
+
+ACCOUNTS_ROOT="${CLAUDE_ACCOUNTS_ROOT:-${HOME}/.claude-accounts}"
+MAIN_DIR="${HOME}/.claude"
+# Display names live here as "<dir-key>=<label>" rather than in the directory
+# names themselves: Claude Code keys each keychain entry to the config dir PATH,
+# so renaming a dir silently logs that account out (verified).
+LABELS_FILE="${ACCOUNTS_ROOT}/labels.conf"
+TIMEOUT="${CLAUDE_USAGE_TIMEOUT:-45}"
+NEVER=999999999999   # sorts absent or unparseable resets to the bottom
+
+# Snapshot cache. A status line renders constantly and must never pay for a
+# 4-second probe, so it reads this file and refreshes in the background.
+CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/claude-usage"
+# A non-default account root is a different universe of accounts; sharing one
+# snapshot between roots would serve each the other's numbers.
+[[ ${ACCOUNTS_ROOT} != "${HOME}/.claude-accounts" ]] &&
+  CACHE_DIR="${CACHE_DIR}/$(printf '%s' "${ACCOUNTS_ROOT}" | cksum | cut -d' ' -f1)"
+SNAPSHOT="${CACHE_DIR}/snapshot.tsv"
+LOCK_DIR="${CACHE_DIR}/refresh.lock"
+TTL="${CLAUDE_USAGE_TTL:-600}"
+
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; YEL=$'\033[33m'
+  GRN=$'\033[32m'; RST=$'\033[0m'
+else
+  BOLD=''; DIM=''; RED=''; YEL=''; GRN=''; RST=''
+fi
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+# Names become path components and JSON strings, so a leading dot (".."), a
+# quote, or a tab are all disqualifying.
+valid_name() { [[ $1 =~ ^[A-Za-z0-9._-]+$ && $1 != .* ]]; }
+
+command -v claude > /dev/null || die "claude CLI not on PATH"
+
+# Directory key -> display label ("main" when the primary is unlabelled).
+label_for() {
+  local key="$1" k v
+  if [[ -f ${LABELS_FILE} ]]; then
+    while IFS='=' read -r k v; do
+      [[ ${k} == "${key}" && -n ${v} ]] && { printf '%s' "${v}"; return; }
+    done < "${LABELS_FILE}"
+  fi
+  printf '%s' "${key}"
+}
+
+# Display label -> directory key. Falls through unchanged so every command
+# accepts either name.
+key_for() {
+  local want="$1" k v
+  if [[ -f ${LABELS_FILE} ]]; then
+    while IFS='=' read -r k v; do
+      [[ ${v} == "${want}" && -n ${k} ]] && { printf '%s' "${k}"; return; }
+    done < "${LABELS_FILE}"
+  fi
+  printf '%s' "${want}"
+}
+
+# Every account dir, as "<name>\t<config-dir>".
+account_rows() {
+  [[ -d ${MAIN_DIR} && -z ${CLAUDE_USAGE_SKIP_MAIN:-} ]] && printf '%s\t%s\n' "$(label_for main)" "${MAIN_DIR}"
+  [[ -d ${ACCOUNTS_ROOT} ]] || return 0
+  for dir in "${ACCOUNTS_ROOT}"/*/; do
+    [[ -d ${dir} ]] || continue
+    printf '%s\t%s\n' "$(label_for "$(basename "${dir}")")" "${dir%/}"
+  done
+}
+
+resolve_dir() {
+  local key; key=$(key_for "$1")
+  valid_name "${key}" || die "invalid account name: $1"
+  [[ ${key} == main ]] && { printf '%s' "${MAIN_DIR}"; return 0; }
+  [[ -d ${ACCOUNTS_ROOT}/${key} ]] || die "unknown account: $1 (try: claude-usage list)"
+  printf '%s' "${ACCOUNTS_ROOT}/${key}"
+}
+
+# A usage line is "<label>: N% used · resets <when> (<tz>)", except the reset
+# clause is absent for a bucket with no window open yet. Both parsers fall back
+# to "-" rather than leaking the unmatched line into the column.
+parse_left() {
+  local pct
+  pct=$(sed -E 's/.*: *([0-9]+)% used.*/\1/' <<< "$1")
+  [[ ${pct} =~ ^[0-9]+$ ]] || { printf -- '-'; return; }
+  pct=$((10#${pct}))
+  ((pct > 100)) && pct=100
+  printf '%s' "$((100 - pct))"
+}
+
+parse_reset() {
+  [[ $1 == *"resets "* ]] || { printf -- '-'; return; }
+  sed -E 's/.*resets ([^(]*)\(?.*/\1/' <<< "$1" | sed 's/ *$//'
+}
+
+# Parse "<mon> <day> <time>" against an explicit year, under either date
+# flavour: BSD wants -j -f <fmt>, GNU wants -d.
+parse_when() {
+  local s="$1" y="$2" fmt out
+  for fmt in "%b %d %I:%M%p %Y" "%b %d %I%p %Y" "%b %d %H:%M %Y"; do
+    out=$(date -j -f "${fmt}" "${s} ${y}" +%s 2> /dev/null)
+    if [[ ${out} =~ ^[0-9]+$ ]]; then printf '%s' "${out}"; return 0; fi
+  done
+  out=$(date -d "${s} ${y}" +%s 2> /dev/null)
+  if [[ ${out} =~ ^[0-9]+$ ]]; then printf '%s' "${out}"; return 0; fi
+  return 1
+}
+
+# "Sep 19 at 6am" → epoch, for ordering by which window frees up first.
+to_epoch() {
+  local when="$1" norm now year out
+  [[ -z ${when} || ${when} == "-" ]] && { printf '%s' "${NEVER}"; return; }
+  norm=${when/ at / }
+  # BSD date fills unspecified fields from the current clock, so a bare "6am"
+  # would inherit this minute and seconds. Pin them.
+  norm=$(sed -E 's/ ([0-9]{1,2})(am|pm)$/ \1:00\2/' <<< "${norm}")
+  now=$(date +%s); year=$(date +%Y)
+  out=$(parse_when "${norm}" "${year}") || { printf '%s' "${NEVER}"; return; }
+  # Reset strings carry no year, so a "Jan 2" read on Dec 30 parses as THIS
+  # January — a year overdue, which would sort it first and recommend the wrong
+  # account. Every real reset is within 7 days ahead, so anything well behind
+  # now is that rollover, not a genuinely elapsed window.
+  if ((out < now - 172800)); then
+    out=$(parse_when "${norm}" "$((year + 1))") || { printf '%s' "${NEVER}"; return; }
+  fi
+  printf '%012d' "${out}"
+}
+
+# Headroom, not consumption: red is the "about to be cut off" band.
+paint_left() {
+  local left="$1" colour
+  [[ ${left} == "-" ]] && { printf '%s-%s' "${DIM}" "${RST}"; return; }
+  if   ((left <= 15)); then colour="${RED}"
+  elif ((left <= 50)); then colour="${YEL}"
+  else                      colour="${GRN}"
+  fi
+  printf '%s%s%%%s' "${colour}" "${left}" "${RST}"
+}
+
+# Run the CLI against one account. CLAUDE_CONFIG_DIR namespaces the keychain
+# entry, so the primary account is only reachable with the variable UNSET —
+# exporting it, even pointed at ~/.claude, looks like a different account.
+run_claude() {
+  local dir="$1"; shift
+  local -a runner=() envcmd=(env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN)
+  # A stock macOS has no `timeout`; without this check every probe would fail
+  # instantly and report the account as logged out.
+  command -v timeout > /dev/null && runner=(timeout -k 5 "${TIMEOUT}")
+  if [[ ${dir} == "${MAIN_DIR}" ]]; then
+    # -u, not merely "don't set it": a refresh spawned from a session running
+    # under another account would otherwise inherit that account and probe it
+    # a second time under the name "main".
+    envcmd+=(-u CLAUDE_CONFIG_DIR)
+  else
+    envcmd+=("CLAUDE_CONFIG_DIR=${dir}")
+  fi
+  ${runner[@]+"${runner[@]}"} "${envcmd[@]}" claude "$@" < /dev/null
+}
+
+# One tab-separated record per account, prefixed with a sort key. Runs in a
+# subshell per account so the whole table fans out in parallel.
+probe() {
+  local name="$1" dir="$2" auth email plan usage line
+  local s_left s_reset w_left w_reset p_label p_left key
+
+  auth=$(run_claude "${dir}" auth status --json 2> /dev/null)
+  if [[ ${auth} != *'"loggedIn": true'* ]]; then
+    printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\t-\tlogged out — run: claude-usage add %s\n' \
+      "${NEVER}" "${name}" "${name}"
+    return
+  fi
+
+  email=$(sed -n 's/.*"email": "\([^"]*\)".*/\1/p' <<< "${auth}" | head -1)
+  plan=$(sed -n 's/.*"subscriptionType": "\([^"]*\)".*/\1/p' <<< "${auth}" | head -1)
+
+  usage=$(run_claude "${dir}" -p "/usage" --allowed-tools "" 2> /dev/null)
+  if [[ -z ${usage} || ${usage} != *"Current session:"* ]]; then
+    printf '%s\t%s\t%s\t%s\t-\t-\t-\t-\t-\t-\tno usage data (API-key auth or CLI error)\n' \
+      "${NEVER}" "${name}" "${email:--}" "${plan:--}"
+    return
+  fi
+
+  line=$(grep -m1 "Current session:" <<< "${usage}")
+  s_left=$(parse_left "${line}"); s_reset=$(parse_reset "${line}")
+
+  line=$(grep -m1 "Current week (all models)" <<< "${usage}")
+  w_left=$(parse_left "${line}"); w_reset=$(parse_reset "${line}")
+
+  # The second weekly bucket is named after whichever premium model the plan
+  # meters separately (Opus, Fable, …), so read the label rather than assume it.
+  line=$(grep "Current week (" <<< "${usage}" | grep -v "all models" | head -1)
+  if [[ -n ${line} ]]; then
+    p_label=$(sed -E 's/.*Current week \(([^)]*)\).*/\1/' <<< "${line}")
+    p_left=$(parse_left "${line}")
+  else
+    p_label="-"; p_left="-"
+  fi
+
+  key=$(printf '%03d%s' "$((100 - ${p_left//-/0}))" "$(to_epoch "${w_reset}")")
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t\n' \
+    "${key}" "${name}" "${email:--}" "${plan:--}" \
+    "${s_left:--}" "${s_reset:--}" "${w_left:--}" "${w_reset:--}" \
+    "${p_label:--}" "${p_left:--}"
+}
+
+gather() {
+  local tmp name dir i=0
+  tmp=$(mktemp -d)
+  trap 'rm -rf "${tmp}"' RETURN
+  while IFS=$'\t' read -r name dir; do
+    [[ -z ${name} ]] && continue
+    probe "${name}" "${dir}" > "${tmp}/$(printf '%03d' "${i}")" &
+    ((i++))
+  done < <(account_rows)
+  [[ ${i} -eq 0 ]] && die "no accounts found. Add one: claude-usage add <name>"
+  wait
+  cat "${tmp}"/* | sort
+}
+
+# Pad a cell to a visible width: printf's %-Ns counts ANSI escapes as
+# characters, so colour + %-Ns silently shreds the column alignment.
+pad_cell() {
+  local painted="$1" plain="$2" width="$3" align="$4" pad
+  pad=$((width - ${#plain}))
+  ((pad < 0)) && pad=0
+  if [[ ${align} == right ]]; then
+    printf '%*s%s' "${pad}" "" "${painted}"
+  else
+    printf '%s%*s' "${painted}" "${pad}" ""
+  fi
+}
+
+# Horizontal border: corner chars, then one width per column.
+hrule() {
+  local l="$1" m="$2" r="$3"; shift 3
+  local out="${l}" w first=1 i
+  for w in "$@"; do
+    ((first)) || out+="${m}"
+    first=0
+    for ((i = 0; i < w + 2; i++)); do out+="─"; done
+  done
+  printf '%s%s\n' "${out}" "${r}"
+}
+
+pct_plain() {
+  if [[ $1 == "-" ]]; then printf -- '-'; else printf '%s%%' "$1"; fi
+}
+
+pct_paint() {
+  if [[ $1 == "-" ]]; then printf '%s-%s' "${DIM}" "${RST}"; else paint_left "$1"; fi
+}
+
+table() {
+  local rows key name email plan sl sr wl wr pl pv note
+  rows=$(gather) || exit 1
+
+  local -a n_c=() p_c=() s_pl=() s_pa=() w_pl=() w_pa=() x_pl=() x_pa=() notes=()
+  local plabel="PREMIUM" when
+  local h0="ACCOUNT" h1="PLAN" h2="SESSION" h3="WEEK (all)"
+  local w0=${#h0} w1=${#h1} w2=${#h2} w3=${#h3} w4
+
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv note; do
+    [[ -z ${name} ]] && continue
+    [[ -n ${note} ]] && notes+=("${name}: ${note}")
+    [[ ${pl} != "-" && -n ${pl} ]] && plabel=$(tr '[:lower:]' '[:upper:]' <<< "${pl}")
+
+    when=${wr/ at / }
+    n_c+=("${name}"); p_c+=("${plan}")
+    s_pl+=("$(pct_plain "${sl}")");  s_pa+=("$(pct_paint "${sl}")")
+    x_pl+=("$(pct_plain "${pv}")");  x_pa+=("$(pct_paint "${pv}")")
+    if [[ ${wl} == "-" || ${when} == "-" ]]; then
+      w_pl+=("$(pct_plain "${wl}")"); w_pa+=("$(pct_paint "${wl}")")
+    else
+      w_pl+=("$(printf '%4s  %s' "$(pct_plain "${wl}")" "${when}")")
+      w_pa+=("$(printf '%*s%s  %s%s%s' "$((4 - ${#wl} - 1))" "" "$(pct_paint "${wl}")" "${DIM}" "${when}" "${RST}")")
+    fi
+  done <<< "${rows}"
+
+  ((${#n_c[@]})) || die "no accounts to show"
+  w4=${#plabel}
+
+  local i
+  for ((i = 0; i < ${#n_c[@]}; i++)); do
+    ((${#n_c[i]} > w0)) && w0=${#n_c[i]}
+    ((${#p_c[i]} > w1)) && w1=${#p_c[i]}
+    ((${#s_pl[i]} > w2)) && w2=${#s_pl[i]}
+    ((${#w_pl[i]} > w3)) && w3=${#w_pl[i]}
+    ((${#x_pl[i]} > w4)) && w4=${#x_pl[i]}
+  done
+
+  hrule "┌" "┬" "┐" "${w0}" "${w1}" "${w2}" "${w3}" "${w4}"
+  printf '│ %s%-*s%s │ %s%-*s%s │ %s%*s%s │ %s%-*s%s │ %s%*s%s │\n' \
+    "${BOLD}" "${w0}" "${h0}" "${RST}" "${BOLD}" "${w1}" "${h1}" "${RST}" \
+    "${BOLD}" "${w2}" "${h2}" "${RST}" "${BOLD}" "${w3}" "${h3}" "${RST}" \
+    "${BOLD}" "${w4}" "${plabel}" "${RST}"
+  hrule "├" "┼" "┤" "${w0}" "${w1}" "${w2}" "${w3}" "${w4}"
+
+  for ((i = 0; i < ${#n_c[@]}; i++)); do
+    printf '│ '
+    pad_cell "${n_c[i]}" "${n_c[i]}" "${w0}" left;               printf ' │ '
+    pad_cell "${p_c[i]}" "${p_c[i]}" "${w1}" left;               printf ' │ '
+    pad_cell "${s_pa[i]}" "${s_pl[i]}" "${w2}" right;            printf ' │ '
+    pad_cell "${w_pa[i]}" "${w_pl[i]}" "${w3}" left;             printf ' │ '
+    pad_cell "${x_pa[i]}" "${x_pl[i]}" "${w4}" right;            printf ' │\n'
+  done
+  hrule "└" "┴" "┘" "${w0}" "${w1}" "${w2}" "${w3}" "${w4}"
+
+  if [[ -n ${GRN} ]]; then
+    printf '%s  all values = %% LEFT   %sgreen >50%s %s· %syellow ≤50%s %s· %sred ≤15%s\n' \
+      "${DIM}" "${GRN}" "${RST}${DIM}" "${DIM}" "${YEL}" "${RST}${DIM}" "${DIM}" "${RED}" "${RST}"
+  else
+    printf '  all values = %% LEFT\n'
+  fi
+  local n
+  ((${#notes[@]})) || return 0
+  for n in "${notes[@]}"; do
+    printf '%s  %s%s\n' "${DIM}" "${n}" "${RST}"
+  done
+  return 0
+}
+
+json() {
+  local rows first=1 key name email plan sl sr wl wr pl pv note
+  rows=$(gather) || exit 1
+  printf '['
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv note; do
+    [[ -z ${name} ]] && continue
+    ((first)) || printf ','
+    first=0
+    printf '\n  {"account":"%s","email":"%s","plan":"%s","session_left_pct":%s,"session_resets":"%s","week_left_pct":%s,"week_resets":"%s","premium_model":"%s","premium_left_pct":%s,"note":"%s"}' \
+      "${name}" "${email}" "${plan}" \
+      "${sl//-/null}" "${sr}" "${wl//-/null}" "${wr}" \
+      "${pl}" "${pv//-/null}" "${note}"
+  done <<< "${rows}"
+  printf '\n]\n'
+  return 0
+}
+
+# Seconds since the snapshot was written, or NEVER when there is none.
+snapshot_age() {
+  local mt now
+  [[ -f ${SNAPSHOT} ]] || { printf '%s' "${NEVER}"; return; }
+  # `stat -f` means "format" to BSD stat and "filesystem" to GNU stat, so the
+  # wrong one returns junk instead of failing. Validate rather than trust.
+  mt=$(stat -c %Y "${SNAPSHOT}" 2> /dev/null)
+  [[ ${mt} =~ ^[0-9]+$ ]] || mt=$(stat -f %m "${SNAPSHOT}" 2> /dev/null)
+  [[ ${mt} =~ ^[0-9]+$ ]] || { printf '%s' "${NEVER}"; return; }
+  now=$(date +%s)
+  printf '%s' "$((now - mt))"
+}
+
+# Drop the lock only while we still hold it: one stolen after a stall belongs
+# to another process now.
+release_lock() {
+  [[ $(cat "${LOCK_DIR}/pid" 2> /dev/null) == "$$" ]] && rm -rf "${LOCK_DIR}"
+  return 0
+}
+
+# Probe every account and write the snapshot. mkdir is atomic, so of the N
+# agents that may fire this at once exactly one proceeds; the rest return
+# immediately rather than stampeding the CLI with duplicate probes.
+cmd_refresh() {
+  mkdir -p "${CACHE_DIR}"
+  if ! mkdir "${LOCK_DIR}" 2> /dev/null; then
+    local holder; holder=$(cat "${LOCK_DIR}/pid" 2> /dev/null)
+    # Reclaim only from a holder that is provably gone. A slow refresher keeps
+    # its lock however long it takes.
+    [[ ${holder} =~ ^[0-9]+$ ]] && kill -0 "${holder}" 2> /dev/null && return 0
+    [[ -n $(find "${LOCK_DIR}" -maxdepth 0 -mmin +5 2> /dev/null) ]] || return 0
+    rm -rf "${LOCK_DIR}"
+    mkdir "${LOCK_DIR}" 2> /dev/null || return 0
+  fi
+  printf '%s' "$$" > "${LOCK_DIR}/pid"
+  trap 'release_lock' EXIT
+
+  local tmp="${SNAPSHOT}.$$"
+  if gather > "${tmp}" 2> /dev/null && [[ -s ${tmp} ]]; then
+    mv -f "${tmp}" "${SNAPSHOT}"   # atomic swap: readers never see a half-written file
+  else
+    rm -f "${tmp}"
+  fi
+  return 0
+}
+
+spawn_refresh() {
+  ( "$0" refresh > /dev/null 2>&1 & ) 2> /dev/null
+}
+
+# Rows from cache, refreshing in the background when stale. Returns non-zero
+# only when there is nothing cached at all — the first run after install.
+cached_rows() {
+  local age; age=$(snapshot_age)
+  ((age > TTL)) && spawn_refresh
+  [[ -f ${SNAPSHOT} ]] || return 1
+  cat "${SNAPSHOT}"
+}
+
+# Which account this shell is pointed at. Claude Code's status-line payload
+# carries no account identity, so the config dir is the only signal — and an
+# unset variable means the primary account.
+current_account() {
+  local d="${CLAUDE_CONFIG_DIR:-}" root
+  [[ -z ${d} ]] && { label_for main; return; }
+  d=$(cd "${d}" 2> /dev/null && pwd -P) || { printf 'unknown'; return; }
+  root=$(cd "${ACCOUNTS_ROOT}" 2> /dev/null && pwd -P) || root=""
+  if [[ -n ${root} && ${d} == "${root}"/* ]]; then
+    label_for "$(basename "${d}")"
+  else
+    # Includes CLAUDE_CONFIG_DIR=~/.claude, which is NOT the primary account:
+    # setting the variable at all selects a different keychain entry.
+    printf 'unknown'
+  fi
+}
+
+# gather() already sorts best-first: most premium headroom, ties broken by the
+# window that frees up soonest. So the recommendation is just the first usable
+# row, and "no premium anywhere" falls out of the same ordering.
+best_row() {
+  local key name email plan sl sr wl wr pl pv note rows
+  rows=$(cat)
+  # Rows arrive sorted premium-desc then reset-asc, so the first usable one
+  # wins. "Usable" requires weekly headroom: an account with Fable left but a
+  # spent weekly budget cannot actually be used.
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv note; do
+    [[ -z ${name} || -n ${note} ]] && continue
+    [[ ${wl} =~ ^[0-9]+$ ]] || continue
+    ((wl > 0)) || continue
+    printf '%s\t%s\t%s\t%s\n' "${name}" "${pv}" "${pl}" "${wr}"
+    return 0
+  done <<< "${rows}"
+  # Everything is spent, so the useful answer is whichever returns first. The
+  # sort key is <premium><epoch>, so re-sorting from char 4 orders by reset.
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv note; do
+    [[ -z ${name} || -n ${note} ]] && continue
+    printf '%s\t%s\t%s\t%s\n' "${name}" "${pv}" "${pl}" "${wr}"
+    return 0
+  done < <(sort -k1.4 <<< "${rows}")
+  return 1
+}
+
+cmd_best() {
+  local name pv pl wr rows
+  rows=$(cached_rows) || die "no snapshot yet — run: claude-usage refresh"
+  IFS=$'\t' read -r name pv pl wr < <(best_row <<< "${rows}") ||
+    die "no usable account (all logged out?) — run: claude-usage"
+  if [[ ${pv} == "-" ]]; then
+    printf '%s (%s usage unknown; resets %s)\n' "${name}" "${pl}" "${wr}"
+  elif ((pv == 0)); then
+    printf '%s (no %s left anywhere; resets soonest, %s)\n' "${name}" "${pl}" "${wr}"
+  else
+    printf '%s (%s%% %s left)\n' "${name}" "${pv}" "${pl}"
+  fi
+}
+
+# One compact status-line segment. Reads cache only — never probes inline.
+# Deliberately omits 5h/week percentages: the status line already gets those
+# live for the current account, and the snapshot's copy would only be staler.
+cmd_statusline() {
+  local rows cur best_name best_pv best_wr cur_pv cur_pl found=0 age
+  local key name email plan sl sr wl wr pl pv note out
+
+  rows=$(cached_rows) || return 0
+  cur=$(current_account)
+
+  # Both halves of the segment come from ONE snapshot read: two reads could
+  # straddle a refresh and render a current/best pair that never coexisted.
+  IFS=$'\t' read -r best_name best_pv _ best_wr < <(best_row <<< "${rows}") || return 0
+
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv note; do
+    [[ ${name} == "${cur}" ]] || continue
+    cur_pv="${pv}"; cur_pl="${pl}"; found=1; break
+  done <<< "${rows}"
+
+  out="${cur}"
+  if ((found)) && [[ ${cur_pv} != "-" ]]; then
+    out="${out} ${DIM}$(tr '[:upper:]' '[:lower:]' <<< "${cur_pl}")${RST} $(paint_left "${cur_pv}")"
+  fi
+  if [[ ${best_name} != "${cur}" ]]; then
+    out="${out} ${YEL}→${RST} ${best_name}"
+    if [[ ${best_pv} != "-" ]] && ((best_pv > 0)); then
+      out="${out} $(paint_left "${best_pv}")"
+    else
+      # Nothing left anywhere, so the useful number is when it comes back.
+      out="${out} ${DIM}${best_wr/ at */}${RST}"
+    fi
+  else
+    out="${out} ${GRN}✓${RST}"
+  fi
+  # A snapshot this old means background refreshes are failing, not that usage
+  # has been flat for an hour.
+  age=$(snapshot_age)
+  ((age > TTL * 6)) && out="${out} ${DIM}(stale)${RST}"
+
+  printf '%s\n' "${out}"
+}
+
+cmd_add() {
+  local name="${1:-}" email="${2:-}"
+  [[ -n ${name} ]] || die "usage: claude-usage add <name> [email]"
+  [[ ${name} == main ]] && die "'main' is reserved for ~/.claude"
+  valid_name "${name}" || die "invalid name: ${name} (letters, digits, . _ - only)"
+  local dir="${ACCOUNTS_ROOT}/${name}"
+  mkdir -p "${dir}"
+  printf 'Logging in to account %s (config dir: %s)\n' "${name}" "${dir}"
+  if [[ -n ${email} ]]; then
+    CLAUDE_CONFIG_DIR="${dir}" claude auth login --claudeai --email "${email}"
+  else
+    CLAUDE_CONFIG_DIR="${dir}" claude auth login --claudeai
+  fi
+}
+
+cmd_rename() {
+  local old="${1:-}" new="${2:-}" key line
+  [[ -n ${old} && -n ${new} ]] || die "usage: claude-usage rename <current-name> <new-name>"
+  [[ ${new} =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid name: ${new} (letters, digits, . _ - only)"
+
+  key=$(key_for "${old}")
+  if [[ ${key} != main ]]; then
+    [[ -d ${ACCOUNTS_ROOT}/${key} ]] || die "unknown account: ${old} (try: claude-usage list)"
+  fi
+  local taken; taken=$(key_for "${new}")
+  [[ ${taken} != "${key}" && ( ${taken} == main || -d ${ACCOUNTS_ROOT}/${taken} ) ]] &&
+    die "name already in use: ${new}"
+
+  mkdir -p "${ACCOUNTS_ROOT}"
+  local tmp="${LABELS_FILE}.$$"
+  : > "${tmp}"
+  if [[ -f ${LABELS_FILE} ]]; then
+    while IFS= read -r line; do
+      [[ ${line} == "${key}="* ]] && continue
+      printf '%s\n' "${line}" >> "${tmp}"
+    done < "${LABELS_FILE}"
+  fi
+  [[ ${new} != "${key}" ]] && printf '%s=%s\n' "${key}" "${new}" >> "${tmp}"
+  mv -f "${tmp}" "${LABELS_FILE}"
+
+  rm -f "${SNAPSHOT}"   # the cached rows carry the old name
+  printf '%s → %s\n' "${old}" "${new}"
+}
+
+cmd_remove() {
+  local name="${1:-}" dir key
+  [[ -n ${name} ]] || die "usage: claude-usage remove <name>"
+  key=$(key_for "${name}")
+  dir=$(resolve_dir "${name}")
+  # Guard the RESOLVED target, never the argument: the primary account can
+  # carry any label, and "../.claude" resolves there too.
+  [[ ${key} == main || ${dir} == "${MAIN_DIR}" ]] &&
+    die "refusing to remove the primary account (${MAIN_DIR}) — use: claude auth logout"
+  [[ ${dir} == "${ACCOUNTS_ROOT}"/* ]] ||
+    die "refusing: ${dir} is outside ${ACCOUNTS_ROOT}"
+  run_claude "${dir}" auth logout > /dev/null 2>&1
+  rm -rf "${dir}"
+  [[ -f ${LABELS_FILE} ]] && sed -i.bak "/^${key}=/d" "${LABELS_FILE}" && rm -f "${LABELS_FILE}.bak"
+  rm -f "${SNAPSHOT}"
+  printf 'removed %s\n' "${name}"
+}
+
+cmd_list() {
+  local name dir
+  while IFS=$'\t' read -r name dir; do
+    [[ -z ${name} ]] && continue
+    printf '%-14s %s\n' "${name}" "${dir}"
+  done < <(account_rows)
+}
+
+cmd_show() {
+  local name="${1:-}"
+  [[ -n ${name} ]] || die "usage: claude-usage show <name>"
+  local dir; dir=$(resolve_dir "${name}")
+  run_claude "${dir}" -p "/usage" --allowed-tools ""
+}
+
+case "${1:-table}" in
+  table|'')   table ;;
+  --json)     json ;;
+  refresh)    cmd_refresh ;;
+  best)       cmd_best ;;
+  statusline) cmd_statusline ;;
+  add)        shift; cmd_add "$@" ;;
+  remove|rm)  shift; cmd_remove "$@" ;;
+  rename)     shift; cmd_rename "$@" ;;
+  list|ls)    cmd_list ;;
+  show)       shift; cmd_show "$@" ;;
+  -h|--help)  sed -n '2,/^$/p' "$0" | sed 's/^#\{1,\} \{0,1\}//;s/^#$//' ;;
+  *)          die "unknown command: $1 (try --help)" ;;
+esac
