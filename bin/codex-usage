@@ -169,7 +169,7 @@ paint_left() {
 paint_credits() {
   local c="$1" u="$2" colour
   [[ ${u} == true ]] && { printf '%s∞%s' "${GRN}" "${RST}"; return; }
-  [[ ${c} == "-" ]] && { printf '%s-%s' "${DIM}" "${RST}"; return; }
+  [[ ${c} =~ ^[0-9]+(\.[0-9]+)?$ ]] || { printf '%s-%s' "${DIM}" "${RST}"; return; }
   if   ((10#${c%.*} < CRED_LOW)); then colour="${RED}"
   elif ((10#${c%.*} < CRED_MID)); then colour="${YEL}"
   else                              colour="${GRN}"
@@ -179,7 +179,7 @@ paint_credits() {
 
 credits_plain() {
   [[ $2 == true ]] && { printf '∞'; return; }
-  [[ $1 == "-" ]] && { printf -- '-'; return; }
+  [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]] || { printf -- '-'; return; }
   printf '%s' "${1%.*}"
 }
 
@@ -269,8 +269,9 @@ rpc_teardown() {
 # the 5H column, so neither is ever dropped. A lone window is placed by its
 # duration. Every field that reaches the shell is typed or cleaned here: these
 # values end up in arithmetic, TSV and JSON, and the API is a trust boundary.
-# A window with an unreadable usage value is "?" — reported but unknown, which
-# is not the same as "-" (not reported) and never counts as headroom. Strings
+# A window with an unreadable usage value, or a window that is not even an
+# object, is "?" — reported but unknown, which is not the same as "-" (not
+# reported) and never counts as headroom. Strings
 # are never empty (a tab-separated empty field would shift every later one)
 # and the credit balance is bounded, so shell arithmetic cannot overflow or
 # read a leading zero as octal.
@@ -284,14 +285,15 @@ JQ_PARSE='
   (res(2)) as $a | (res(3)) as $l
   | ($a.result.account) as $acct
   | ($l.result.rateLimits // {}) as $rl
-  | ([$rl.primary, $rl.secondary] | map(select(type == "object")) | sort_by(num(.windowDurationMins) // 0)) as $w
+  | def win(x): if x == null then null elif (x | type) == "object" then x else {usedPercent: "unreadable", windowDurationMins: 0} end;
+    ([win($rl.primary), win($rl.secondary)] | map(select(. != null)) | sort_by(num(.windowDurationMins) // 0)) as $w
   | (if ($w | length) == 2 then $w[1] elif ($w | length) == 1 and (num($w[0].windowDurationMins) // 0) >= 10080 then $w[0] else null end) as $wk
   | (if ($w | length) == 2 then $w[0] elif ($w | length) == 1 and (num($w[0].windowDurationMins) // 0) <  10080 then $w[0] else null end) as $ro
   | [ (($acct.email // "-") | clean),
       (($acct.planType // $rl.planType // "-") | clean),
       left($wk), reset($wk), left($ro), reset($ro),
       (if ($rl.credits | type) != "object" then "-"
-       else (($rl.credits.balance // "0") | tostring | if test("^(0|[1-9][0-9]{0,8})(\\.[0-9]{1,6})?$") then . else "-" end) end),
+       else (($rl.credits.balance // "0") | clean | if test("\\A(0|[1-9][0-9]{0,8})(\\.[0-9]{1,6})?\\z") then . else "-" end) end),
       (if $rl.credits.unlimited == true then "true" else "false" end),
       (if ($a | length) == 0 then "noreply"
        elif $a.error != null then "error:" + (($a.error.message // "?") | clean)
@@ -340,7 +342,9 @@ probe() {
   else cred_key=999999999; fi
   # Included quota outranks paid credits: an account that would answer on
   # credits sorts below every account that still answers on its subscription.
-  key=$(printf '%d%03d%09d%012d%012d' "$(eligibility "${wl}" "${rl}" "${cr}" "${un}")" "$((100 - ${wl//-/0}))" "${cred_key}" "${wr//-/${NEVER}}" "${rr//-/${NEVER}}")
+  local wk_used=100   # "-" (not reported) and "?" (unreadable) both sort as no headroom
+  [[ ${wl} =~ ^[0-9]+$ ]] && wk_used=$((100 - wl))
+  key=$(printf '%d%03d%09d%012d%012d' "$(eligibility "${wl}" "${rl}" "${cr}" "${un}")" "${wk_used}" "${cred_key}" "${wr//-/${NEVER}}" "${rr//-/${NEVER}}")
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t\n' \
     "${key}" "${name}" "${email:--}" "${plan:--}" "${wl:--}" "${wr:--}" "${rl:--}" "${rr:--}" "${cr:--}" "${un:-false}" "${now}"
@@ -611,10 +615,20 @@ cmd_refresh() {
     touch -r "${SNAPSHOT}" "${tmp}" 2> /dev/null
   fi
   # A refresher that stalled long enough to lose its lock has been superseded;
-  # its older observations must not land on top of the newer ones.
+  # its observations must not land on top of newer ones. Lock ownership plus a
+  # freshness check (our newest observation vs the file's) closes it to a
+  # microsecond window, and the next refresh corrects that within one TTL.
   [[ $(cat "${LOCK_DIR}/pid" 2> /dev/null) == "$$" ]] || { rm -f "${tmp}"; return 0; }
+  if [[ -f ${SNAPSHOT} ]] && (( $(newest_seen "${tmp}") < $(newest_seen "${SNAPSHOT}") )); then
+    rm -f "${tmp}"; return 0
+  fi
   mv -f "${tmp}" "${SNAPSHOT}"   # atomic swap: readers never see a half-written file
   return 0
+}
+
+# Largest observation time in a snapshot file (0 when none parse).
+newest_seen() {
+  awk -F '\t' '$11 ~ /^[0-9]+$/ && $11 > m { m = $11 } END { print m + 0 }' "$1" 2> /dev/null || printf 0
 }
 
 # Replace each transient-failure row with that account's row from the current
@@ -899,9 +913,9 @@ cmd_add() {
   # One login per account at a time: a second `add` for the same name could
   # authenticate into the home this one then deletes on its own failure.
   mkdir -p "${ACCOUNTS_ROOT}"
-  local guard="${ACCOUNTS_ROOT}/.adding-${key}"
-  mkdir "${guard}" 2> /dev/null || die "another add for ${name} is in progress (stale? rm -r ${guard})"
-  trap 'rm -rf "${guard}"' EXIT
+  ADD_GUARD="${ACCOUNTS_ROOT}/.adding-${key}"   # global: the EXIT trap outlives this function's locals
+  mkdir "${ADD_GUARD}" 2> /dev/null || die "another add for ${name} is in progress (stale? rm -r ${ADD_GUARD})"
+  trap 'rm -rf "${ADD_GUARD}"' EXIT
   local created=""
   [[ -e ${dir} ]] || created=1
   mkdir -p "${dir}" || die "cannot create ${dir}"   # Codex refuses a CODEX_HOME that does not exist
