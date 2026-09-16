@@ -841,6 +841,8 @@ If the package isn't eligible for trusted publishing, fall back to `NPM_TOKEN` �
 - **Vercel / cloud providers**: OIDC where supported
 - Never store long-lived access keys, tokens, or credentials as GitHub secrets when OIDC is an option
 
+**When OIDC is not an option, try to remove the credential before settling for guarding it.** A provider that can pull from the repo itself (Cloudflare Workers Builds, below) needs no secret in GitHub at all, which beats any amount of scoping on a token that still has to live somewhere. Only once neither federation nor a pull model exists does a stored token become the answer — scoped to one account and one capability, given a TTL, and rotated.
+
 ### Least-privilege for GitHub Actions tokens
 
 Default workflow `permissions:` to `contents: read`. Grant write scopes only on the specific job that needs it (and only the specific scope — e.g. `id-token: write` for OIDC, not blanket `write-all`).
