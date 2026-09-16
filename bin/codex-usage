@@ -729,12 +729,12 @@ cmd_statusline() {
   # current account, so an outage shows as "(stale)" rather than as nothing.
   IFS=$'\t' read -r best_name best_wl best_wr best_cr best_un best_how < <(best_row <<< "${rows}") || best_name=""
 
-  local cur_wl="-" cur_wr="-" cur_cr="-" cur_un=false cur_note="" cur_seen=""
+  local cur_wl="-" cur_wr="-" cur_rl="-" cur_cr="-" cur_un=false cur_note="" cur_seen=""
   while IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note; do
     [[ -z ${name} ]] && continue
     ((n++))
     [[ ${name} == "${cur}" ]] || continue
-    cur_wl="${wl}"; cur_wr="${wr}"; cur_cr="${cr}"; cur_un="${un}"; cur_note="${note}"; cur_seen="${seen}"
+    cur_wl="${wl}"; cur_wr="${wr}"; cur_rl="${rl}"; cur_cr="${cr}"; cur_un="${un}"; cur_note="${note}"; cur_seen="${seen}"
   done <<< "${rows}"
 
   out="${DIM}codex${RST}"
@@ -748,9 +748,12 @@ cmd_statusline() {
   else
     [[ ${cur_wl} != "-" ]] && out="${out} $(paint_left "${cur_wl}")"
     [[ ${cur_wr} != "-" ]] && out="${out} ${DIM}$(until_reset "${cur_wr}")${RST}"
+    # Credits are only drawn on once the subscription windows are spent, so a
+    # zero balance is noise while there is headroom; a positive one is worth
+    # knowing about either way.
     if [[ ${cur_un} == true ]]; then
       out="${out} ${GRN}∞${RST}"
-    elif [[ ${cur_cr} != "-" ]]; then
+    elif [[ ${cur_cr} =~ ^[0-9]+ ]] && { ((${cur_cr%.*} > 0)) || spent "${cur_wl}" || spent "${cur_rl}"; }; then
       out="${out} $(paint_credits "${cur_cr}" "${cur_un}")${DIM}cr${RST}"
     fi
   fi
