@@ -18,6 +18,9 @@
 #                     "best" to let it pick the one with headroom. The run then
 #                     uses that account's CODEX_HOME instead of ~/.codex, and
 #                     the home is recorded so resume-codex.sh stays on it.
+#      CODEX_PROJECT_DOC_MAX_BYTES  Optional. Instruction-file budget, default
+#                     131072. Raise it when a global + project AGENTS.md pair
+#                     exceeds it; anything past the cap is dropped in silence.
 #
 # Output: human-readable progress on stderr, codex log redirected to a file.
 # Exit 2 is a usage error (bad arguments, unresolvable account) and prints no
@@ -40,6 +43,10 @@ CWD="${2:-$PWD}"
 EFFORT="${3:-xhigh}"
 SANDBOX="${4:-read-only}"
 MODEL="${5:-${CODEX_MODEL:-gpt-6-astra}}"
+# A roster home carries AGENTS.md but no config.toml, so a global
+# project_doc_max_bytes never reaches it and instructions silently truncate at
+# Codex's 32 KiB default. Pass it per call so every home agrees.
+DOC_MAX="${CODEX_PROJECT_DOC_MAX_BYTES:-131072}"
 MODEL_ARGS=()
 [[ -n "$MODEL" ]] && MODEL_ARGS=(-m "$MODEL")
 
@@ -98,6 +105,7 @@ codex exec \
   --skip-git-repo-check \
   "${MODEL_ARGS[@]}" \
   -c "model_reasoning_effort=$EFFORT" \
+  -c "project_doc_max_bytes=$DOC_MAX" \
   -C "$CWD" \
   -o "$RESPONSE_FILE" \
   - < "$PROMPT_FILE" \

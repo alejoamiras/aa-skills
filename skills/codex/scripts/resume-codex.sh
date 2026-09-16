@@ -36,6 +36,10 @@ PROMPT_FILE="${2:-}"
 CODEX_DIR="${3:-}"
 EFFORT="${4:-xhigh}"
 MODEL="${5:-${CODEX_MODEL:-gpt-6-astra}}"
+# A roster home carries AGENTS.md but no config.toml, so a global
+# project_doc_max_bytes never reaches it and instructions silently truncate at
+# Codex's 32 KiB default. Pass it per call so every home agrees.
+DOC_MAX="${CODEX_PROJECT_DOC_MAX_BYTES:-131072}"
 MODEL_ARGS=()
 [[ -n "$MODEL" ]] && MODEL_ARGS=(-m "$MODEL")
 
@@ -129,6 +133,7 @@ codex exec resume "$SID" \
   --skip-git-repo-check \
   "${MODEL_ARGS[@]}" \
   -c "model_reasoning_effort=$EFFORT" \
+  -c "project_doc_max_bytes=$DOC_MAX" \
   -o "$RESPONSE_FILE" \
   - < "$PROMPT_FILE" \
   >> "$LOG_FILE" 2>&1
