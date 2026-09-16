@@ -259,7 +259,8 @@ JQ_PARSE='
       left($wk), reset($wk), left($ro), reset($ro),
       (if $rl.credits == null then "-" else (($rl.credits.balance // "0") | tostring) end),
       (($rl.credits.unlimited // false) | tostring),
-      (if ($a | length) == 0 or ($l | length) == 0 then "noreply"
+      (if ($a | length) == 0 then "noreply"
+       elif ($l | length) == 0 then "nolimits"
        elif $acct == null then "loggedout"
        elif $l.error != null then "error:" + ($l.error.message // "?")
        elif $l.result.ordinaryUsageAllowed == false then "blocked"
@@ -276,6 +277,11 @@ probe() {
     ok) ;;
     noreply)
       printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\tfalse\t%s\t0\tno answer from codex app-server (offline? timeout?)\n' "${NEVER}" "${name}" "${now}"
+      return ;;
+    nolimits)
+      # The identity answered, so keep it: retention must compare logins even
+      # when the limits half timed out.
+      printf '%s\t%s\t%s\t%s\t-\t-\t-\t-\t-\tfalse\t%s\t0\tno answer from codex app-server (limits timed out)\n' "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${now}"
       return ;;
     loggedout)
       if [[ ${dir} == "${MAIN_DIR}" ]]; then
