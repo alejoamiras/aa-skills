@@ -34,6 +34,7 @@
 # `rename` calls are last-writer-wins.
 
 set -uo pipefail
+unset CDPATH   # `cd x && pwd -P` must print one path, not cd's CDPATH echo too
 
 ACCOUNTS_ROOT="${CLAUDE_ACCOUNTS_ROOT:-${HOME}/.claude-accounts}"
 # Resolve before anything hashes or compares it: two worktrees each passing a

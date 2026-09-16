@@ -32,8 +32,10 @@
 # transcript so follow-up turns can resume the same session.
 
 set -euo pipefail
+unset CDPATH   # `cd x && pwd -P` must print one path
 
-PROMPT_FILE="${1:?prompt file required}"
+PROMPT_FILE="${1:-}"
+[[ -n "$PROMPT_FILE" ]] || { echo "usage: run-codex.sh <prompt-file> [cwd] [effort] [sandbox] [model]" >&2; exit 2; }
 CWD="${2:-$PWD}"
 EFFORT="${3:-xhigh}"
 SANDBOX="${4:-read-only}"

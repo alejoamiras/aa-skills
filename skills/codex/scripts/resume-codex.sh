@@ -22,15 +22,17 @@
 # a path, not a login — re-logging a roster home as someone else moves its
 # sessions with it. Exit 2 (usage error) prints no trailer.
 #
-# Output: same structured trailer as run-codex.sh.
+# Output: same structured trailer as run-codex.sh; exit 2 (usage error) prints none.
 #
 # WARNING: Do not run resume-codex.sh in parallel against the same CODEX_DIR.
 # The numbered-suffix selection is not atomic. Sequential resumes are safe.
 
 set -euo pipefail
+unset CDPATH   # `cd x && pwd -P` must print one path
 
 SID="${1-}"
-PROMPT_FILE="${2:?prompt file required}"
+PROMPT_FILE="${2:-}"
+[[ -n "$PROMPT_FILE" ]] || { echo "usage: resume-codex.sh <session-id-or-\"\"> <prompt-file> [codex-dir] [effort] [model]" >&2; exit 2; }
 CODEX_DIR="${3:-}"
 EFFORT="${4:-xhigh}"
 MODEL="${5:-${CODEX_MODEL:-gpt-6-astra}}"

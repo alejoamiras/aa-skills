@@ -41,6 +41,7 @@
 # offline the snapshot just ages until it is flagged stale.
 
 set -uo pipefail
+unset CDPATH   # `cd x && pwd -P` must print one path, not cd's CDPATH echo too
 
 ACCOUNTS_ROOT="${CODEX_ACCOUNTS_ROOT:-${HOME}/.codex-accounts}"
 # Resolve before anything hashes or compares it: two worktrees each passing a
@@ -643,12 +644,17 @@ cached_rows() {
   cat "${SNAPSHOT}"
 }
 
-# Which account this shell's consults run on: CODEX_HOME when set, else the
-# account CODEX_ACCOUNT names (what run-codex.sh will route through), else the
-# slot, whose name is whatever the snapshot matched it to.
+# Which account this shell's consults run on, in run-codex.sh's order of
+# precedence: CODEX_ACCOUNT (a name, or "best" = whatever best_row picks from
+# the snapshot) beats CODEX_HOME, which beats the slot, whose name is whatever
+# the snapshot matched it to.
 current_account() {
   local d="${CODEX_HOME:-}" key name email plan wl wr rl rr cr un seen active note
-  if [[ -z ${d} && -n ${CODEX_ACCOUNT:-} && ${CODEX_ACCOUNT} != best ]]; then
+  if [[ -n ${CODEX_ACCOUNT:-} ]]; then
+    if [[ ${CODEX_ACCOUNT} == best ]]; then
+      [[ -f ${SNAPSHOT} ]] && IFS=$'\t' read -r name _ < <(best_row < "${SNAPSHOT}") && { printf '%s' "${name}"; return; }
+      printf '%s' "${UNKNOWN}"; return
+    fi
     key=$(key_for "${CODEX_ACCOUNT}")
     if valid_name "${key}" && [[ -d ${ACCOUNTS_ROOT}/${key} ]]; then label_for "${key}"; else printf '%s' "${UNKNOWN}"; fi
     return
@@ -865,9 +871,10 @@ cmd_add() {
     printf 'Account %s already exists — logging it in again.\n' "${name}"
   fi
   dir="${ACCOUNTS_ROOT}/${key}"
+  [[ -e ${dir} && ! -d ${dir} ]] && die "${dir} exists and is not a directory"
   local created=""
-  [[ -d ${dir} ]] || created=1
-  mkdir -p "${dir}"   # Codex refuses a CODEX_HOME that does not exist
+  [[ -e ${dir} ]] || created=1
+  mkdir -p "${dir}" || die "cannot create ${dir}"   # Codex refuses a CODEX_HOME that does not exist
   # Global instructions travel with the account so a consult routed through it
   # sees the same AGENTS.md as the slot. A link to the slot's link tracks
   # whatever install.sh points it at later.
