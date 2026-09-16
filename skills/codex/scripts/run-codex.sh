@@ -109,6 +109,14 @@ if [[ -z "$SID" ]]; then
   echo "WARNING: could not extract session id from log; resume will be impossible." >&2
 fi
 
+# Observed on codex-cli 0.154.0: `codex exec` can exit 0 having written
+# nothing — no events, no response file. That is not a review; report it as
+# the failure it is rather than handing the caller an empty RESPONSE_FILE.
+if [[ $EXIT -eq 0 && ! -s "$RESPONSE_FILE" ]]; then
+  echo "ERROR: codex exited 0 but produced no response (empty or missing $RESPONSE_FILE)" >&2
+  EXIT=1
+fi
+
 if [[ $EXIT -ne 0 ]]; then
   echo "ERROR: codex exec exited with status $EXIT" >&2
   echo "--- log tail ---" >&2

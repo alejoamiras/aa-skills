@@ -126,6 +126,14 @@ codex exec resume "$SID" \
 EXIT=$?
 set -e
 
+# Observed on codex-cli 0.154.0: `codex exec resume` can exit 0 having written
+# nothing — no events, no response file. That is not a review; report it as
+# the failure it is rather than handing the caller an empty RESPONSE_FILE.
+if [[ $EXIT -eq 0 && ! -s "$RESPONSE_FILE" ]]; then
+  echo "ERROR: codex exited 0 but produced no response (empty or missing $RESPONSE_FILE)" >&2
+  EXIT=1
+fi
+
 if [[ $EXIT -ne 0 ]]; then
   echo "ERROR: codex exec resume exited with status $EXIT" >&2
   echo "--- log tail ---" >&2
