@@ -147,6 +147,9 @@ until_reset() {
   fi
 }
 
+# Elapsed since <epoch>, same compact format.
+elapsed() { until_reset $(( 2 * $(date +%s) - $1 )); }
+
 # Headroom, not consumption: red is the "about to be cut off" band.
 paint_left() {
   local left="$1" colour
@@ -266,26 +269,27 @@ JQ_PARSE='
 # One tab-separated record per account, prefixed with a sort key. Runs in a
 # subshell per account so the whole table fans out in parallel.
 probe() {
-  local name="$1" dir="$2" email plan wl wr rl rr cr un st key cred_key
+  local name="$1" dir="$2" email plan wl wr rl rr cr un st key cred_key now
+  now=$(date +%s)   # when these numbers were observed; retained rows keep theirs
   IFS=$'\t' read -r email plan wl wr rl rr cr un st < <(rpc_probe "${dir}" | jq -r -s "${JQ_PARSE}" 2> /dev/null)
   case ${st:-noreply} in
     ok) ;;
     noreply)
-      printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\tfalse\t0\tno answer from codex app-server (offline? timeout?)\n' "${NEVER}" "${name}"
+      printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\tfalse\t%s\t0\tno answer from codex app-server (offline? timeout?)\n' "${NEVER}" "${name}" "${now}"
       return ;;
     loggedout)
       if [[ ${dir} == "${MAIN_DIR}" ]]; then
-        printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\tfalse\t0\tlogged out — run: codex login\n' "${NEVER}" "${name}"
+        printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\tfalse\t%s\t0\tlogged out — run: codex login\n' "${NEVER}" "${name}" "${now}"
       else
-        printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\tfalse\t0\tlogged out — run: codex-usage add %s\n' "${NEVER}" "${name}" "${name}"
+        printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\tfalse\t%s\t0\tlogged out — run: codex-usage add %s\n' "${NEVER}" "${name}" "${now}" "${name}"
       fi
       return ;;
     blocked)
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\tusage not allowed on this account right now\n' \
-        "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${wl:--}" "${wr:--}" "${rl:--}" "${rr:--}" "${cr:--}" "${un:-false}"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\tusage not allowed on this account right now\n' \
+        "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${wl:--}" "${wr:--}" "${rl:--}" "${rr:--}" "${cr:--}" "${un:-false}" "${now}"
       return ;;
     *)
-      printf '%s\t%s\t%s\t%s\t-\t-\t-\t-\t-\tfalse\t0\trpc error: %s\n' "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${st#error:}"
+      printf '%s\t%s\t%s\t%s\t-\t-\t-\t-\t-\tfalse\t%s\t0\trpc error: %s\n' "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${now}" "${st#error:}"
       return ;;
   esac
 
@@ -297,8 +301,8 @@ probe() {
   # credits sorts below every account that still answers on its subscription.
   key=$(printf '%d%03d%09d%012d' "$(eligibility "${wl}" "${rl}" "${cr}" "${un}")" "$((100 - ${wl//-/0}))" "${cred_key}" "${wr//-/${NEVER}}")
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t\n' \
-    "${key}" "${name}" "${email:--}" "${plan:--}" "${wl:--}" "${wr:--}" "${rl:--}" "${rr:--}" "${cr:--}" "${un:-false}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t\n' \
+    "${key}" "${name}" "${email:--}" "${plan:--}" "${wl:--}" "${wr:--}" "${rl:--}" "${rr:--}" "${cr:--}" "${un:-false}" "${now}"
 }
 
 # Resolve the slot against the roster. The "main" row and a roster row sharing
@@ -306,20 +310,20 @@ probe() {
 # (that is the name the user chose) and mark it active. No match → the slot
 # stays as "main", active, so the numbers are still shown.
 mark_active() {
-  local rows line key name email plan wl wr rl rr cr un active note
+  local rows line key name email plan wl wr rl rr cr un seen active note
   local main_email="" matched=""
   rows=$(cat)
-  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
+  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note; do
     [[ ${name} == main ]] && { main_email="${email}"; break; }
   done <<< "${rows}"
   if [[ -n ${main_email} && ${main_email} != "-" ]]; then
-    while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
+    while IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note; do
       [[ ${name} != main && ${email} == "${main_email}" ]] && { matched="${name}"; break; }
     done <<< "${rows}"
   fi
   while IFS= read -r line; do
     [[ -z ${line} ]] && continue
-    IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note <<< "${line}"
+    IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note <<< "${line}"
     if [[ ${name} == main ]]; then
       [[ -n ${matched} ]] && continue
       active=1
@@ -328,12 +332,12 @@ mark_active() {
     else
       active=0
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "${key}" "${name}" "${email}" "${plan}" "${wl}" "${wr}" "${rl}" "${rr}" "${cr}" "${un}" "${active}" "${note}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "${key}" "${name}" "${email}" "${plan}" "${wl}" "${wr}" "${rl}" "${rr}" "${cr}" "${un}" "${seen}" "${active}" "${note}"
   done <<< "${rows}"
 }
 
-gather() {
+gather_raw() {
   local tmp name dir i=0
   tmp=$(mktemp -d)
   trap 'rm -rf "${tmp}"' RETURN
@@ -344,8 +348,10 @@ gather() {
   done < <(account_rows)
   [[ ${i} -eq 0 ]] && die "no accounts found. Add one: codex-usage add <name>"
   wait
-  cat "${tmp}"/* | sort | mark_active
+  cat "${tmp}"/* | sort
 }
+
+gather() { gather_raw | mark_active; }
 
 # Pad a cell to a visible width: printf's %-Ns counts ANSI escapes as
 # characters, so colour + %-Ns silently shreds the column alignment.
@@ -389,16 +395,19 @@ window_cells() {
 }
 
 table() {
-  local rows key name email plan wl wr rl rr cr un active note
+  local rows key name email plan wl wr rl rr cr un seen active note
   rows=$(gather) || exit 1
 
   local -a n_c=() p_c=() w_pl=() w_pa=() r_pl=() r_pa=() c_pl=() c_pa=() notes=()
   local h0="ACCOUNT" h1="PLAN" h2="WEEK" h3="5H" h4="CREDITS"
   local w0=${#h0} w1=${#h1} w2=${#h2} w3=${#h3} w4=${#h4} pl pa
 
-  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
+  local now; now=$(date +%s)
+  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note; do
     [[ -z ${name} ]] && continue
     [[ -n ${note} ]] && notes+=("${name}: ${note}")
+    # A live table never retains; this fires only when reading a snapshot.
+    [[ ${seen} =~ ^[0-9]+$ ]] && ((now - seen > TTL)) && notes+=("${name}: numbers are $(elapsed "${seen}") old — the probe has been failing")
     if [[ ${active} == 1 ]]; then
       n_c+=("▶ ${name}")
       [[ ${name} == main ]] && notes+=("main: this login is not in the roster yet — codex-usage add <name> gives it a name")
@@ -461,17 +470,17 @@ jq_str() {
 json_num() { if [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]]; then printf '%s' "$1"; else printf 'null'; fi; }
 
 json() {
-  local rows first=1 key name email plan wl wr rl rr cr un active note
+  local rows first=1 key name email plan wl wr rl rr cr un seen active note
   rows=$(gather) || exit 1
   printf '['
-  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
+  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note; do
     [[ -z ${name} ]] && continue
     ((first)) || printf ','
     first=0
-    printf '\n  {"account":"%s","active":%s,"email":"%s","plan":"%s","week_left_pct":%s,"week_resets_at":%s,"rolling_left_pct":%s,"rolling_resets_at":%s,"credits":%s,"unlimited":%s,"note":"%s"}' \
+    printf '\n  {"account":"%s","active":%s,"email":"%s","plan":"%s","week_left_pct":%s,"week_resets_at":%s,"rolling_left_pct":%s,"rolling_resets_at":%s,"credits":%s,"unlimited":%s,"seen_at":%s,"note":"%s"}' \
       "$(jq_str "${name}")" "$([[ ${active} == 1 ]] && printf true || printf false)" "$(jq_str "${email}")" "$(jq_str "${plan}")" \
       "$(json_num "${wl}")" "$(json_num "${wr}")" "$(json_num "${rl}")" "$(json_num "${rr}")" \
-      "$(json_num "${cr}")" "${un}" "$(jq_str "${note}")"
+      "$(json_num "${cr}")" "${un}" "$(json_num "${seen}")" "$(jq_str "${note}")"
   done <<< "${rows}"
   printf '\n]\n'
   return 0
@@ -532,28 +541,38 @@ cmd_refresh() {
   # When nothing answered at all the snapshot is left untouched, so it ages
   # into the "(stale)" marker instead of being replaced by a fresh-looking blank.
   local tmp="${SNAPSHOT}.$$" fresh
-  fresh=$(gather 2> /dev/null) && [[ -n ${fresh} ]] || return 0
+  fresh=$(gather_raw 2> /dev/null) && [[ -n ${fresh} ]] || return 0
   if ! grep -qvE $'\t(no answer from codex app-server|rpc error: )' <<< "${fresh}"; then return 0; fi
-  retain_cached <<< "${fresh}" > "${tmp}" && [[ -s ${tmp} ]] && mv -f "${tmp}" "${SNAPSHOT}"   # atomic swap
+  retain_cached <<< "${fresh}" | mark_active > "${tmp}" && [[ -s ${tmp} ]] && mv -f "${tmp}" "${SNAPSHOT}"   # atomic swap
   rm -f "${tmp}"
   return 0
 }
 
 # Replace each transient-failure row with that account's row from the current
-# snapshot (when there is one), then re-sort and re-match the slot.
+# snapshot, on RAW rows — the slot is matched once, afterwards. The snapshot
+# has no "main" row while the slot is matched (the roster row carries it,
+# flagged active), so a failed slot probe takes the active row's numbers
+# under the name "main" and re-matches through its email. Rows older than the
+# stale threshold are not worth retaining: better an honest failure.
 retain_cached() {
-  local rows line key name rest old
+  local rows line key name rest old seen limit
   rows=$(cat)
   [[ -f ${SNAPSHOT} ]] || { printf '%s\n' "${rows}"; return; }
+  limit=$(( $(date +%s) - TTL * 6 ))
   while IFS= read -r line; do
     [[ -z ${line} ]] && continue
     if [[ ${line} =~ $'\t'(no\ answer\ from\ codex\ app-server|rpc\ error:\ )[^$'\t']*$ ]]; then
       IFS=$'\t' read -r key name rest <<< "${line}"
-      old=$(awk -F '\t' -v n="${name}" '$2 == n { print; exit }' "${SNAPSHOT}")
-      [[ -n ${old} ]] && line="${old}"
+      if [[ ${name} == main ]]; then
+        old=$(awk -F '\t' '$2 == "main" || $12 == 1 { $2 = "main"; print; exit }' OFS='\t' "${SNAPSHOT}")
+      else
+        old=$(awk -F '\t' -v n="${name}" '$2 == n { print; exit }' "${SNAPSHOT}")
+      fi
+      seen=$(cut -f11 <<< "${old}")
+      [[ -n ${old} && ${seen} =~ ^[0-9]+$ ]] && ((seen >= limit)) && line="${old}"
     fi
     printf '%s\n' "${line}"
-  done <<< "${rows}" | sort | mark_active
+  done <<< "${rows}" | sort
 }
 
 spawn_refresh() {
@@ -572,7 +591,7 @@ cached_rows() {
 # Which account this shell is pointed at. An unset CODEX_HOME means the slot,
 # whose name is whatever the snapshot matched it to.
 current_account() {
-  local d="${CODEX_HOME:-}" key name email plan wl wr rl rr cr un active note
+  local d="${CODEX_HOME:-}" key name email plan wl wr rl rr cr un seen active note
   if [[ -n ${d} ]]; then
     d=$(cd "${d}" 2> /dev/null && pwd -P) || { printf '%s' "${UNKNOWN}"; return; }
     # Unlike CLAUDE_CONFIG_DIR, CODEX_HOME=~/.codex IS the slot: nothing is
@@ -581,7 +600,7 @@ current_account() {
   fi
   if [[ -z ${d} ]]; then
     if [[ -f ${SNAPSHOT} ]]; then
-      while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
+      while IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note; do
         [[ ${active} == 1 ]] && { printf '%s' "${name}"; return; }
       done < "${SNAPSHOT}"
     fi
@@ -620,10 +639,13 @@ eligibility() {   # <wl> <rl> <cr> <un>
 usable() { (($(eligibility "$@") < 2)); }
 
 best_row() {
-  local key name email plan wl wr rl rr cr un active note rows
+  local key name email plan wl wr rl rr cr un seen active note rows
   rows=$(cat)
-  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
+  # A retained row past the stale threshold is history, not a recommendation.
+  local limit=$(( $(date +%s) - TTL * 6 ))
+  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note; do
     [[ -z ${name} || -n ${note} ]] && continue
+    [[ ${seen} =~ ^[0-9]+$ ]] && ((seen < limit)) && continue
     usable "${wl}" "${rl}" "${cr}" "${un}" || continue
     printf '%s\t%s\t%s\t%s\t%s\tok\n' "${name}" "${wl}" "${wr}" "${cr}" "${un}"
     return 0
@@ -631,8 +653,9 @@ best_row() {
   # Everything is spent, so the useful answer is whichever frees up first. An
   # account is back when its LAST exhausted window resets, not its first.
   local free_at best_at="${NEVER}" best=""
-  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
+  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note; do
     [[ -z ${name} || -n ${note} ]] && continue
+    [[ ${seen} =~ ^[0-9]+$ ]] && ((seen < limit)) && continue
     free_at=0
     if spent "${wl}"; then [[ ${wr} =~ ^[0-9]+$ ]] && ((wr > free_at)) && free_at="${wr}"; [[ ${wr} =~ ^[0-9]+$ ]] || free_at="${NEVER}"; fi
     if spent "${rl}"; then [[ ${rr} =~ ^[0-9]+$ ]] && ((rr > free_at)) && free_at="${rr}"; [[ ${rr} =~ ^[0-9]+$ ]] || free_at="${NEVER}"; fi
@@ -683,7 +706,7 @@ cmd_home() {
 # One compact status-line segment. Reads cache only — never probes inline.
 cmd_statusline() {
   local rows cur best_name best_wl best_wr best_cr best_un best_how age n=0
-  local key name email plan wl wr rl rr cr un active note out=""
+  local key name email plan wl wr rl rr cr un seen active note out=""
 
   rows=$(cached_rows) || return 0
   cur=$(current_account)
@@ -692,12 +715,12 @@ cmd_statusline() {
   # straddle a refresh and render a current/best pair that never coexisted.
   IFS=$'\t' read -r best_name best_wl best_wr best_cr best_un best_how < <(best_row <<< "${rows}") || return 0
 
-  local cur_wl="-" cur_wr="-" cur_cr="-" cur_un=false cur_note=""
-  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
+  local cur_wl="-" cur_wr="-" cur_cr="-" cur_un=false cur_note="" cur_seen=""
+  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note; do
     [[ -z ${name} ]] && continue
     ((n++))
     [[ ${name} == "${cur}" ]] || continue
-    cur_wl="${wl}"; cur_wr="${wr}"; cur_cr="${cr}"; cur_un="${un}"; cur_note="${note}"
+    cur_wl="${wl}"; cur_wr="${wr}"; cur_cr="${cr}"; cur_un="${un}"; cur_note="${note}"; cur_seen="${seen}"
   done <<< "${rows}"
 
   out="${DIM}codex${RST}"
@@ -740,6 +763,7 @@ cmd_statusline() {
   # A snapshot this old means background refreshes are failing, not that usage
   # has been flat for an hour.
   age=$(snapshot_age)
+  [[ ${cur_seen} =~ ^[0-9]+$ ]] && (( $(date +%s) - cur_seen > age )) && age=$(( $(date +%s) - cur_seen ))
   ((age > TTL * 6)) && out="${out} ${DIM}(stale)${RST}"
 
   printf '%s\n' "${out}"
