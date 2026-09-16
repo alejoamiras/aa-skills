@@ -15,6 +15,10 @@
 #                (See run-codex.sh header; verified current 2026-09-04.
 #                Pass a 5th arg or $CODEX_MODEL to override.)
 #
+# The session is resumed in the CODEX_HOME recorded by run-codex.sh
+# (<codex-dir>/codex_home) — sessions live under the home that created them, so
+# CODEX_ACCOUNT is ignored here and the file wins over an inherited CODEX_HOME.
+#
 # Output: same structured trailer as run-codex.sh.
 #
 # WARNING: Do not run resume-codex.sh in parallel against the same CODEX_DIR.
@@ -66,6 +70,17 @@ elif [[ ! -d "$CODEX_DIR" ]]; then
   exit 2
 fi
 
+if [[ -f "$CODEX_DIR/codex_home" ]]; then
+  RECORDED=$(cat "$CODEX_DIR/codex_home")
+  if [[ -n "$RECORDED" ]]; then
+    [[ -d "$RECORDED" ]] || { echo "ERROR: recorded CODEX_HOME no longer exists: $RECORDED" >&2; exit 2; }
+    export CODEX_HOME="$RECORDED"
+  else
+    unset CODEX_HOME
+  fi
+fi
+[[ -n "${CODEX_ACCOUNT:-}" ]] && echo "NOTE: CODEX_ACCOUNT is ignored on resume; staying on ${CODEX_HOME:-~/.codex}" >&2
+
 N=1
 while [[ -e "$CODEX_DIR/response-$N.md" ]]; do
   N=$((N + 1))
@@ -75,7 +90,7 @@ LOG_FILE="$CODEX_DIR/log.jsonl"
 
 cp "$PROMPT_FILE" "$CODEX_DIR/followup-$N.md"
 
-echo "Resuming codex session $SID (model=${MODEL:-config default}, effort=$EFFORT)..." >&2
+echo "Resuming codex session $SID (model=${MODEL:-config default}, effort=$EFFORT, home=${CODEX_HOME:-~/.codex})..." >&2
 echo "Output dir: $CODEX_DIR" >&2
 
 set +e

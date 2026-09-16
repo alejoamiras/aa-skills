@@ -726,7 +726,7 @@ cmd_remove() {
   local name="${1:-}" dir key
   [[ -n ${name} ]] || die "usage: claude-usage remove <name>"
   key=$(key_for "${name}")
-  dir=$(resolve_dir "${name}")
+  dir=$(resolve_dir "${name}") || exit 1
   # Guard the RESOLVED target, never the argument: the primary account can
   # carry any label, and "../.claude" resolves there too.
   [[ ${key} == main || ${dir} == "${MAIN_DIR}" ]] &&
@@ -757,7 +757,7 @@ cmd_list() {
 cmd_show() {
   local name="${1:-}"
   [[ -n ${name} ]] || die "usage: claude-usage show <name>"
-  local dir; dir=$(resolve_dir "${name}")
+  local dir; dir=$(resolve_dir "${name}") || exit 1
   run_claude "${dir}" -p "/usage" --allowed-tools ""
 }
 

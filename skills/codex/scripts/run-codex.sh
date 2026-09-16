@@ -14,6 +14,11 @@
 #                valid as cheaper overrides. Pass a 5th arg or set
 #                $CODEX_MODEL to override per call.)
 #
+# Env: CODEX_ACCOUNT  Optional. A `codex-usage` roster account to run on, or
+#                     "best" to let it pick the one with headroom. The run then
+#                     uses that account's CODEX_HOME instead of ~/.codex, and
+#                     the home is recorded so resume-codex.sh stays on it.
+#
 # Output: human-readable progress on stderr, codex log redirected to a file.
 # The last 4 lines of stdout are guaranteed to be:
 #
@@ -44,14 +49,38 @@ if [[ ! -d "$CWD" ]]; then
   exit 2
 fi
 
+# Account routing. A roster account is just another CODEX_HOME; codex-usage
+# owns the mapping (and, for "best", the choice). A fallback pick — nothing
+# usable, this one frees up first — still runs, with a warning, because the
+# caller asked for whatever is best and the alternative is no consult at all.
+if [[ -n "${CODEX_ACCOUNT:-}" ]]; then
+  if ! command -v codex-usage > /dev/null 2>&1; then
+    echo "ERROR: CODEX_ACCOUNT=$CODEX_ACCOUNT needs codex-usage on PATH" >&2
+    exit 2
+  fi
+  set +e
+  ACCOUNT_HOME=$(codex-usage home "$CODEX_ACCOUNT" 2> /dev/null)
+  RC=$?
+  set -e
+  if [[ $RC -ne 0 && ( -z "$ACCOUNT_HOME" || ! -d "$ACCOUNT_HOME" ) ]]; then
+    echo "ERROR: cannot resolve CODEX_ACCOUNT=$CODEX_ACCOUNT (try: codex-usage list)" >&2
+    exit 2
+  fi
+  [[ $RC -ne 0 ]] && echo "WARNING: no Codex account has headroom right now; using the one that frees up first" >&2
+  export CODEX_HOME="$ACCOUNT_HOME"
+fi
+
 CODEX_DIR=$(mktemp -d -t codex-XXXXXXXX)
 RESPONSE_FILE="$CODEX_DIR/response.md"
 LOG_FILE="$CODEX_DIR/log.jsonl"
 SESSION_ID_FILE="$CODEX_DIR/session_id"
 
 cp "$PROMPT_FILE" "$CODEX_DIR/prompt.md"
+# Sessions live under the home that created them, so a resume must reuse it.
+# Empty means the slot (~/.codex).
+printf '%s' "${CODEX_HOME:-}" > "$CODEX_DIR/codex_home"
 
-echo "Running codex (model=${MODEL:-config default}, effort=$EFFORT, sandbox=$SANDBOX, cwd=$CWD)..." >&2
+echo "Running codex (model=${MODEL:-config default}, effort=$EFFORT, sandbox=$SANDBOX, cwd=$CWD, home=${CODEX_HOME:-~/.codex})..." >&2
 echo "Output dir: $CODEX_DIR" >&2
 
 set +e

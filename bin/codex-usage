@@ -1,100 +1,143 @@
 #!/usr/bin/env bash
-# codex-usage — Codex weekly limit and credit balance, for the Claude Code
-# status line.
+# codex-usage — one table of weekly/5h limits and credits across every Codex
+# (ChatGPT) account you own, without logging in and out.
 #
-# Codex records its own rate limits into the session rollout it writes on every
-# turn, so this reads them off disk: no API call, no tokens, no credits. The
-# corollary is that the numbers are exactly as fresh as your last Codex run —
-# refreshing them would mean spending credits to ask, which is not worth it for
-# a status bar. Age is shown whenever the data is not recent.
+# Each account gets its own CODEX_HOME under the accounts root, holding its own
+# auth.json. That is the only safe layout: Codex refresh tokens are single-use,
+# so a login copied between directories logs BOTH copies out at the next
+# refresh. Usage comes from `codex app-server`'s account/rateLimits/read call,
+# which is a bare GET of the usage endpoint — no model turn, no credits, no
+# tokens, ~1s per account, fanned out in parallel.
 #
-#   codex-usage              summary
-#   codex-usage --json       machine-readable
-#   codex-usage statusline   compact segment for statusline.sh
+# Everything reads as headroom LEFT, and rows sort best-account-first: most
+# weekly headroom, then the larger credit balance (what keeps Codex answering
+# once the week is spent), then whichever window frees up soonest.
 #
-# The record lives at payload.rate_limits of an event_msg whose payload.type is
-# "token_count". It is selected structurally on purpose: session files also hold
-# message text, and a prompt that merely mentions rate limits would poison any
-# grep-based parser.
+# ~/.codex ("main") is a SLOT, not an account: whatever is logged into it is
+# what a plain `codex` uses, and that changes whenever you log out and back in
+# as someone else. Named accounts under the accounts root are the roster —
+# each keeps its own login, so its identity never drifts. The table matches
+# the slot to the roster by email and marks that account ACTIVE; a slot login
+# nobody in the roster matches is listed as "main" until you `add` it.
+#
+#   codex-usage                 table for every account
+#   codex-usage --json          machine-readable (statusline, cron)
+#   codex-usage add <name>      one-time login for a new account (device code
+#                               over SSH, browser otherwise; --device/--browser)
+#   codex-usage show <name>     raw rate-limit payload, incl. per-model buckets
+#   codex-usage list            configured accounts
+#   codex-usage remove <name>   forget an account (logs it out first)
+#   codex-usage rename <a> <b>  relabel a roster account, credentials untouched
+#   codex-usage best            which account to use right now, and why
+#   codex-usage home <name>     that account's CODEX_HOME; "best" picks for you
+#   codex-usage statusline      compact cached segment for statusline.sh
+#   codex-usage refresh         re-probe every account into the snapshot cache
+#
+# Accepted limits: two refreshers can overlap if one is stolen from mid-claim
+# (wasted work only — the snapshot swap is atomic); concurrent `rename` calls
+# are last-writer-wins; the probe needs the network, so offline the snapshot
+# just ages until it is flagged stale.
 
 set -uo pipefail
 
-CODEX_DIR="${CODEX_HOME:-${HOME}/.codex}"
-SESSIONS="${CODEX_DIR}/sessions"
+ACCOUNTS_ROOT="${CODEX_ACCOUNTS_ROOT:-${HOME}/.codex-accounts}"
+# Resolve before anything hashes or compares it: two worktrees each passing a
+# relative "accounts" would otherwise share one snapshot and serve each other's
+# numbers.
+case "${ACCOUNTS_ROOT}" in
+  /*) ;;
+  *)  ACCOUNTS_ROOT="$(pwd -P)/${ACCOUNTS_ROOT}" ;;
+esac
+[[ -d ${ACCOUNTS_ROOT} ]] && ACCOUNTS_ROOT=$(cd "${ACCOUNTS_ROOT}" && pwd -P)
+MAIN_DIR="${HOME}/.codex"
+# Display names live here as "<dir-key>=<label>" rather than in the directory
+# names themselves: with the keyring credential store Codex keys the entry to
+# the home PATH, so renaming a dir would silently log that account out.
+LABELS_FILE="${ACCOUNTS_ROOT}/labels.conf"
+TIMEOUT="${CODEX_USAGE_TIMEOUT:-20}"
+NEVER=999999999999   # sorts absent or unparseable resets to the bottom
 # A round of foreign-reviewer consults costs roughly 40 credits, so under 100
 # means "not enough for another one" and under 400 means "watch it".
 CRED_LOW="${CODEX_USAGE_CRED_LOW:-100}"
 CRED_MID="${CODEX_USAGE_CRED_MID:-400}"
-STALE_AFTER="${CODEX_USAGE_STALE_AFTER:-21600}"   # 6h
+
+# Snapshot cache. A status line renders constantly and must never pay for a
+# network round trip, so it reads this file and refreshes in the background.
+CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/codex-usage"
+# A non-default account root is a different universe of accounts; sharing one
+# snapshot between roots would serve each the other's numbers.
+[[ ${ACCOUNTS_ROOT} != "${HOME}/.codex-accounts" ]] &&
+  CACHE_DIR="${CACHE_DIR}/$(printf '%s' "${ACCOUNTS_ROOT}" | cksum | cut -d' ' -f1)"
+SNAPSHOT="${CACHE_DIR}/snapshot.tsv"
+LOCK_DIR="${CACHE_DIR}/refresh.lock"
+TTL="${CODEX_USAGE_TTL:-600}"
 
 if [[ -t 1 ]]; then
-  DIM=$'\033[2m'; RST=$'\033[0m'; BOLD=$'\033[1m'
-  GRN=$'\033[32m'; YEL=$'\033[33m'; RED=$'\033[31m'
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; YEL=$'\033[33m'
+  GRN=$'\033[32m'; RST=$'\033[0m'
 else
-  DIM=''; RST=''; BOLD=''; GRN=''; YEL=''; RED=''
+  BOLD=''; DIM=''; RED=''; YEL=''; GRN=''; RST=''
 fi
 
-command -v jq > /dev/null || { printf 'codex-usage: jq is required\n' >&2; exit 1; }
+die() { printf '%s\n' "$*" >&2; exit 1; }
 
-# Newest rollout files, newest first. Walks the dated directory tree rather than
-# stat-ing every session (there are thousands after a while).
-recent_files() {
-  local y m d
-  [[ -d ${SESSIONS} ]] || return 0
-  for y in $(printf '%s\n' "${SESSIONS}"/*/ | sort -r | head -3); do
-    for m in $(printf '%s\n' "${y}"*/ | sort -r | head -2); do
-      for d in $(printf '%s\n' "${m}"*/ | sort -r | head -3); do
-        ls -t "${d}"*.jsonl 2> /dev/null
-      done
-    done
+UNKNOWN='?'   # rejected by valid_name, so no real account can collide with it
+
+# Names become path components and JSON strings, so a leading dot (".."), a
+# quote, or a tab are all disqualifying.
+valid_name() { [[ $1 =~ ^[A-Za-z0-9._-]+$ && $1 != .* ]]; }
+
+command -v codex > /dev/null || die "codex CLI not on PATH"
+command -v jq > /dev/null || die "codex-usage: jq is required"
+
+# Directory key -> display label. The slot is always "main": its display name
+# comes from the roster account matched to it, never from an alias.
+label_for() {
+  local key="$1" k v
+  [[ ${key} == main ]] && { printf 'main'; return; }
+  if [[ -f ${LABELS_FILE} ]]; then
+    while IFS='=' read -r k v || [[ -n ${k} ]]; do
+      [[ ${k} == "${key}" && -n ${v} ]] && { printf '%s' "${v}"; return; }
+    done < "${LABELS_FILE}"
+  fi
+  printf '%s' "${key}"
+}
+
+# Display label -> directory key. Falls through unchanged so every command
+# accepts either name.
+key_for() {
+  local want="$1" k v
+  if [[ -f ${LABELS_FILE} ]]; then
+    while IFS='=' read -r k v || [[ -n ${k} ]]; do
+      [[ ${k} == main ]] && continue
+      [[ ${v} == "${want}" && -n ${k} ]] && { printf '%s' "${k}"; return; }
+    done < "${LABELS_FILE}"
+  fi
+  printf '%s' "${want}"
+}
+
+# Every account dir, as "<name>\t<codex-home>".
+account_rows() {
+  [[ -d ${MAIN_DIR} && -z ${CODEX_USAGE_SKIP_MAIN:-} ]] && printf '%s\t%s\n' "$(label_for main)" "${MAIN_DIR}"
+  [[ -d ${ACCOUNTS_ROOT} ]] || return 0
+  for dir in "${ACCOUNTS_ROOT}"/*/; do
+    [[ -d ${dir} ]] || continue
+    printf '%s\t%s\n' "$(label_for "$(basename "${dir}")")" "${dir%/}"
   done
 }
 
-# Every field in ONE jq pass: a status line cannot afford an interpreter start
-# per value. Selection is structural — session files also contain message text,
-# and a prompt mentioning rate limits must not be parsed as data.
-# Codex reports several limit buckets under the same event; "codex" is the
-# subscription's own weekly window + credit balance. A "premium" bucket (a
-# separate model tier, usually empty) can land as the last record of a session
-# and would read as 0 credits if taken at face value. Records without a
-# limit_id predate the field and are kept.
-JQ_FIELDS='select(.type == "event_msg" and .payload.type == "token_count")
-  | .payload.rate_limits | select(. != null)
-  | select(.limit_id == null or .limit_id == "codex")
-  | [ (.plan_type // "?"),
-      (if .primary   then ((100 - (.primary.used_percent   // 0)) | floor) else "-" end),
-      (.primary.resets_at // "-"),
-      (if .secondary then ((100 - (.secondary.used_percent // 0)) | floor) else "-" end),
-      (.secondary.resets_at // "-"),
-      (.credits.balance // "-"),
-      (.credits.unlimited // false) ] | @tsv'
-
-# Last record from the newest session that has one; a session can end before its
-# first API turn, so keep looking past empty ones.
-latest_record() {
-  local f rec n=0
-  while IFS= read -r f; do
-    [[ -f ${f} ]] || continue
-    ((n++ > 8)) && break
-    rec=$(jq -r "${JQ_FIELDS}" "${f}" 2> /dev/null | tail -1)
-    if [[ -n ${rec} ]]; then
-      printf '%s\t%s\n' "${rec}" "$(mtime "${f}")"
-      return 0
-    fi
-  done < <(recent_files)
-  return 1
-}
-
-mtime() {
-  local t
-  t=$(stat -c %Y "$1" 2> /dev/null)
-  [[ ${t} =~ ^[0-9]+$ ]] || t=$(stat -f %m "$1" 2> /dev/null)
-  [[ ${t} =~ ^[0-9]+$ ]] && printf '%s' "${t}" || printf '0'
+resolve_dir() {
+  local key; key=$(key_for "$1")
+  valid_name "${key}" || die "invalid account name: $1"
+  [[ ${key} == main ]] && { printf '%s' "${MAIN_DIR}"; return 0; }
+  [[ -d ${ACCOUNTS_ROOT}/${key} ]] || die "unknown account: $1 (try: codex-usage list)"
+  printf '%s' "${ACCOUNTS_ROOT}/${key}"
 }
 
 # Compact "time until <epoch>": 3d4h, 2h13m, 7m, now.
 until_reset() {
   local rem d h m
+  [[ $1 =~ ^[0-9]+$ ]] || { printf -- '-'; return; }
   rem=$(( $1 - $(date +%s) ))
   ((rem <= 0)) && { printf 'now'; return; }
   d=$((rem / 86400)); h=$(((rem % 86400) / 3600)); m=$(((rem % 3600) / 60))
@@ -104,27 +147,23 @@ until_reset() {
   fi
 }
 
-# Elapsed, for staleness: the data only moves when Codex runs.
-since() {
-  local rem=$(( $(date +%s) - $1 )) d h m
-  ((rem < 0)) && rem=0
-  d=$((rem / 86400)); h=$(((rem % 86400) / 3600)); m=$(((rem % 3600) / 60))
-  if   ((d > 0)); then printf '%dd' "${d}"
-  elif ((h > 0)); then printf '%dh' "${h}"
-  else                 printf '%dm' "${m}"
-  fi
-}
-
+# Headroom, not consumption: red is the "about to be cut off" band.
 paint_left() {
-  local left="$1"
-  if   ((left <= 15)); then printf '%s%s%%%s' "${RED}" "${left}" "${RST}"
-  elif ((left <= 50)); then printf '%s%s%%%s' "${YEL}" "${left}" "${RST}"
-  else                      printf '%s%s%%%s' "${GRN}" "${left}" "${RST}"
+  local left="$1" colour
+  [[ ${left} == "-" ]] && { printf '%s-%s' "${DIM}" "${RST}"; return; }
+  if   ((left <= 15)); then colour="${RED}"
+  elif ((left <= 50)); then colour="${YEL}"
+  else                      colour="${GRN}"
   fi
+  printf '%s%s%%%s' "${colour}" "${left}" "${RST}"
 }
 
+# Credits: "-" (none reported), "∞", or the integer part painted by the
+# consult-round thresholds.
 paint_credits() {
-  local c="$1" colour
+  local c="$1" u="$2" colour
+  [[ ${u} == true ]] && { printf '%s∞%s' "${GRN}" "${RST}"; return; }
+  [[ ${c} == "-" ]] && { printf '%s-%s' "${DIM}" "${RST}"; return; }
   if   ((${c%.*} < CRED_LOW)); then colour="${RED}"
   elif ((${c%.*} < CRED_MID)); then colour="${YEL}"
   else                              colour="${GRN}"
@@ -132,61 +171,670 @@ paint_credits() {
   printf '%s%s%s' "${colour}" "${c%.*}" "${RST}"
 }
 
-# Sets: PLAN WK_LEFT WK_RESET FIVE_LEFT FIVE_RESET CREDITS UNLIMITED AGE
-load() {
-  local raw ts
-  raw=$(latest_record) || return 1
-  IFS=$'\t' read -r PLAN WK_LEFT WK_RESET FIVE_LEFT FIVE_RESET CREDITS UNLIMITED ts <<< "${raw}"
-  AGE=$(( $(date +%s) - ts ))
+credits_plain() {
+  [[ $2 == true ]] && { printf '∞'; return; }
+  [[ $1 == "-" ]] && { printf -- '-'; return; }
+  printf '%s' "${1%.*}"
+}
+
+# Environment for one account. The slot is only reachable with CODEX_HOME
+# UNSET (-u, not merely "don't set it": a refresh spawned from a shell pointed
+# at a roster account would otherwise probe that account twice, once as "main").
+env_for() {
+  if [[ $1 == "${MAIN_DIR}" ]]; then printf 'env\t-u\tCODEX_HOME'; else printf 'env\tCODEX_HOME=%s' "$1"; fi
+}
+
+run_codex() {
+  local dir="$1"; shift
+  local -a envcmd
+  IFS=$'\t' read -r -a envcmd <<< "$(env_for "${dir}")"
+  "${envcmd[@]}" codex "$@"
+}
+
+# Ask an account for its identity and limits over app-server's JSON-RPC stdio.
+# Responses arrive in any order, so read until both answers are in or the
+# deadline passes, then close stdin — the server exits on EOF. Prints the two
+# response lines; nothing at all when the server never answered.
+REQ_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"codex-usage","version":"1"}}}'
+REQ_READY='{"jsonrpc":"2.0","method":"initialized","params":{}}'
+REQ_ACCOUNT='{"jsonrpc":"2.0","id":2,"method":"account/read","params":{}}'
+REQ_LIMITS='{"jsonrpc":"2.0","id":3,"method":"account/rateLimits/read","params":null}'
+
+rpc_probe() {
+  local dir="$1" line got2=0 got3=0 deadline=$((SECONDS + TIMEOUT)) wait_for
+  local -a envcmd
+  IFS=$'\t' read -r -a envcmd <<< "$(env_for "${dir}")"
+  coproc CX { "${envcmd[@]}" codex app-server --stdio 2> /dev/null; }
+  local pid=${CX_PID} in=${CX[1]} out=${CX[0]}
+  { printf '%s\n' "${REQ_INIT}" "${REQ_READY}" "${REQ_ACCOUNT}" "${REQ_LIMITS}" >&"${in}"; } 2> /dev/null
+  while ((SECONDS < deadline)) && ((!got2 || !got3)); do
+    wait_for=$((deadline - SECONDS)); ((wait_for < 1)) && wait_for=1
+    IFS= read -r -t "${wait_for}" line <&"${out}" || break
+    # Ids 1-3 only, so the key is unambiguous; notifications carry no "id".
+    case ${line} in
+      *'"id":2,'*|*'"id":2}'*) got2=1 ;;
+      *'"id":3,'*|*'"id":3}'*) got3=1 ;;
+      *) continue ;;
+    esac
+    printf '%s\n' "${line}"
+  done
+  exec {in}>&- {out}<&-
+  kill "${pid}" 2> /dev/null; wait "${pid}" 2> /dev/null
   return 0
 }
 
-summary() {
-  load || { printf 'no Codex usage recorded yet (run codex once)\n'; return 0; }
-  printf '%sCodex%s  %splan%s %s\n' "${BOLD}" "${RST}" "${DIM}" "${RST}" "${PLAN}"
-  if [[ ${WK_LEFT} != "-" ]]; then
-    printf '  %-16s %s %sresets %s%s\n' "weekly limit" "$(paint_left "${WK_LEFT}")" \
-      "${DIM}" "$(until_reset "${WK_RESET}")" "${RST}"
-  fi
-  if [[ ${FIVE_LEFT} != "-" ]]; then
-    printf '  %-16s %s %sresets %s%s\n' "rolling limit" "$(paint_left "${FIVE_LEFT}")" \
-      "${DIM}" "$(until_reset "${FIVE_RESET}")" "${RST}"
-  fi
-  if [[ ${UNLIMITED} == true ]]; then
-    printf '  %-16s %sunlimited%s\n' "credits" "${GRN}" "${RST}"
-  elif [[ ${CREDITS} != "-" ]]; then
-    printf '  %-16s %s\n' "credits" "$(paint_credits "${CREDITS}")"
-  fi
-  printf '  %-16s %s%s ago%s\n' "last seen" "${DIM}" "$(since $(( $(date +%s) - AGE )))" "${RST}"
+# One jq pass over the two responses. Windows are classified by duration, not
+# position: the plan's primary window is weekly on some plans and 5h on others.
+JQ_PARSE='
+  def res(i): (map(select(.id == i)) | first) // {};
+  def left(w): if w == null then "-" else ((100 - (w.usedPercent // 0)) | floor | if . < 0 then 0 else . end) end;
+  def reset(w): if w == null then "-" else (w.resetsAt // "-") end;
+  (res(2)) as $a | (res(3)) as $l
+  | ($a.result.account) as $acct
+  | ($l.result.rateLimits // {}) as $rl
+  | ([$rl.primary, $rl.secondary] | map(select(. != null))) as $w
+  | ($w | map(select((.windowDurationMins // 0) >= 10080)) | first) as $wk
+  | ($w | map(select((.windowDurationMins // 0) <  10080)) | first) as $ro
+  | [ ($acct.email // "-"),
+      ($acct.planType // $rl.planType // "-"),
+      left($wk), reset($wk), left($ro), reset($ro),
+      (if $rl.credits == null then "-" else (($rl.credits.balance // "0") | tostring) end),
+      (($rl.credits.unlimited // false) | tostring),
+      (if ($a | length) == 0 then "noreply"
+       elif $acct == null then "loggedout"
+       elif $l.error != null then "error:" + ($l.error.message // "?")
+       elif $l.result.ordinaryUsageAllowed == false then "blocked"
+       else "ok" end)
+    ] | @tsv'
+
+# One tab-separated record per account, prefixed with a sort key. Runs in a
+# subshell per account so the whole table fans out in parallel.
+probe() {
+  local name="$1" dir="$2" email plan wl wr rl rr cr un st key cred_key
+  IFS=$'\t' read -r email plan wl wr rl rr cr un st < <(rpc_probe "${dir}" | jq -r -s "${JQ_PARSE}" 2> /dev/null)
+  case ${st:-noreply} in
+    ok) ;;
+    noreply)
+      printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\tfalse\t0\tno answer from codex app-server (offline? timeout?)\n' "${NEVER}" "${name}"
+      return ;;
+    loggedout)
+      if [[ ${dir} == "${MAIN_DIR}" ]]; then
+        printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\tfalse\t0\tlogged out — run: codex login\n' "${NEVER}" "${name}"
+      else
+        printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\tfalse\t0\tlogged out — run: codex-usage add %s\n' "${NEVER}" "${name}" "${name}"
+      fi
+      return ;;
+    blocked)
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\tusage not allowed on this account right now\n' \
+        "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${wl:--}" "${wr:--}" "${rl:--}" "${rr:--}" "${cr:--}" "${un:-false}"
+      return ;;
+    *)
+      printf '%s\t%s\t%s\t%s\t-\t-\t-\t-\t-\tfalse\t0\t%s\n' "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${st#error:}"
+      return ;;
+  esac
+
+  # Unlimited credits sort as the largest balance; an unreported balance as 0.
+  if [[ ${un} == true ]]; then cred_key=0
+  elif [[ ${cr} =~ ^[0-9]+ ]]; then cred_key=$((999999999 - ${cr%.*})); ((cred_key < 0)) && cred_key=0
+  else cred_key=999999999; fi
+  key=$(printf '%03d%09d%012d' "$((100 - ${wl//-/0}))" "${cred_key}" "${wr//-/${NEVER}}")
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t\n' \
+    "${key}" "${name}" "${email:--}" "${plan:--}" "${wl:--}" "${wr:--}" "${rl:--}" "${rr:--}" "${cr:--}" "${un:-false}"
 }
+
+# Resolve the slot against the roster. The "main" row and a roster row sharing
+# an email are the same account seen through two logins: keep the roster row
+# (that is the name the user chose) and mark it active. No match → the slot
+# stays as "main", active, so the numbers are still shown.
+mark_active() {
+  local rows line key name email plan wl wr rl rr cr un active note
+  local main_email="" matched=""
+  rows=$(cat)
+  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
+    [[ ${name} == main ]] && { main_email="${email}"; break; }
+  done <<< "${rows}"
+  if [[ -n ${main_email} && ${main_email} != "-" ]]; then
+    while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
+      [[ ${name} != main && ${email} == "${main_email}" ]] && { matched="${name}"; break; }
+    done <<< "${rows}"
+  fi
+  while IFS= read -r line; do
+    [[ -z ${line} ]] && continue
+    IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note <<< "${line}"
+    if [[ ${name} == main ]]; then
+      [[ -n ${matched} ]] && continue
+      active=1
+    elif [[ ${name} == "${matched}" ]]; then
+      active=1
+    else
+      active=0
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "${key}" "${name}" "${email}" "${plan}" "${wl}" "${wr}" "${rl}" "${rr}" "${cr}" "${un}" "${active}" "${note}"
+  done <<< "${rows}"
+}
+
+gather() {
+  local tmp name dir i=0
+  tmp=$(mktemp -d)
+  trap 'rm -rf "${tmp}"' RETURN
+  while IFS=$'\t' read -r name dir; do
+    [[ -z ${name} ]] && continue
+    probe "${name}" "${dir}" > "${tmp}/$(printf '%03d' "${i}")" &
+    ((i++))
+  done < <(account_rows)
+  [[ ${i} -eq 0 ]] && die "no accounts found. Add one: codex-usage add <name>"
+  wait
+  cat "${tmp}"/* | sort | mark_active
+}
+
+# Pad a cell to a visible width: printf's %-Ns counts ANSI escapes as
+# characters, so colour + %-Ns silently shreds the column alignment.
+pad_cell() {
+  local painted="$1" plain="$2" width="$3" align="$4" pad
+  pad=$((width - ${#plain}))
+  ((pad < 0)) && pad=0
+  if [[ ${align} == right ]]; then
+    printf '%*s%s' "${pad}" "" "${painted}"
+  else
+    printf '%s%*s' "${painted}" "${pad}" ""
+  fi
+}
+
+# Horizontal border: corner chars, then one width per column.
+hrule() {
+  local l="$1" m="$2" r="$3"; shift 3
+  local out="${l}" w first=1 i
+  for w in "$@"; do
+    ((first)) || out+="${m}"
+    first=0
+    for ((i = 0; i < w + 2; i++)); do out+="─"; done
+  done
+  printf '%s%s\n' "${out}" "${r}"
+}
+
+pct_plain() {
+  if [[ $1 == "-" ]]; then printf -- '-'; else printf '%s%%' "$1"; fi
+}
+
+# "73%  3d2h" — headroom then time to reset, both plain and painted.
+window_cells() {
+  local left="$1" reset="$2" when
+  when=$(until_reset "${reset}")
+  if [[ ${left} == "-" || ${when} == "-" ]]; then
+    printf '%s\t%s' "$(pct_plain "${left}")" "$(paint_left "${left}")"
+  else
+    printf '%4s  %s\t%*s%s  %s%s%s' "$(pct_plain "${left}")" "${when}" \
+      "$((4 - ${#left} - 1))" "" "$(paint_left "${left}")" "${DIM}" "${when}" "${RST}"
+  fi
+}
+
+table() {
+  local rows key name email plan wl wr rl rr cr un active note
+  rows=$(gather) || exit 1
+
+  local -a n_c=() p_c=() w_pl=() w_pa=() r_pl=() r_pa=() c_pl=() c_pa=() notes=()
+  local h0="ACCOUNT" h1="PLAN" h2="WEEK" h3="5H" h4="CREDITS"
+  local w0=${#h0} w1=${#h1} w2=${#h2} w3=${#h3} w4=${#h4} pl pa
+
+  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
+    [[ -z ${name} ]] && continue
+    [[ -n ${note} ]] && notes+=("${name}: ${note}")
+    if [[ ${active} == 1 ]]; then
+      n_c+=("▶ ${name}")
+      [[ ${name} == main ]] && notes+=("main: this login is not in the roster yet — codex-usage add <name> gives it a name")
+    else
+      n_c+=("  ${name}")
+    fi
+    p_c+=("${plan}")
+    IFS=$'\t' read -r pl pa < <(window_cells "${wl}" "${wr}"); w_pl+=("${pl}"); w_pa+=("${pa}")
+    IFS=$'\t' read -r pl pa < <(window_cells "${rl}" "${rr}"); r_pl+=("${pl}"); r_pa+=("${pa}")
+    c_pl+=("$(credits_plain "${cr}" "${un}")"); c_pa+=("$(paint_credits "${cr}" "${un}")")
+  done <<< "${rows}"
+
+  ((${#n_c[@]})) || die "no accounts to show"
+
+  local i
+  for ((i = 0; i < ${#n_c[@]}; i++)); do
+    ((${#n_c[i]} > w0)) && w0=${#n_c[i]}
+    ((${#p_c[i]} > w1)) && w1=${#p_c[i]}
+    ((${#w_pl[i]} > w2)) && w2=${#w_pl[i]}
+    ((${#r_pl[i]} > w3)) && w3=${#r_pl[i]}
+    ((${#c_pl[i]} > w4)) && w4=${#c_pl[i]}
+  done
+
+  hrule "┌" "┬" "┐" "${w0}" "${w1}" "${w2}" "${w3}" "${w4}"
+  printf '│ %s%-*s%s │ %s%-*s%s │ %s%-*s%s │ %s%-*s%s │ %s%*s%s │\n' \
+    "${BOLD}" "${w0}" "${h0}" "${RST}" "${BOLD}" "${w1}" "${h1}" "${RST}" \
+    "${BOLD}" "${w2}" "${h2}" "${RST}" "${BOLD}" "${w3}" "${h3}" "${RST}" \
+    "${BOLD}" "${w4}" "${h4}" "${RST}"
+  hrule "├" "┼" "┤" "${w0}" "${w1}" "${w2}" "${w3}" "${w4}"
+
+  for ((i = 0; i < ${#n_c[@]}; i++)); do
+    printf '│ '
+    pad_cell "${n_c[i]}" "${n_c[i]}" "${w0}" left;    printf ' │ '
+    pad_cell "${p_c[i]}" "${p_c[i]}" "${w1}" left;    printf ' │ '
+    pad_cell "${w_pa[i]}" "${w_pl[i]}" "${w2}" left;  printf ' │ '
+    pad_cell "${r_pa[i]}" "${r_pl[i]}" "${w3}" left;  printf ' │ '
+    pad_cell "${c_pa[i]}" "${c_pl[i]}" "${w4}" right; printf ' │\n'
+  done
+  hrule "└" "┴" "┘" "${w0}" "${w1}" "${w2}" "${w3}" "${w4}"
+
+  if [[ -n ${GRN} ]]; then
+    printf '%s  ▶ = active in ~/.codex · limits = %% LEFT   %sgreen >50%s %s· %syellow ≤50%s %s· %sred ≤15%s%s · credits %sred <%s%s %s· %syellow <%s%s\n' \
+      "${DIM}" "${GRN}" "${RST}${DIM}" "${DIM}" "${YEL}" "${RST}${DIM}" "${DIM}" "${RED}" "${RST}" "${DIM}" \
+      "${RED}" "${CRED_LOW}" "${RST}${DIM}" "${DIM}" "${YEL}" "${CRED_MID}" "${RST}"
+  else
+    printf '  ▶ = active in ~/.codex · limits = %% LEFT\n'
+  fi
+  local n
+  ((${#notes[@]})) || return 0
+  for n in "${notes[@]}"; do
+    printf '%s  %s%s\n' "${DIM}" "${n}" "${RST}"
+  done
+  return 0
+}
+
+jq_str() {
+  printf '%s' "$1" | tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+json_num() { if [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]]; then printf '%s' "$1"; else printf 'null'; fi; }
 
 json() {
-  if ! load; then printf 'null\n'; return 0; fi
-  printf '{"plan":"%s","week_left_pct":%s,"week_resets_at":%s,"rolling_left_pct":%s,"rolling_resets_at":%s,"credits":%s,"unlimited":%s,"age_seconds":%s}\n' \
-    "${PLAN}" "${WK_LEFT//-/null}" "${WK_RESET//-/null}" "${FIVE_LEFT//-/null}" \
-    "${FIVE_RESET//-/null}" "${CREDITS//-/null}" "${UNLIMITED}" "${AGE}"
+  local rows first=1 key name email plan wl wr rl rr cr un active note
+  rows=$(gather) || exit 1
+  printf '['
+  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
+    [[ -z ${name} ]] && continue
+    ((first)) || printf ','
+    first=0
+    printf '\n  {"account":"%s","active":%s,"email":"%s","plan":"%s","week_left_pct":%s,"week_resets_at":%s,"rolling_left_pct":%s,"rolling_resets_at":%s,"credits":%s,"unlimited":%s,"note":"%s"}' \
+      "$(jq_str "${name}")" "$([[ ${active} == 1 ]] && printf true || printf false)" "$(jq_str "${email}")" "$(jq_str "${plan}")" \
+      "$(json_num "${wl}")" "$(json_num "${wr}")" "$(json_num "${rl}")" "$(json_num "${rr}")" \
+      "$(json_num "${cr}")" "${un}" "$(jq_str "${note}")"
+  done <<< "${rows}"
+  printf '\n]\n'
+  return 0
 }
 
-# One compact segment. Weekly headroom first; credits matter most once the
-# weekly limit is spent, because that is what keeps Codex answering.
-statusline() {
-  load || return 0
-  local out="${DIM}codex${RST}"
-  [[ ${WK_LEFT} != "-" ]] && out="${out} $(paint_left "${WK_LEFT}")"
-  [[ ${WK_RESET} != "-" ]] && out="${out} ${DIM}$(until_reset "${WK_RESET}")${RST}"
-  if [[ ${UNLIMITED} == true ]]; then
-    out="${out} ${GRN}∞${RST}"
-  elif [[ ${CREDITS} != "-" ]]; then
-    out="${out} $(paint_credits "${CREDITS}")${DIM}cr${RST}"
+# Seconds since the snapshot was written, or NEVER when there is none.
+snapshot_age() {
+  local mt now
+  [[ -f ${SNAPSHOT} ]] || { printf '%s' "${NEVER}"; return; }
+  # `stat -f` means "format" to BSD stat and "filesystem" to GNU stat, so the
+  # wrong one returns junk instead of failing. Validate rather than trust.
+  mt=$(stat -c %Y "${SNAPSHOT}" 2> /dev/null)
+  [[ ${mt} =~ ^[0-9]+$ ]] || mt=$(stat -f %m "${SNAPSHOT}" 2> /dev/null)
+  [[ ${mt} =~ ^[0-9]+$ ]] || { printf '%s' "${NEVER}"; return; }
+  now=$(date +%s)
+  printf '%s' "$((now - mt))"
+}
+
+# Drop the lock only while we still hold it: one stolen after a stall belongs
+# to another process now.
+release_lock() {
+  [[ $(cat "${LOCK_DIR}/pid" 2> /dev/null) == "$$" ]] && rm -rf "${LOCK_DIR}"
+  return 0
+}
+
+# Probe every account and write the snapshot. mkdir is atomic, so of the N
+# agents that may fire this at once exactly one proceeds; the rest return
+# immediately rather than stampeding the endpoint with duplicate probes.
+cmd_refresh() {
+  mkdir -p "${CACHE_DIR}"
+  if ! mkdir "${LOCK_DIR}" 2> /dev/null; then
+    local holder aged capped
+    holder=$(cat "${LOCK_DIR}/pid" 2> /dev/null)
+    [[ -n $(find "${LOCK_DIR}" -maxdepth 0 -mmin +5 2> /dev/null) ]] && aged=1 || aged=""
+    # A recycled pid could otherwise keep a dead lock alive forever, so age
+    # eventually wins regardless of liveness.
+    [[ -n $(find "${LOCK_DIR}" -maxdepth 0 -mmin +30 2> /dev/null) ]] && capped=1 || capped=""
+    if [[ -z ${capped} ]]; then
+      [[ ${holder} =~ ^[0-9]+$ ]] && kill -0 "${holder}" 2> /dev/null && return 0
+      [[ -n ${aged} ]] || return 0
+    fi
+    # Claim the stale lock by renaming it: mv is atomic, so of N racers exactly
+    # one succeeds and the losers back off instead of all recreating it.
+    local grave="${LOCK_DIR}.dead.$$"
+    mv "${LOCK_DIR}" "${grave}" 2> /dev/null || return 0
+    rm -rf "${grave}"
+    mkdir "${LOCK_DIR}" 2> /dev/null || return 0
   fi
-  ((AGE > STALE_AFTER)) && out="${out} ${DIM}($(since $(( $(date +%s) - AGE ))) old)${RST}"
+  printf '%s' "$$" > "${LOCK_DIR}/pid"
+  trap 'release_lock' EXIT
+  # Another racer may have stolen and recreated the lock between our checks and
+  # our claim; whoever wrote the pid last owns it.
+  [[ $(cat "${LOCK_DIR}/pid" 2> /dev/null) == "$$" ]] || return 0
+  rm -rf "${LOCK_DIR:?}".dead.* 2> /dev/null   # graves from refreshers that died mid-steal
+
+  local tmp="${SNAPSHOT}.$$"
+  if gather > "${tmp}" 2> /dev/null && [[ -s ${tmp} ]]; then
+    mv -f "${tmp}" "${SNAPSHOT}"   # atomic swap: readers never see a half-written file
+  else
+    rm -f "${tmp}"
+  fi
+  return 0
+}
+
+spawn_refresh() {
+  ( "$0" refresh > /dev/null 2>&1 & ) 2> /dev/null
+}
+
+# Rows from cache, refreshing in the background when stale. Returns non-zero
+# only when there is nothing cached at all — the first run after install.
+cached_rows() {
+  local age; age=$(snapshot_age)
+  ((age > TTL)) && spawn_refresh
+  [[ -f ${SNAPSHOT} ]] || return 1
+  cat "${SNAPSHOT}"
+}
+
+# Which account this shell is pointed at. An unset CODEX_HOME means the slot,
+# whose name is whatever the snapshot matched it to.
+current_account() {
+  local d="${CODEX_HOME:-}" key name email plan wl wr rl rr cr un active note
+  if [[ -n ${d} ]]; then
+    d=$(cd "${d}" 2> /dev/null && pwd -P) || { printf '%s' "${UNKNOWN}"; return; }
+    # Unlike CLAUDE_CONFIG_DIR, CODEX_HOME=~/.codex IS the slot: nothing is
+    # keyed to whether the variable is set, only to where it points.
+    [[ ${d} == "$(cd "${MAIN_DIR}" 2> /dev/null && pwd -P)" ]] && d=""
+  fi
+  if [[ -z ${d} ]]; then
+    if [[ -f ${SNAPSHOT} ]]; then
+      while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
+        [[ ${active} == 1 ]] && { printf '%s' "${name}"; return; }
+      done < "${SNAPSHOT}"
+    fi
+    printf 'main'; return
+  fi
+  # Immediate child only: $ACCOUNTS_ROOT/b/a is not the account "a".
+  if [[ -n ${ACCOUNTS_ROOT} && $(dirname "${d}") == "${ACCOUNTS_ROOT}" ]]; then
+    label_for "$(basename "${d}")"
+  else
+    printf '%s' "${UNKNOWN}"
+  fi
+}
+
+# gather() already sorts best-first: most weekly headroom, then credits, then
+# the window that frees up soonest. So the recommendation is the first usable
+# row. "Usable" means Codex will still answer: weekly AND 5h headroom, or
+# enough credits to cover a consult round once the limits are spent.
+spent() { [[ $1 =~ ^[0-9]+$ ]] && (($1 == 0)); }
+
+usable() {   # <wl> <rl> <cr> <un>
+  [[ $4 == true ]] && return 0
+  [[ $3 =~ ^[0-9]+ ]] && ((${3%.*} >= CRED_LOW)) && return 0
+  [[ $1 =~ ^[0-9]+$ ]] && (($1 > 0)) || return 1
+  spent "$2" && return 1
+  return 0
+}
+
+best_row() {
+  local key name email plan wl wr rl rr cr un active note rows
+  rows=$(cat)
+  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
+    [[ -z ${name} || -n ${note} ]] && continue
+    usable "${wl}" "${rl}" "${cr}" "${un}" || continue
+    printf '%s\t%s\t%s\t%s\t%s\tok\n' "${name}" "${wl}" "${wr}" "${cr}" "${un}"
+    return 0
+  done <<< "${rows}"
+  # Everything is spent, so the useful answer is whichever frees up first: the
+  # 5h window when that is all that blocks it, the weekly one otherwise.
+  local free_at best_at="${NEVER}" best=""
+  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
+    [[ -z ${name} || -n ${note} ]] && continue
+    if [[ ${wl} =~ ^[0-9]+$ ]] && ((wl > 0)) && [[ ${rr} =~ ^[0-9]+$ ]]; then free_at="${rr}"; else free_at="${wr}"; fi
+    [[ ${free_at} =~ ^[0-9]+$ ]] || free_at="${NEVER}"
+    ((free_at < best_at)) || continue
+    best_at="${free_at}"
+    best=$(printf '%s\t%s\t%s\t%s\t%s\tfallback' "${name}" "${wl}" "${free_at}" "${cr}" "${un}")
+  done <<< "${rows}"
+  [[ -n ${best} ]] || return 1
+  printf '%s\n' "${best}"
+}
+
+cmd_best() {
+  local name wl wr cr un how rows
+  rows=$(cached_rows) || die "no snapshot yet — run: codex-usage refresh"
+  IFS=$'\t' read -r name wl wr cr un how < <(best_row <<< "${rows}") ||
+    die "no usable account (all logged out?) — run: codex-usage"
+  if [[ ${how} == fallback ]]; then
+    printf '%s (nothing usable right now; frees up first, in %s)\n' "${name}" "$(until_reset "${wr}")"
+  elif [[ ${un} == true ]]; then
+    printf '%s (unlimited credits)\n' "${name}"
+  elif [[ ${wl} =~ ^[0-9]+$ ]] && ((wl > 0)); then
+    printf '%s (%s%% of the week left)\n' "${name}" "${wl}"
+  else
+    printf '%s (week spent, %s credits left; resets in %s)\n' "${name}" "${cr%.*}" "$(until_reset "${wr}")"
+  fi
+}
+
+# CODEX_HOME for an account, so a caller can run `CODEX_HOME=$(codex-usage home
+# best) codex …`. "best" resolves through the snapshot; a fallback pick (nothing
+# usable) still prints but exits 1, so scripts can tell "best" from "least bad".
+cmd_home() {
+  local name="${1:-}" wl wr cr un how rows
+  [[ -n ${name} ]] || die "usage: codex-usage home <name|best>"
+  if [[ ${name} == best ]]; then
+    rows=$(cached_rows) || die "no snapshot yet — run: codex-usage refresh"
+    IFS=$'\t' read -r name wl wr cr un how < <(best_row <<< "${rows}") ||
+      die "no usable account — run: codex-usage"
+    resolve_dir "${name}" || exit 1
+    printf '\n'
+    [[ ${how} == ok ]]
+    return
+  fi
+  resolve_dir "${name}" || exit 1
+  printf '\n'
+}
+
+# One compact status-line segment. Reads cache only — never probes inline.
+cmd_statusline() {
+  local rows cur best_name best_wl best_wr best_cr best_un best_how age n=0
+  local key name email plan wl wr rl rr cr un active note out=""
+
+  rows=$(cached_rows) || return 0
+  cur=$(current_account)
+
+  # Both halves of the segment come from ONE snapshot read: two reads could
+  # straddle a refresh and render a current/best pair that never coexisted.
+  IFS=$'\t' read -r best_name best_wl best_wr best_cr best_un best_how < <(best_row <<< "${rows}") || return 0
+
+  local cur_wl="-" cur_wr="-" cur_cr="-" cur_un=false cur_note=""
+  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
+    [[ -z ${name} ]] && continue
+    ((n++))
+    [[ ${name} == "${cur}" ]] || continue
+    cur_wl="${wl}"; cur_wr="${wr}"; cur_cr="${cr}"; cur_un="${un}"; cur_note="${note}"
+  done <<< "${rows}"
+
+  out="${DIM}codex${RST}"
+  # With only the slot in play the name is noise; it matters once there is
+  # something to switch to.
+  if ((n > 1)); then
+    if [[ ${cur} == "${UNKNOWN}" ]]; then out="${out} ${DIM}unknown acct${RST}"; else out="${out} ${cur}"; fi
+  fi
+  if [[ -n ${cur_note} ]]; then
+    out="${out} ${RED}${cur_note%% —*}${RST}"
+  else
+    [[ ${cur_wl} != "-" ]] && out="${out} $(paint_left "${cur_wl}")"
+    [[ ${cur_wr} != "-" ]] && out="${out} ${DIM}$(until_reset "${cur_wr}")${RST}"
+    if [[ ${cur_un} == true ]]; then
+      out="${out} ${GRN}∞${RST}"
+    elif [[ ${cur_cr} != "-" ]]; then
+      out="${out} $(paint_credits "${cur_cr}" "${cur_un}")${DIM}cr${RST}"
+    fi
+  fi
+  if ((n > 1)); then
+    if [[ ${best_name} != "${cur}" ]]; then
+      out="${out} ${YEL}→${RST} ${best_name}"
+      if [[ ${best_how} == fallback ]]; then
+        # A fallback pick is not usable yet; quoting its headroom would read
+        # as "switch here now".
+        out="${out} ${DIM}back $(until_reset "${best_wr}")${RST}"
+      elif [[ ${best_un} == true ]]; then
+        out="${out} ${GRN}∞${RST}"
+      elif [[ ${best_wl} =~ ^[0-9]+$ ]] && ((best_wl > 0)); then
+        out="${out} $(paint_left "${best_wl}")"
+      else
+        out="${out} $(paint_credits "${best_cr}" "${best_un}")${DIM}cr${RST}"
+      fi
+    elif [[ ${best_how} == fallback ]]; then
+      out="${out} ${DIM}all spent, back $(until_reset "${best_wr}")${RST}"
+    else
+      out="${out} ${GRN}✓${RST}"
+    fi
+  fi
+  # A snapshot this old means background refreshes are failing, not that usage
+  # has been flat for an hour.
+  age=$(snapshot_age)
+  ((age > TTL * 6)) && out="${out} ${DIM}(stale)${RST}"
+
   printf '%s\n' "${out}"
 }
 
-case "${1:-summary}" in
-  summary|'')  summary ;;
-  --json)      json ;;
-  statusline)  statusline ;;
-  -h|--help)   sed -n '2,/^$/p' "$0" | sed 's/^#\{1,\} \{0,1\}//;s/^#$//' ;;
-  *)           printf 'unknown command: %s (try --help)\n' "$1" >&2; exit 1 ;;
+# Email of whatever is logged into a home, or "" — used to relate the new
+# roster login to the slot.
+email_of() {
+  rpc_probe "$1" | jq -r -s "${JQ_PARSE}" 2> /dev/null | cut -f1 | sed 's/^-$//'
+}
+
+cmd_add() {
+  local name="" flow="" arg
+  for arg in "$@"; do
+    case ${arg} in
+      --device|--device-auth) flow=device ;;
+      --browser)              flow=browser ;;
+      -*)                     die "unknown option: ${arg}" ;;
+      *)                      [[ -z ${name} ]] && name="${arg}" || die "usage: codex-usage add <name> [--device|--browser]" ;;
+    esac
+  done
+  [[ -n ${name} ]] || die "usage: codex-usage add <name> [--device|--browser]"
+  [[ ${name} == main ]] && die "'main' is reserved for ~/.codex"
+  valid_name "${name}" || die "invalid name: ${name} (letters, digits, . _ - only)"
+  local dir="${ACCOUNTS_ROOT}/${name}"
+  mkdir -p "${dir}"   # Codex refuses a CODEX_HOME that does not exist
+  # Global instructions travel with the account so a consult routed through it
+  # sees the same AGENTS.md as the slot. A link to the slot's link tracks
+  # whatever install.sh points it at later.
+  [[ -e ${MAIN_DIR}/AGENTS.md && ! -e ${dir}/AGENTS.md ]] && ln -s "${MAIN_DIR}/AGENTS.md" "${dir}/AGENTS.md"
+  # The browser flow needs a localhost callback, which an SSH session cannot
+  # complete; the device code works anywhere.
+  if [[ -z ${flow} ]]; then
+    if [[ -n ${SSH_CONNECTION:-}${SSH_TTY:-} ]]; then flow=device; else flow=browser; fi
+  fi
+  printf 'Logging in to account %s (CODEX_HOME: %s)\n' "${name}" "${dir}"
+  if [[ ${flow} == device ]]; then
+    run_codex "${dir}" login --device-auth
+  else
+    run_codex "${dir}" login
+  fi
+  rm -f "${SNAPSHOT}"   # the roster changed; the next render re-matches the slot
+  local added main_email
+  added=$(email_of "${dir}")
+  main_email=$(email_of "${MAIN_DIR}")
+  if [[ -n ${added} && ${added} == "${main_email}" ]]; then
+    printf 'This is also the account logged into ~/.codex — it now shows as "%s" (active).\n' "${name}"
+  fi
+}
+
+# Remove one mapping by exact key match, never by pattern.
+drop_label() {
+  local key="$1" line tmp
+  [[ -f ${LABELS_FILE} ]] || return 0
+  tmp="${LABELS_FILE}.$$"
+  : > "${tmp}"
+  while IFS= read -r line || [[ -n ${line} ]]; do
+    [[ ${line} == "${key}="* ]] && continue
+    printf '%s\n' "${line}" >> "${tmp}"
+  done < "${LABELS_FILE}"
+  mv -f "${tmp}" "${LABELS_FILE}"
+}
+
+cmd_rename() {
+  local old="${1:-}" new="${2:-}" key line
+  [[ -n ${old} && -n ${new} ]] || die "usage: codex-usage rename <current-name> <new-name>"
+  valid_name "${new}" || die "invalid name: ${new} (letters, digits, . _ - only; no leading dot)"
+
+  key=$(key_for "${old}")
+  [[ ${key} == main ]] && die "main is the ~/.codex slot, not an account: it takes the name of the roster account logged into it (codex-usage add <name>)"
+  [[ -d ${ACCOUNTS_ROOT}/${key} ]] || die "unknown account: ${old} (try: codex-usage list)"
+  [[ ${new} == main ]] && die "'main' is reserved for ~/.codex"
+  local taken; taken=$(key_for "${new}")
+  [[ ${taken} != "${key}" && -d ${ACCOUNTS_ROOT}/${taken} ]] &&
+    die "name already in use: ${new}"
+
+  mkdir -p "${ACCOUNTS_ROOT}"
+  local tmp="${LABELS_FILE}.$$"
+  : > "${tmp}"
+  if [[ -f ${LABELS_FILE} ]]; then
+    while IFS= read -r line || [[ -n ${line} ]]; do
+      [[ ${line} == "${key}="* ]] && continue
+      printf '%s\n' "${line}" >> "${tmp}"
+    done < "${LABELS_FILE}"
+  fi
+  [[ ${new} != "${key}" ]] && printf '%s=%s\n' "${key}" "${new}" >> "${tmp}"
+  mv -f "${tmp}" "${LABELS_FILE}"
+
+  rm -f "${SNAPSHOT}"   # the cached rows carry the old name
+  printf '%s → %s\n' "${old}" "${new}"
+}
+
+cmd_remove() {
+  local name="${1:-}" dir key
+  [[ -n ${name} ]] || die "usage: codex-usage remove <name>"
+  key=$(key_for "${name}")
+  dir=$(resolve_dir "${name}") || exit 1
+  # Guard the RESOLVED target, never the argument: "../.codex" resolves to the
+  # slot too.
+  [[ ${key} == main || ${dir} == "${MAIN_DIR}" ]] &&
+    die "refusing to remove the ~/.codex slot — use: codex logout"
+  [[ ${dir} == "${ACCOUNTS_ROOT}"/* ]] ||
+    die "refusing: ${dir} is outside ${ACCOUNTS_ROOT}"
+  run_codex "${dir}" logout > /dev/null 2>&1
+  rm -rf "${dir}"
+  drop_label "${key}"
+  rm -f "${SNAPSHOT}"
+  printf 'removed %s\n' "${name}"
+}
+
+cmd_list() {
+  local name dir cur=""
+  # No snapshot means nothing has been matched yet — claim nothing.
+  [[ -f ${SNAPSHOT} ]] && cur=$(current_account)
+  while IFS=$'\t' read -r name dir; do
+    [[ -z ${name} ]] && continue
+    if [[ ${name} == "${cur}" ]]; then
+      printf '%-14s %s  (active in ~/.codex)\n' "${name}" "${dir}"
+    else
+      printf '%-14s %s\n' "${name}" "${dir}"
+    fi
+  done < <(account_rows)
+}
+
+cmd_show() {
+  local name="${1:-}" dir out
+  [[ -n ${name} ]] || die "usage: codex-usage show <name>"
+  dir=$(resolve_dir "${name}") || exit 1
+  out=$(rpc_probe "${dir}")
+  [[ -n ${out} ]] || die "no answer from codex app-server"
+  jq -s '{account: (map(select(.id == 2)) | first | .result.account), limits: (map(select(.id == 3)) | first | (.result // .error))}' <<< "${out}"
+}
+
+case "${1:-table}" in
+  table|'')   table ;;
+  --json)     json ;;
+  refresh)    cmd_refresh ;;
+  best)       cmd_best ;;
+  home)       shift; cmd_home "$@" ;;
+  statusline) cmd_statusline ;;
+  add)        shift; cmd_add "$@" ;;
+  remove|rm)  shift; cmd_remove "$@" ;;
+  rename)     shift; cmd_rename "$@" ;;
+  list|ls)    cmd_list ;;
+  show)       shift; cmd_show "$@" ;;
+  -h|--help)  sed -n '2,/^$/p' "$0" | sed 's/^#\{1,\} \{0,1\}//;s/^#$//' ;;
+  *)          die "unknown command: $1 (try --help)" ;;
 esac

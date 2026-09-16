@@ -27,7 +27,7 @@ Each skill directory has a `README.md` explaining the concepts (blueprint and ha
 |---|---|
 | [`bin/agent-worktree`](bin/agent-worktree) | Task-named git worktrees off one canonical clone + the `~/.agents/workspaces.md` manifest (who is working on what, where). `new` / `list` / `resume` / `status` / `done` / `register`. Blueprint's workspace homing registers through it. |
 | [`bin/claude-usage`](bin/claude-usage) | 5h / weekly / premium-model headroom across every Claude subscription you own, without logging in and out — each roster account keeps its own `CLAUDE_CONFIG_DIR` under `~/.claude-accounts/`. `~/.claude` is a *slot*: whichever roster account is logged into it is matched by email and marked **active**, so switching logins never mislabels a row. `add` / `list` / `best` / `show` / `rename` / `remove` / `statusline`. |
-| [`bin/codex-usage`](bin/codex-usage) | Codex weekly limit + credit balance, read off the session rollouts Codex already writes (no spend). `statusline` segment for the status line. |
+| [`bin/codex-usage`](bin/codex-usage) | Weekly / 5h headroom and credit balance across every Codex (ChatGPT) subscription you own — each roster account is its own `CODEX_HOME` under `~/.codex-accounts/` (refresh tokens are single-use, so logins are never copied). Usage comes from `codex app-server`'s rate-limit RPC: no model turn, no credits. `~/.codex` is the *slot*, matched to the roster by email and marked **active**. `add` / `list` / `best` / `home` / `show` / `rename` / `remove` / `statusline`; `CODEX_ACCOUNT=<name|best>` routes a `/codex` consult through a roster account. |
 
 `install.sh` symlinks `bin/*` into `~/.local/bin`.
 
