@@ -9,9 +9,10 @@
 # which is a bare GET of the usage endpoint — no model turn, no credits, no
 # tokens, ~1s per account, fanned out in parallel.
 #
-# Everything reads as headroom LEFT, and rows sort best-account-first: most
-# weekly headroom, then the larger credit balance (what keeps Codex answering
-# once the week is spent), then whichever window frees up soonest.
+# Everything reads as headroom LEFT, and rows sort best-account-first: accounts
+# still answering on their subscription before credit-only ones, most weekly
+# headroom, then the larger credit balance (what keeps Codex answering once the
+# week is spent), then whichever weekly, then 5h, window frees up soonest.
 #
 # ~/.codex ("main") is a SLOT, not an account: whatever is logged into it is
 # what a plain `codex` uses, and that changes whenever you log out and back in
@@ -35,8 +36,9 @@
 #
 # Accepted limits: two refreshers can overlap if one is stolen from mid-claim
 # (wasted work only — the snapshot swap is atomic); concurrent `rename` calls
-# are last-writer-wins; the probe needs the network, so offline the snapshot
-# just ages until it is flagged stale.
+# are last-writer-wins; a `remove` landing between a refresh's roster check
+# and its publish can surface for one TTL; the probe needs the network, so
+# offline the snapshot just ages until it is flagged stale.
 
 set -uo pipefail
 
@@ -204,21 +206,34 @@ REQ_ACCOUNT='{"jsonrpc":"2.0","id":2,"method":"account/read","params":{}}'
 REQ_LIMITS='{"jsonrpc":"2.0","id":3,"method":"account/rateLimits/read","params":null}'
 
 rpc_probe() {
-  local dir="$1" line got2=0 got3=0 deadline=$((SECONDS + TIMEOUT)) wait_for
+  local dir="$1" line got2=0 got3=0 deadline=$((SECONDS + TIMEOUT)) tmp pid
   local -a envcmd
   IFS=$'\t' read -r -a envcmd <<< "$(env_for "${dir}")"
-  # Job control gives the coproc its own process group, and exec makes CX_PID
-  # its leader: teardown can then signal the whole tree — `codex` on PATH is a
-  # wrapper that spawns the native binary, and a child reparented by a dying
-  # wrapper is unreachable by pid or parent.
+  tmp=$(mktemp -d) || return 0
+  mkfifo "${tmp}/in" "${tmp}/out" || { rm -rf "${tmp}"; return 0; }
+  # Job control gives the server its own process group so teardown can signal
+  # the whole tree: `codex` on PATH is a wrapper that spawns the native binary,
+  # and a child reparented by a dying wrapper is unreachable by pid or parent.
   set -m
-  coproc CX { exec "${envcmd[@]}" codex app-server --stdio 2> /dev/null; }
+  "${envcmd[@]}" codex app-server --stdio < "${tmp}/in" > "${tmp}/out" 2> /dev/null &
+  pid=$!
   set +m
-  local pid=${CX_PID} in=${CX[1]} out=${CX[0]}
-  { printf '%s\n' "${REQ_INIT}" "${REQ_READY}" "${REQ_ACCOUNT}" "${REQ_LIMITS}" >&"${in}"; } 2> /dev/null
+  # Cancellation mid-read must not strand the server: EXIT fires in this
+  # subshell for TERM/INT too. FIFOs and plain fds keep this on bash 3.2
+  # (stock macOS); coproc and {fd} redirections need bash 4.
+  trap 'rpc_teardown "${pid}" "${tmp}"' EXIT
+  trap 'exit 143' TERM INT HUP
+  # Read-write opens never block on a FIFO, so a server that died before
+  # opening its end cannot hang us here.
+  exec 3<> "${tmp}/in" 4<> "${tmp}/out"
+  printf '%s\n' "${REQ_INIT}" "${REQ_READY}" "${REQ_ACCOUNT}" "${REQ_LIMITS}" >&3
   while ((SECONDS < deadline)) && ((!got2 || !got3)); do
-    wait_for=$((deadline - SECONDS)); ((wait_for < 1)) && wait_for=1
-    IFS= read -r -t "${wait_for}" line <&"${out}" || break
+    # Our own write end keeps the FIFO from ever reporting EOF, so a dead
+    # server shows up as a quiet second with no live pid, not as end of file.
+    if ! IFS= read -r -t 1 line <&4; then
+      kill -0 "${pid}" 2> /dev/null || break
+      continue
+    fi
     # Ids 1-3 only, so the key is unambiguous; notifications carry no "id".
     case ${line} in
       *'"id":2,'*|*'"id":2}'*) got2=1 ;;
@@ -227,42 +242,56 @@ rpc_probe() {
     esac
     printf '%s\n' "${line}"
   done
-  # EOF on stdin is the polite exit; a server that ignores it gets TERM after
-  # a beat, then KILL. wait reaps it so nothing lingers past the probe.
-  exec {in}>&- {out}<&-
-  local grace=0
+  # Explicit, not left to the trap: bash 3.2 skips EXIT traps for a function
+  # running as a pipeline stage, which is exactly how probe() calls this.
+  rpc_teardown "${pid}" "${tmp}"
+  trap - EXIT
+  return 0
+}
+
+# Closing the server's stdin is the polite exit; a server that ignores it gets
+# TERM after a beat, then KILL, and is reaped so nothing outlives the probe.
+rpc_teardown() {
+  local pid="$1" tmp="$2" grace=0
+  exec 3>&- 4<&-
   while kill -0 -- "-${pid}" 2> /dev/null && ((grace < 10)); do
     ((grace == 3)) && kill -TERM -- "-${pid}" 2> /dev/null
     sleep 0.2; ((grace++))
   done
   kill -KILL -- "-${pid}" 2> /dev/null
   wait "${pid}" 2> /dev/null
-  return 0
+  rm -rf "${tmp}"
 }
 
 # One jq pass over the two responses. The API reports at most two windows, in
 # plan-dependent order; the longer one fills the WEEK column and the shorter
 # the 5H column, so neither is ever dropped. A lone window is placed by its
-# duration.
+# duration. Every field that reaches the shell is typed or cleaned here: these
+# values end up in arithmetic, TSV and JSON, and the API is a trust boundary.
 JQ_PARSE='
   def res(i): (map(select(.id == i)) | first) // {};
-  def left(w): if w == null then "-" else ((100 - (w.usedPercent // 0)) | floor | if . < 0 then 0 else . end) end;
-  def reset(w): if w == null then "-" else (w.resetsAt // "-") end;
+  def clean: if type == "string" then gsub("[[:cntrl:]]"; " ") else tostring end;
+  def num(x): if (x | type) == "number" then x else null end;
+  def left(w): if w == null then "-" elif num(w.usedPercent // 0) == null then "-"
+               else ((100 - (w.usedPercent // 0)) | floor | if . < 0 then 0 elif . > 100 then 100 else . end) end;
+  def reset(w): if w == null or num(w.resetsAt) == null then "-" else (w.resetsAt | floor) end;
   (res(2)) as $a | (res(3)) as $l
   | ($a.result.account) as $acct
   | ($l.result.rateLimits // {}) as $rl
-  | ([$rl.primary, $rl.secondary] | map(select(. != null)) | sort_by(.windowDurationMins // 0)) as $w
-  | (if ($w | length) == 2 then $w[1] elif ($w | length) == 1 and ($w[0].windowDurationMins // 0) >= 10080 then $w[0] else null end) as $wk
-  | (if ($w | length) == 2 then $w[0] elif ($w | length) == 1 and ($w[0].windowDurationMins // 0) <  10080 then $w[0] else null end) as $ro
-  | [ ($acct.email // "-"),
-      ($acct.planType // $rl.planType // "-"),
+  | ([$rl.primary, $rl.secondary] | map(select(type == "object")) | sort_by(num(.windowDurationMins) // 0)) as $w
+  | (if ($w | length) == 2 then $w[1] elif ($w | length) == 1 and (num($w[0].windowDurationMins) // 0) >= 10080 then $w[0] else null end) as $wk
+  | (if ($w | length) == 2 then $w[0] elif ($w | length) == 1 and (num($w[0].windowDurationMins) // 0) <  10080 then $w[0] else null end) as $ro
+  | [ (($acct.email // "-") | clean),
+      (($acct.planType // $rl.planType // "-") | clean),
       left($wk), reset($wk), left($ro), reset($ro),
-      (if $rl.credits == null then "-" else (($rl.credits.balance // "0") | tostring) end),
-      (($rl.credits.unlimited // false) | tostring),
+      (if ($rl.credits | type) != "object" then "-"
+       else (($rl.credits.balance // "0") | tostring | if test("^[0-9]+(\\.[0-9]+)?$") then . else "-" end) end),
+      (if $rl.credits.unlimited == true then "true" else "false" end),
       (if ($a | length) == 0 then "noreply"
+       elif $a.error != null then "error:" + (($a.error.message // "?") | clean)
        elif $acct == null then "loggedout"
        elif ($l | length) == 0 then "nolimits"
-       elif $l.error != null then "error:" + ($l.error.message // "?")
+       elif $l.error != null then "error:" + (($l.error.message // "?") | clean)
        elif $l.result.ordinaryUsageAllowed == false then "blocked"
        else "ok" end)
     ] | @tsv'
@@ -305,7 +334,7 @@ probe() {
   else cred_key=999999999; fi
   # Included quota outranks paid credits: an account that would answer on
   # credits sorts below every account that still answers on its subscription.
-  key=$(printf '%d%03d%09d%012d' "$(eligibility "${wl}" "${rl}" "${cr}" "${un}")" "$((100 - ${wl//-/0}))" "${cred_key}" "${wr//-/${NEVER}}")
+  key=$(printf '%d%03d%09d%012d%012d' "$(eligibility "${wl}" "${rl}" "${cr}" "${un}")" "$((100 - ${wl//-/0}))" "${cred_key}" "${wr//-/${NEVER}}" "${rr//-/${NEVER}}")
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t\n' \
     "${key}" "${name}" "${email:--}" "${plan:--}" "${wl:--}" "${wr:--}" "${rl:--}" "${rr:--}" "${cr:--}" "${un:-false}" "${now}"
@@ -317,10 +346,11 @@ probe() {
 # stays as "main", active, so the numbers are still shown.
 mark_active() {
   local rows line key name email plan wl wr rl rr cr un seen active note
-  local main_email="" matched=""
+  local main_email="" main_line="" main_note="" matched=""
   rows=$(cat)
-  while IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note; do
-    [[ ${name} == main ]] && { main_email="${email}"; break; }
+  while IFS= read -r line; do
+    IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note <<< "${line}"
+    [[ ${name} == main ]] && { main_email="${email}"; main_line="${line}"; main_note="${note}"; break; }
   done <<< "${rows}"
   if [[ -n ${main_email} && ${main_email} != "-" ]]; then
     while IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note; do
@@ -335,12 +365,17 @@ mark_active() {
       active=1
     elif [[ ${name} == "${matched}" ]]; then
       active=1
+      # The same login probed twice: when only the slot's probe succeeded,
+      # its numbers are the account's numbers — carry them under the roster name.
+      if [[ -n ${note} && -z ${main_note} ]]; then
+        IFS=$'\t' read -r key _ email plan wl wr rl rr cr un seen _ note <<< "${main_line}"
+      fi
     else
       active=0
     fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "${key}" "${name}" "${email}" "${plan}" "${wl}" "${wr}" "${rl}" "${rr}" "${cr}" "${un}" "${seen}" "${active}" "${note}"
-  done <<< "${rows}"
+  done <<< "${rows}" | sort
 }
 
 gather_raw() {
@@ -542,15 +577,22 @@ cmd_refresh() {
   [[ $(cat "${LOCK_DIR}/pid" 2> /dev/null) == "$$" ]] || return 0
   rm -rf "${LOCK_DIR:?}".dead.* 2> /dev/null   # graves from refreshers that died mid-steal
 
-  # A transport failure (no answer, RPC error) says nothing about the account;
-  # its previous row is kept so one flaky probe cannot erase real numbers.
-  # When nothing answered at all the snapshot is left untouched, so it ages
-  # into the "(stale)" marker instead of being replaced by a fresh-looking blank.
-  local tmp="${SNAPSHOT}.$$" fresh
+# A transport failure (no answer, RPC error) says nothing about the account;
+# its previous row is kept so one flaky probe cannot erase real numbers.
+  local tmp="${SNAPSHOT}.$$" fresh names
   fresh=$(gather_raw 2> /dev/null) && [[ -n ${fresh} ]] || return 0
-  if ! grep -qvE $'\t(no answer from codex app-server|rpc error: )' <<< "${fresh}"; then return 0; fi
-  retain_cached <<< "${fresh}" | mark_active > "${tmp}" && [[ -s ${tmp} ]] && mv -f "${tmp}" "${SNAPSHOT}"   # atomic swap
-  rm -f "${tmp}"
+  # An account removed or renamed while the probe ran must not be republished
+  # from the rows captured before it went; the roster as it is NOW decides.
+  names=$(account_rows | cut -f1)
+  fresh=$(awk -F '\t' -v names="${names}" 'BEGIN { n = split(names, a, "\n"); for (i = 1; i <= n; i++) keep[a[i]] = 1 } keep[$2] { print }' <<< "${fresh}")
+  [[ -n ${fresh} ]] || return 0
+  retain_cached <<< "${fresh}" | mark_active > "${tmp}" && [[ -s ${tmp} ]] || { rm -f "${tmp}"; return 0; }
+  # When nothing answered the merge still records identities, but the file
+  # keeps its old mtime so it ages into "(stale)" instead of looking fresh.
+  if ! grep -qvE $'\t(no answer from codex app-server|rpc error: )' <<< "${fresh}" && [[ -f ${SNAPSHOT} ]]; then
+    touch -r "${SNAPSHOT}" "${tmp}" 2> /dev/null
+  fi
+  mv -f "${tmp}" "${SNAPSHOT}"   # atomic swap: readers never see a half-written file
   return 0
 }
 
@@ -561,13 +603,14 @@ cmd_refresh() {
 # under the name "main" and re-matches through its email. Rows older than the
 # stale threshold are not worth retaining: better an honest failure.
 retain_cached() {
-  local rows line key name email rest old old_email seen limit
+  local rows line key name email rest old old_email seen limit transient
   rows=$(cat)
   [[ -f ${SNAPSHOT} ]] || { printf '%s\n' "${rows}"; return; }
   limit=$(( $(date +%s) - TTL * 6 ))
+  transient=$'\t''(no answer from codex app-server|rpc error: )[^'$'\t'']*$'
   while IFS= read -r line; do
     [[ -z ${line} ]] && continue
-    if [[ ${line} =~ $'\t'(no\ answer\ from\ codex\ app-server|rpc\ error:\ )[^$'\t']*$ ]]; then
+    if [[ ${line} =~ ${transient} ]]; then
       IFS=$'\t' read -r key name email rest <<< "${line}"
       if [[ ${name} == main ]]; then
         old=$(awk -F '\t' '$2 == "main" || $12 == 1 { $2 = "main"; print; exit }' OFS='\t' "${SNAPSHOT}")
@@ -584,7 +627,7 @@ retain_cached() {
       fi
     fi
     printf '%s\n' "${line}"
-  done <<< "${rows}" | sort
+  done <<< "${rows}"
 }
 
 spawn_refresh() {
@@ -600,10 +643,16 @@ cached_rows() {
   cat "${SNAPSHOT}"
 }
 
-# Which account this shell is pointed at. An unset CODEX_HOME means the slot,
-# whose name is whatever the snapshot matched it to.
+# Which account this shell's consults run on: CODEX_HOME when set, else the
+# account CODEX_ACCOUNT names (what run-codex.sh will route through), else the
+# slot, whose name is whatever the snapshot matched it to.
 current_account() {
   local d="${CODEX_HOME:-}" key name email plan wl wr rl rr cr un seen active note
+  if [[ -z ${d} && -n ${CODEX_ACCOUNT:-} && ${CODEX_ACCOUNT} != best ]]; then
+    key=$(key_for "${CODEX_ACCOUNT}")
+    if valid_name "${key}" && [[ -d ${ACCOUNTS_ROOT}/${key} ]]; then label_for "${key}"; else printf '%s' "${UNKNOWN}"; fi
+    return
+  fi
   if [[ -n ${d} ]]; then
     d=$(cd "${d}" 2> /dev/null && pwd -P) || { printf '%s' "${UNKNOWN}"; return; }
     # Unlike CLAUDE_CONFIG_DIR, CODEX_HOME=~/.codex IS the slot: nothing is
@@ -816,6 +865,8 @@ cmd_add() {
     printf 'Account %s already exists — logging it in again.\n' "${name}"
   fi
   dir="${ACCOUNTS_ROOT}/${key}"
+  local created=""
+  [[ -d ${dir} ]] || created=1
   mkdir -p "${dir}"   # Codex refuses a CODEX_HOME that does not exist
   # Global instructions travel with the account so a consult routed through it
   # sees the same AGENTS.md as the slot. A link to the slot's link tracks
@@ -828,10 +879,17 @@ cmd_add() {
   fi
   printf 'Logging in to account %s (CODEX_HOME: %s)\n' "${name}" "${dir}"
   printf 'Note: a roster home carries AGENTS.md only — no config.toml, MCP servers or hooks — by design.\n' 
+  local rc=0
   if [[ ${flow} == device ]]; then
-    run_codex "${dir}" login --device-auth
+    run_codex "${dir}" login --device-auth || rc=$?
   else
-    run_codex "${dir}" login
+    run_codex "${dir}" login || rc=$?
+  fi
+  if ((rc != 0)); then
+    # A home this call created holds nothing worth keeping; an existing one
+    # keeps whatever login it had.
+    [[ -n ${created} ]] && rm -rf "${dir}"
+    die "login failed (codex exit ${rc}) — ${name} is $([[ -n ${created} ]] && printf 'not added' || printf 'unchanged')"
   fi
   rm -f "${SNAPSHOT}"   # the roster changed; the next render re-matches the slot
   local added main_email
@@ -890,11 +948,17 @@ cmd_remove() {
   [[ -n ${name} ]] || die "usage: codex-usage remove <name>"
   key=$(key_for "${name}")
   dir=$(resolve_dir "${name}") || exit 1
-  # Guard the RESOLVED target, never the argument: "../.codex" resolves to the
-  # slot too.
+  # Guard the CANONICAL target, never the argument: "../.codex" resolves to
+  # the slot, and so does a roster entry that is a symlink to it — logging
+  # out through either would log out the slot.
   [[ ${key} == main || ${dir} == "${MAIN_DIR}" ]] &&
     die "refusing to remove the ~/.codex slot — use: codex logout"
-  [[ ${dir} == "${ACCOUNTS_ROOT}"/* ]] ||
+  [[ -L ${dir} ]] && die "refusing: ${dir} is a symlink — remove the link by hand"
+  local real main_real
+  real=$(cd "${dir}" 2> /dev/null && pwd -P) || die "cannot resolve ${dir}"
+  main_real=$(cd "${MAIN_DIR}" 2> /dev/null && pwd -P)
+  [[ ${real} == "${main_real}" ]] && die "refusing: ${dir} resolves to the ~/.codex slot"
+  [[ $(dirname "${real}") == "${ACCOUNTS_ROOT}" ]] ||
     die "refusing: ${dir} is outside ${ACCOUNTS_ROOT}"
   run_codex "${dir}" logout > /dev/null 2>&1
   rm -rf "${dir}"

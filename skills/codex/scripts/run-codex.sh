@@ -20,7 +20,8 @@
 #                     the home is recorded so resume-codex.sh stays on it.
 #
 # Output: human-readable progress on stderr, codex log redirected to a file.
-# The last 4 lines of stdout are guaranteed to be:
+# Exit 2 is a usage error (bad arguments, unresolvable account) and prints no
+# trailer; on every other exit the last 4 lines of stdout are guaranteed to be:
 #
 #   CODEX_DIR=<absolute path>
 #   SESSION_ID=<uuid or empty>
@@ -77,7 +78,12 @@ SESSION_ID_FILE="$CODEX_DIR/session_id"
 
 cp "$PROMPT_FILE" "$CODEX_DIR/prompt.md"
 # Sessions live under the home that created them, so a resume must reuse it.
-# Empty means the slot (~/.codex).
+# Recorded canonical: a relative or symlinked home would mean something else
+# from another cwd. Empty means the slot (~/.codex).
+if [[ -n "${CODEX_HOME:-}" ]]; then
+  CODEX_HOME=$(cd "$CODEX_HOME" && pwd -P) || { echo "ERROR: CODEX_HOME is not a directory: $CODEX_HOME" >&2; exit 2; }
+  export CODEX_HOME
+fi
 printf '%s' "${CODEX_HOME:-}" > "$CODEX_DIR/codex_home"
 
 echo "Running codex (model=${MODEL:-config default}, effort=$EFFORT, sandbox=$SANDBOX, cwd=$CWD, home=${CODEX_HOME:-~/.codex})..." >&2
@@ -112,6 +118,8 @@ fi
 # Observed on codex-cli 0.154.0: `codex exec` can exit 0 having written
 # nothing — no events, no response file. That is not a review; report it as
 # the failure it is rather than handing the caller an empty RESPONSE_FILE.
+# (A consult is a text answer by contract; image work goes through
+# image-codex.sh, so "no final message" is never a legitimate outcome here.)
 if [[ $EXIT -eq 0 && ! -s "$RESPONSE_FILE" ]]; then
   echo "ERROR: codex exited 0 but produced no response (empty or missing $RESPONSE_FILE)" >&2
   EXIT=1

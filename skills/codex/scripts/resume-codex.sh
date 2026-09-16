@@ -18,6 +18,9 @@
 # The session is resumed in the CODEX_HOME recorded by run-codex.sh
 # (<codex-dir>/codex_home) — sessions live under the home that created them, so
 # CODEX_ACCOUNT is ignored here and the file wins over an inherited CODEX_HOME.
+# Without codex-dir the home is found by the session's rollout file; that pins
+# a path, not a login — re-logging a roster home as someone else moves its
+# sessions with it. Exit 2 (usage error) prints no trailer.
 #
 # Output: same structured trailer as run-codex.sh.
 #
@@ -82,18 +85,22 @@ if [[ -f "$CODEX_DIR/codex_home" ]]; then
     unset CODEX_HOME
   fi
 else
-  FOUND=""
-  for home in "${CODEX_HOME:-$HOME/.codex}" "$HOME/.codex" "${CODEX_ACCOUNTS_ROOT:-$HOME/.codex-accounts}"/*/; do
-    [[ -d "$home/sessions" ]] || continue
-    if [[ -n "$(find "$home/sessions" -maxdepth 4 -name "rollout-*${SID}*.jsonl" -print -quit 2> /dev/null)" ]]; then
-      FOUND="${home%/}"; break
-    fi
+  # Exactly one home may own the rollout. Two (a copied session, a roster
+  # entry symlinked to the slot) is ambiguous, and none means the caller has
+  # to say — guessing would pin a wrong home into this dir for every later resume.
+  FOUND=()
+  for home in "${CODEX_HOME:-}" "$HOME/.codex" "${CODEX_ACCOUNTS_ROOT:-$HOME/.codex-accounts}"/*/; do
+    [[ -n "$home" && -d "$home/sessions" ]] || continue
+    real=$(cd "$home" && pwd -P) || continue
+    [[ -n "$(find -L "$real/sessions" -maxdepth 4 -type f -name "rollout-*-${SID}.jsonl" -print -quit 2> /dev/null)" ]] || continue
+    for seen in "${FOUND[@]:-}"; do [[ "$seen" == "$real" ]] && continue 2; done
+    FOUND+=("$real")
   done
-  if [[ -n "$FOUND" ]]; then
-    export CODEX_HOME="$FOUND"
-  else
-    echo "WARNING: no rollout for $SID under ~/.codex or any roster home; resuming in ${CODEX_HOME:-~/.codex}" >&2
-  fi
+  case ${#FOUND[@]} in
+    1) export CODEX_HOME="${FOUND[0]}" ;;
+    0) echo "ERROR: no rollout for $SID under ~/.codex or any roster home — pass the CODEX_DIR from the first call" >&2; exit 2 ;;
+    *) echo "ERROR: rollout for $SID exists in several homes (${FOUND[*]}) — pass the CODEX_DIR from the first call" >&2; exit 2 ;;
+  esac
 fi
 [[ -n "${CODEX_ACCOUNT:-}" ]] && echo "NOTE: CODEX_ACCOUNT is ignored on resume; staying on ${CODEX_HOME:-~/.codex}" >&2
 
@@ -129,6 +136,8 @@ set -e
 # Observed on codex-cli 0.154.0: `codex exec resume` can exit 0 having written
 # nothing — no events, no response file. That is not a review; report it as
 # the failure it is rather than handing the caller an empty RESPONSE_FILE.
+# (A consult is a text answer by contract; image work goes through
+# image-codex.sh, so "no final message" is never a legitimate outcome here.)
 if [[ $EXIT -eq 0 && ! -s "$RESPONSE_FILE" ]]; then
   echo "ERROR: codex exited 0 but produced no response (empty or missing $RESPONSE_FILE)" >&2
   EXIT=1
