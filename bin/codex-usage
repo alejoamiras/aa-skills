@@ -273,15 +273,16 @@ rpc_teardown() {
 # object, is "?" — reported but unknown, which is not the same as "-" (not
 # reported) and never counts as headroom. Strings
 # are never empty (a tab-separated empty field would shift every later one)
-# and the credit balance is bounded, so shell arithmetic cannot overflow or
-# read a leading zero as octal.
+# and the credit balance and reset epochs are bounded, so shell arithmetic
+# cannot overflow or read a leading zero as octal. A usage-allowed flag that
+# is anything but literally true reads as blocked.
 JQ_PARSE='
   def res(i): (map(select(.id == i)) | first) // {};
   def clean: (if type == "string" then gsub("[[:cntrl:]]"; " ") else tostring end) | if . == "" then "-" else . end;
   def num(x): if (x | type) == "number" then x else null end;
   def left(w): if w == null then "-" elif num(w.usedPercent) == null then "?"
                else ((100 - w.usedPercent) | floor | if . < 0 then 0 elif . > 100 then 100 else . end) end;
-  def reset(w): if w == null or num(w.resetsAt) == null then "-" else (w.resetsAt | floor) end;
+  def reset(w): if w == null or num(w.resetsAt) == null or w.resetsAt < 0 or w.resetsAt > 99999999999 then "-" else (w.resetsAt | floor) end;
   (res(2)) as $a | (res(3)) as $l
   | ($a.result.account) as $acct
   | ($l.result.rateLimits // {}) as $rl
@@ -300,7 +301,7 @@ JQ_PARSE='
        elif $acct == null then "loggedout"
        elif ($l | length) == 0 then "nolimits"
        elif $l.error != null then "error:" + (($l.error.message // "?") | clean)
-       elif $l.result.ordinaryUsageAllowed == false then "blocked"
+       elif $l.result.ordinaryUsageAllowed != null and $l.result.ordinaryUsageAllowed != true then "blocked"
        else "ok" end)
     ] | @tsv'
 
