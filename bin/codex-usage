@@ -555,21 +555,27 @@ cmd_refresh() {
 # under the name "main" and re-matches through its email. Rows older than the
 # stale threshold are not worth retaining: better an honest failure.
 retain_cached() {
-  local rows line key name rest old seen limit
+  local rows line key name email rest old old_email seen limit
   rows=$(cat)
   [[ -f ${SNAPSHOT} ]] || { printf '%s\n' "${rows}"; return; }
   limit=$(( $(date +%s) - TTL * 6 ))
   while IFS= read -r line; do
     [[ -z ${line} ]] && continue
     if [[ ${line} =~ $'\t'(no\ answer\ from\ codex\ app-server|rpc\ error:\ )[^$'\t']*$ ]]; then
-      IFS=$'\t' read -r key name rest <<< "${line}"
+      IFS=$'\t' read -r key name email rest <<< "${line}"
       if [[ ${name} == main ]]; then
         old=$(awk -F '\t' '$2 == "main" || $12 == 1 { $2 = "main"; print; exit }' OFS='\t' "${SNAPSHOT}")
       else
         old=$(awk -F '\t' -v n="${name}" '$2 == n { print; exit }' "${SNAPSHOT}")
       fi
-      seen=$(cut -f11 <<< "${old}")
-      [[ -n ${old} && ${seen} =~ ^[0-9]+$ ]] && ((seen >= limit)) && line="${old}"
+      IFS=$'\t' read -r _ _ old_email _ _ _ _ _ _ _ seen _ <<< "${old}"
+      # The identity half may have answered while the limits half failed: a
+      # cached row belongs to this login only if the emails agree. A slot just
+      # switched to another account must not inherit its predecessor's numbers.
+      if [[ -n ${old} && ${seen} =~ ^[0-9]+$ ]] && ((seen >= limit)) &&
+         [[ ${email} == "-" || ${email} == "${old_email}" ]]; then
+        line="${old}"
+      fi
     fi
     printf '%s\n' "${line}"
   done <<< "${rows}" | sort
@@ -713,7 +719,9 @@ cmd_statusline() {
 
   # Both halves of the segment come from ONE snapshot read: two reads could
   # straddle a refresh and render a current/best pair that never coexisted.
-  IFS=$'\t' read -r best_name best_wl best_wr best_cr best_un best_how < <(best_row <<< "${rows}") || return 0
+  # No candidate at all (every row failed or expired) still renders the
+  # current account, so an outage shows as "(stale)" rather than as nothing.
+  IFS=$'\t' read -r best_name best_wl best_wr best_cr best_un best_how < <(best_row <<< "${rows}") || best_name=""
 
   local cur_wl="-" cur_wr="-" cur_cr="-" cur_un=false cur_note="" cur_seen=""
   while IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note; do
@@ -740,7 +748,7 @@ cmd_statusline() {
       out="${out} $(paint_credits "${cur_cr}" "${cur_un}")${DIM}cr${RST}"
     fi
   fi
-  if ((n > 1)); then
+  if ((n > 1)) && [[ -n ${best_name} ]]; then
     if [[ ${best_name} != "${cur}" ]]; then
       out="${out} ${YEL}→${RST} ${best_name}"
       if [[ ${best_how} == fallback ]]; then
