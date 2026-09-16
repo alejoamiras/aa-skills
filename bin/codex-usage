@@ -204,9 +204,13 @@ rpc_probe() {
   local dir="$1" line got2=0 got3=0 deadline=$((SECONDS + TIMEOUT)) wait_for
   local -a envcmd
   IFS=$'\t' read -r -a envcmd <<< "$(env_for "${dir}")"
-  # exec, so CX_PID is the server itself: killing the coproc's subshell would
-  # leave a stalled server alive across refreshes.
+  # Job control gives the coproc its own process group, and exec makes CX_PID
+  # its leader: teardown can then signal the whole tree — `codex` on PATH is a
+  # wrapper that spawns the native binary, and a child reparented by a dying
+  # wrapper is unreachable by pid or parent.
+  set -m
   coproc CX { exec "${envcmd[@]}" codex app-server --stdio 2> /dev/null; }
+  set +m
   local pid=${CX_PID} in=${CX[1]} out=${CX[0]}
   { printf '%s\n' "${REQ_INIT}" "${REQ_READY}" "${REQ_ACCOUNT}" "${REQ_LIMITS}" >&"${in}"; } 2> /dev/null
   while ((SECONDS < deadline)) && ((!got2 || !got3)); do
@@ -224,14 +228,11 @@ rpc_probe() {
   # a beat, then KILL. wait reaps it so nothing lingers past the probe.
   exec {in}>&- {out}<&-
   local grace=0
-  while kill -0 "${pid}" 2> /dev/null && ((grace < 10)); do
-    ((grace == 3)) && { pkill -TERM -P "${pid}" 2> /dev/null; kill -TERM "${pid}" 2> /dev/null; }
+  while kill -0 -- "-${pid}" 2> /dev/null && ((grace < 10)); do
+    ((grace == 3)) && kill -TERM -- "-${pid}" 2> /dev/null
     sleep 0.2; ((grace++))
   done
-  # `codex` on PATH may be a wrapper around the native binary; take the
-  # children down with it or the real server outlives the probe.
-  pkill -KILL -P "${pid}" 2> /dev/null
-  kill -KILL "${pid}" 2> /dev/null
+  kill -KILL -- "-${pid}" 2> /dev/null
   wait "${pid}" 2> /dev/null
   return 0
 }
@@ -284,7 +285,7 @@ probe() {
         "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${wl:--}" "${wr:--}" "${rl:--}" "${rr:--}" "${cr:--}" "${un:-false}"
       return ;;
     *)
-      printf '%s\t%s\t%s\t%s\t-\t-\t-\t-\t-\tfalse\t0\t%s\n' "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${st#error:}"
+      printf '%s\t%s\t%s\t%s\t-\t-\t-\t-\t-\tfalse\t0\trpc error: %s\n' "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${st#error:}"
       return ;;
   esac
 
@@ -526,16 +527,33 @@ cmd_refresh() {
   [[ $(cat "${LOCK_DIR}/pid" 2> /dev/null) == "$$" ]] || return 0
   rm -rf "${LOCK_DIR:?}".dead.* 2> /dev/null   # graves from refreshers that died mid-steal
 
-  # A probe that got no answer at all (offline, server stalled) says nothing
-  # about the accounts. Keep the old snapshot in that case, so it ages into the
-  # "(stale)" marker instead of being replaced by a fresh-looking blank.
-  local tmp="${SNAPSHOT}.$$"
-  if gather > "${tmp}" 2> /dev/null && [[ -s ${tmp} ]] && grep -qv $'\tno answer from codex app-server' "${tmp}"; then
-    mv -f "${tmp}" "${SNAPSHOT}"   # atomic swap: readers never see a half-written file
-  else
-    rm -f "${tmp}"
-  fi
+  # A transport failure (no answer, RPC error) says nothing about the account;
+  # its previous row is kept so one flaky probe cannot erase real numbers.
+  # When nothing answered at all the snapshot is left untouched, so it ages
+  # into the "(stale)" marker instead of being replaced by a fresh-looking blank.
+  local tmp="${SNAPSHOT}.$$" fresh
+  fresh=$(gather 2> /dev/null) && [[ -n ${fresh} ]] || return 0
+  if ! grep -qvE $'\t(no answer from codex app-server|rpc error: )' <<< "${fresh}"; then return 0; fi
+  retain_cached <<< "${fresh}" > "${tmp}" && [[ -s ${tmp} ]] && mv -f "${tmp}" "${SNAPSHOT}"   # atomic swap
+  rm -f "${tmp}"
   return 0
+}
+
+# Replace each transient-failure row with that account's row from the current
+# snapshot (when there is one), then re-sort and re-match the slot.
+retain_cached() {
+  local rows line key name rest old
+  rows=$(cat)
+  [[ -f ${SNAPSHOT} ]] || { printf '%s\n' "${rows}"; return; }
+  while IFS= read -r line; do
+    [[ -z ${line} ]] && continue
+    if [[ ${line} =~ $'\t'(no\ answer\ from\ codex\ app-server|rpc\ error:\ )[^$'\t']*$ ]]; then
+      IFS=$'\t' read -r key name rest <<< "${line}"
+      old=$(awk -F '\t' -v n="${name}" '$2 == n { print; exit }' "${SNAPSHOT}")
+      [[ -n ${old} ]] && line="${old}"
+    fi
+    printf '%s\n' "${line}"
+  done <<< "${rows}" | sort | mark_active
 }
 
 spawn_refresh() {
@@ -616,8 +634,8 @@ best_row() {
   while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
     [[ -z ${name} || -n ${note} ]] && continue
     free_at=0
-    spent "${wl}" && [[ ${wr} =~ ^[0-9]+$ ]] && ((wr > free_at)) && free_at="${wr}"
-    spent "${rl}" && [[ ${rr} =~ ^[0-9]+$ ]] && ((rr > free_at)) && free_at="${rr}"
+    if spent "${wl}"; then [[ ${wr} =~ ^[0-9]+$ ]] && ((wr > free_at)) && free_at="${wr}"; [[ ${wr} =~ ^[0-9]+$ ]] || free_at="${NEVER}"; fi
+    if spent "${rl}"; then [[ ${rr} =~ ^[0-9]+$ ]] && ((rr > free_at)) && free_at="${rr}"; [[ ${rr} =~ ^[0-9]+$ ]] || free_at="${NEVER}"; fi
     ((free_at > 0)) || free_at="${NEVER}"
     ((free_at < best_at)) || continue
     best_at="${free_at}"
@@ -745,6 +763,7 @@ cmd_add() {
   done
   [[ -n ${name} ]] || die "usage: codex-usage add <name> [--device|--browser]"
   [[ ${name} == main ]] && die "'main' is reserved for ~/.codex"
+  [[ ${name} == best ]] && die "'best' is reserved: it means \"pick for me\" in \`home\` and CODEX_ACCOUNT"
   valid_name "${name}" || die "invalid name: ${name} (letters, digits, . _ - only)"
   # An existing account (by label or by directory) is logged in again in
   # place: a second directory under its display name would leave two rows
@@ -804,6 +823,7 @@ cmd_rename() {
   [[ ${key} == main ]] && die "main is the ~/.codex slot, not an account: it takes the name of the roster account logged into it (codex-usage add <name>)"
   [[ -d ${ACCOUNTS_ROOT}/${key} ]] || die "unknown account: ${old} (try: codex-usage list)"
   [[ ${new} == main ]] && die "'main' is reserved for ~/.codex"
+  [[ ${new} == best ]] && die "'best' is reserved: it means \"pick for me\" in \`home\` and CODEX_ACCOUNT"
   local taken; taken=$(key_for "${new}")
   [[ ${taken} != "${key}" && -d ${ACCOUNTS_ROOT}/${taken} ]] &&
     die "name already in use: ${new}"

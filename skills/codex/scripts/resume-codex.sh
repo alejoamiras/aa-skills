@@ -97,6 +97,11 @@ else
 fi
 [[ -n "${CODEX_ACCOUNT:-}" ]] && echo "NOTE: CODEX_ACCOUNT is ignored on resume; staying on ${CODEX_HOME:-~/.codex}" >&2
 
+# A fresh dir must carry the same metadata run-codex.sh writes, or the next
+# resume against it has no id and no home to go on.
+[[ -f "$CODEX_DIR/session_id" ]] || printf '%s' "$SID" > "$CODEX_DIR/session_id"
+[[ -f "$CODEX_DIR/codex_home" ]] || printf '%s' "${CODEX_HOME:-}" > "$CODEX_DIR/codex_home"
+
 N=1
 while [[ -e "$CODEX_DIR/response-$N.md" ]]; do
   N=$((N + 1))
