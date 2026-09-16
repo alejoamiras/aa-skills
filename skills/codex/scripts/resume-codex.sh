@@ -70,6 +70,9 @@ elif [[ ! -d "$CODEX_DIR" ]]; then
   exit 2
 fi
 
+# Sessions live under the home that created them. The recorded home wins; with
+# a UUID-only resume (no codex-dir), find the rollout file that carries the id
+# across the slot and every roster home instead of searching the slot blindly.
 if [[ -f "$CODEX_DIR/codex_home" ]]; then
   RECORDED=$(cat "$CODEX_DIR/codex_home")
   if [[ -n "$RECORDED" ]]; then
@@ -77,6 +80,19 @@ if [[ -f "$CODEX_DIR/codex_home" ]]; then
     export CODEX_HOME="$RECORDED"
   else
     unset CODEX_HOME
+  fi
+else
+  FOUND=""
+  for home in "${CODEX_HOME:-$HOME/.codex}" "$HOME/.codex" "${CODEX_ACCOUNTS_ROOT:-$HOME/.codex-accounts}"/*/; do
+    [[ -d "$home/sessions" ]] || continue
+    if [[ -n "$(find "$home/sessions" -maxdepth 4 -name "rollout-*${SID}*.jsonl" -print -quit 2> /dev/null)" ]]; then
+      FOUND="${home%/}"; break
+    fi
+  done
+  if [[ -n "$FOUND" ]]; then
+    export CODEX_HOME="$FOUND"
+  else
+    echo "WARNING: no rollout for $SID under ~/.codex or any roster home; resuming in ${CODEX_HOME:-~/.codex}" >&2
   fi
 fi
 [[ -n "${CODEX_ACCOUNT:-}" ]] && echo "NOTE: CODEX_ACCOUNT is ignored on resume; staying on ${CODEX_HOME:-~/.codex}" >&2

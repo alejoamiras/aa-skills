@@ -204,7 +204,9 @@ rpc_probe() {
   local dir="$1" line got2=0 got3=0 deadline=$((SECONDS + TIMEOUT)) wait_for
   local -a envcmd
   IFS=$'\t' read -r -a envcmd <<< "$(env_for "${dir}")"
-  coproc CX { "${envcmd[@]}" codex app-server --stdio 2> /dev/null; }
+  # exec, so CX_PID is the server itself: killing the coproc's subshell would
+  # leave a stalled server alive across refreshes.
+  coproc CX { exec "${envcmd[@]}" codex app-server --stdio 2> /dev/null; }
   local pid=${CX_PID} in=${CX[1]} out=${CX[0]}
   { printf '%s\n' "${REQ_INIT}" "${REQ_READY}" "${REQ_ACCOUNT}" "${REQ_LIMITS}" >&"${in}"; } 2> /dev/null
   while ((SECONDS < deadline)) && ((!got2 || !got3)); do
@@ -218,13 +220,26 @@ rpc_probe() {
     esac
     printf '%s\n' "${line}"
   done
+  # EOF on stdin is the polite exit; a server that ignores it gets TERM after
+  # a beat, then KILL. wait reaps it so nothing lingers past the probe.
   exec {in}>&- {out}<&-
-  kill "${pid}" 2> /dev/null; wait "${pid}" 2> /dev/null
+  local grace=0
+  while kill -0 "${pid}" 2> /dev/null && ((grace < 10)); do
+    ((grace == 3)) && { pkill -TERM -P "${pid}" 2> /dev/null; kill -TERM "${pid}" 2> /dev/null; }
+    sleep 0.2; ((grace++))
+  done
+  # `codex` on PATH may be a wrapper around the native binary; take the
+  # children down with it or the real server outlives the probe.
+  pkill -KILL -P "${pid}" 2> /dev/null
+  kill -KILL "${pid}" 2> /dev/null
+  wait "${pid}" 2> /dev/null
   return 0
 }
 
-# One jq pass over the two responses. Windows are classified by duration, not
-# position: the plan's primary window is weekly on some plans and 5h on others.
+# One jq pass over the two responses. The API reports at most two windows, in
+# plan-dependent order; the longer one fills the WEEK column and the shorter
+# the 5H column, so neither is ever dropped. A lone window is placed by its
+# duration.
 JQ_PARSE='
   def res(i): (map(select(.id == i)) | first) // {};
   def left(w): if w == null then "-" else ((100 - (w.usedPercent // 0)) | floor | if . < 0 then 0 else . end) end;
@@ -232,15 +247,15 @@ JQ_PARSE='
   (res(2)) as $a | (res(3)) as $l
   | ($a.result.account) as $acct
   | ($l.result.rateLimits // {}) as $rl
-  | ([$rl.primary, $rl.secondary] | map(select(. != null))) as $w
-  | ($w | map(select((.windowDurationMins // 0) >= 10080)) | first) as $wk
-  | ($w | map(select((.windowDurationMins // 0) <  10080)) | first) as $ro
+  | ([$rl.primary, $rl.secondary] | map(select(. != null)) | sort_by(.windowDurationMins // 0)) as $w
+  | (if ($w | length) == 2 then $w[1] elif ($w | length) == 1 and ($w[0].windowDurationMins // 0) >= 10080 then $w[0] else null end) as $wk
+  | (if ($w | length) == 2 then $w[0] elif ($w | length) == 1 and ($w[0].windowDurationMins // 0) <  10080 then $w[0] else null end) as $ro
   | [ ($acct.email // "-"),
       ($acct.planType // $rl.planType // "-"),
       left($wk), reset($wk), left($ro), reset($ro),
       (if $rl.credits == null then "-" else (($rl.credits.balance // "0") | tostring) end),
       (($rl.credits.unlimited // false) | tostring),
-      (if ($a | length) == 0 then "noreply"
+      (if ($a | length) == 0 or ($l | length) == 0 then "noreply"
        elif $acct == null then "loggedout"
        elif $l.error != null then "error:" + ($l.error.message // "?")
        elif $l.result.ordinaryUsageAllowed == false then "blocked"
@@ -277,7 +292,9 @@ probe() {
   if [[ ${un} == true ]]; then cred_key=0
   elif [[ ${cr} =~ ^[0-9]+ ]]; then cred_key=$((999999999 - ${cr%.*})); ((cred_key < 0)) && cred_key=0
   else cred_key=999999999; fi
-  key=$(printf '%03d%09d%012d' "$((100 - ${wl//-/0}))" "${cred_key}" "${wr//-/${NEVER}}")
+  # Included quota outranks paid credits: an account that would answer on
+  # credits sorts below every account that still answers on its subscription.
+  key=$(printf '%d%03d%09d%012d' "$(eligibility "${wl}" "${rl}" "${cr}" "${un}")" "$((100 - ${wl//-/0}))" "${cred_key}" "${wr//-/${NEVER}}")
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t\n' \
     "${key}" "${name}" "${email:--}" "${plan:--}" "${wl:--}" "${wr:--}" "${rl:--}" "${rr:--}" "${cr:--}" "${un:-false}"
@@ -509,8 +526,11 @@ cmd_refresh() {
   [[ $(cat "${LOCK_DIR}/pid" 2> /dev/null) == "$$" ]] || return 0
   rm -rf "${LOCK_DIR:?}".dead.* 2> /dev/null   # graves from refreshers that died mid-steal
 
+  # A probe that got no answer at all (offline, server stalled) says nothing
+  # about the accounts. Keep the old snapshot in that case, so it ages into the
+  # "(stale)" marker instead of being replaced by a fresh-looking blank.
   local tmp="${SNAPSHOT}.$$"
-  if gather > "${tmp}" 2> /dev/null && [[ -s ${tmp} ]]; then
+  if gather > "${tmp}" 2> /dev/null && [[ -s ${tmp} ]] && grep -qv $'\tno answer from codex app-server' "${tmp}"; then
     mv -f "${tmp}" "${SNAPSHOT}"   # atomic swap: readers never see a half-written file
   else
     rm -f "${tmp}"
@@ -563,13 +583,23 @@ current_account() {
 # enough credits to cover a consult round once the limits are spent.
 spent() { [[ $1 =~ ^[0-9]+$ ]] && (($1 == 0)); }
 
-usable() {   # <wl> <rl> <cr> <un>
-  [[ $4 == true ]] && return 0
-  [[ $3 =~ ^[0-9]+ ]] && ((${3%.*} >= CRED_LOW)) && return 0
-  [[ $1 =~ ^[0-9]+$ ]] && (($1 > 0)) || return 1
-  spent "$2" && return 1
-  return 0
+# 0 = answers on included quota (unlimited, or every reported window has
+# headroom), 1 = answers on credits only, 2 = nothing. A window the API did not
+# report is not a constraint; no windows at all means nothing to run on.
+eligibility() {   # <wl> <rl> <cr> <un>
+  local wl="$1" rl="$2" cr="$3" un="$4" seen=0
+  [[ ${un} == true ]] && { printf 0; return; }
+  if [[ ${wl} =~ ^[0-9]+$ || ${rl} =~ ^[0-9]+$ ]]; then
+    seen=1
+    spent "${wl}" && seen=0
+    spent "${rl}" && seen=0
+  fi
+  ((seen)) && { printf 0; return; }
+  [[ ${cr} =~ ^[0-9]+ ]] && ((${cr%.*} >= CRED_LOW)) && { printf 1; return; }
+  printf 2
 }
+
+usable() { (($(eligibility "$@") < 2)); }
 
 best_row() {
   local key name email plan wl wr rl rr cr un active note rows
@@ -580,13 +610,15 @@ best_row() {
     printf '%s\t%s\t%s\t%s\t%s\tok\n' "${name}" "${wl}" "${wr}" "${cr}" "${un}"
     return 0
   done <<< "${rows}"
-  # Everything is spent, so the useful answer is whichever frees up first: the
-  # 5h window when that is all that blocks it, the weekly one otherwise.
+  # Everything is spent, so the useful answer is whichever frees up first. An
+  # account is back when its LAST exhausted window resets, not its first.
   local free_at best_at="${NEVER}" best=""
   while IFS=$'\t' read -r key name email plan wl wr rl rr cr un active note; do
     [[ -z ${name} || -n ${note} ]] && continue
-    if [[ ${wl} =~ ^[0-9]+$ ]] && ((wl > 0)) && [[ ${rr} =~ ^[0-9]+$ ]]; then free_at="${rr}"; else free_at="${wr}"; fi
-    [[ ${free_at} =~ ^[0-9]+$ ]] || free_at="${NEVER}"
+    free_at=0
+    spent "${wl}" && [[ ${wr} =~ ^[0-9]+$ ]] && ((wr > free_at)) && free_at="${wr}"
+    spent "${rl}" && [[ ${rr} =~ ^[0-9]+$ ]] && ((rr > free_at)) && free_at="${rr}"
+    ((free_at > 0)) || free_at="${NEVER}"
     ((free_at < best_at)) || continue
     best_at="${free_at}"
     best=$(printf '%s\t%s\t%s\t%s\t%s\tfallback' "${name}" "${wl}" "${free_at}" "${cr}" "${un}")
@@ -714,7 +746,16 @@ cmd_add() {
   [[ -n ${name} ]] || die "usage: codex-usage add <name> [--device|--browser]"
   [[ ${name} == main ]] && die "'main' is reserved for ~/.codex"
   valid_name "${name}" || die "invalid name: ${name} (letters, digits, . _ - only)"
-  local dir="${ACCOUNTS_ROOT}/${name}"
+  # An existing account (by label or by directory) is logged in again in
+  # place: a second directory under its display name would leave two rows
+  # called the same thing and `home` pointing at the old one.
+  local key dir; key=$(key_for "${name}")
+  if [[ ${key} != "${name}" || -d ${ACCOUNTS_ROOT}/${key} ]]; then
+    [[ $(label_for "${key}") == "${name}" ]] ||
+      die "${name} is the directory of the account labelled '$(label_for "${key}")' — use: codex-usage add $(label_for "${key}")"
+    printf 'Account %s already exists — logging it in again.\n' "${name}"
+  fi
+  dir="${ACCOUNTS_ROOT}/${key}"
   mkdir -p "${dir}"   # Codex refuses a CODEX_HOME that does not exist
   # Global instructions travel with the account so a consult routed through it
   # sees the same AGENTS.md as the slot. A link to the slot's link tracks
@@ -726,6 +767,7 @@ cmd_add() {
     if [[ -n ${SSH_CONNECTION:-}${SSH_TTY:-} ]]; then flow=device; else flow=browser; fi
   fi
   printf 'Logging in to account %s (CODEX_HOME: %s)\n' "${name}" "${dir}"
+  printf 'Note: a roster home carries AGENTS.md only — no config.toml, MCP servers or hooks — by design.\n' 
   if [[ ${flow} == device ]]; then
     run_codex "${dir}" login --device-auth
   else
