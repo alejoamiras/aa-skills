@@ -97,11 +97,16 @@ CI pins the same floor: `oven-sh/setup-bun@v2` with `bun-version: 1.4.0` (or `la
 ├── wrangler.jsonc                    # Cloudflare config (web-only projects — this IS the infra)
 ├── infra/tofu/                       # OpenTofu IaC (ONLY once real infra exists — see Infrastructure)
 ├── implementations-plan/             # Committed plan artifacts
-│   ├── index.md                      # Plans + lessons index (kept up to date)
-│   └── <plan-name>/
-│       ├── plan.md
-│       └── lessons/
-│           └── phase-N.md
+│   ├── index.md                      # ACTIVE plans only
+│   ├── lessons.md                    # Curated gotchas (~8 KiB budget, pruned on every promotion)
+│   ├── follow-ups.md                 # Open follow-ups lifted out of closed plans
+│   ├── .gitignore                    # Transcripts, drafts, eli5.html — never committed
+│   ├── .ignore                       # /archive/ — committed, out of default rg traversal
+│   ├── <plan-name>/
+│   │   ├── plan.md
+│   │   └── lessons/
+│   │       └── phase-N.md
+│   └── archive/<closed-plan>/
 ├── docs/
 │   ├── roadmap.md                    # Phases, decisions, backlog
 │   └── ci-pipeline.md                # CI/CD reference
@@ -607,9 +612,43 @@ Add `lint:tofu` only on Tier 3 projects (see Infrastructure):
 ### 11. Project docs
 
 ```bash
-mkdir -p docs implementations-plan
-touch implementations-plan/index.md   # Keep this updated as plans land
+mkdir -p docs implementations-plan/archive
+touch implementations-plan/index.md        # ACTIVE plans only, one line each
+touch implementations-plan/lessons.md      # Curated gotchas promoted out of closed plans
+touch implementations-plan/follow-ups.md   # Open follow-ups lifted out of closing plans
+touch implementations-plan/archive/index.md
+
+# Transcripts, competing drafts and the ELI5 fallback: written locally, never committed.
+# `plan-*.md` never matches `plan.md`. Patterns are unanchored on purpose so they also
+# catch nested sub-plans and research/ drafts; `!**/lessons/**` protects the debugging logs.
+cat > implementations-plan/.gitignore <<'EOF'
+audit-*.md
+plan-*.md
+_*.md
+eli5.html
+!**/lessons/**
+EOF
+
+# Closed plans stay committed but leave the DEFAULT search path: ripgrep honours
+# `.ignore` for tracked files, and both harnesses reach for ripgrep. An explicit path
+# (`rg <pattern> implementations-plan/archive`), `--no-ignore` and `git grep` all still
+# see it. Leading slash anchors to this one dir, not every descendant named `archive`.
+# NEVER ignore the whole folder — active plans must stay findable.
+echo '/archive/' > implementations-plan/.ignore
+
+# Collapse plan diffs in GitHub review, but keep the curated layer reviewable.
+cat >> .gitattributes <<'EOF'
+implementations-plan/** linguist-generated=true
+implementations-plan/lessons.md -linguist-generated
+implementations-plan/follow-ups.md -linguist-generated
+EOF
 ```
+
+**This snippet is for a fresh repo.** On an existing one it would clobber files and duplicate attribute lines: append only the rules that are missing, and treat it as a migration. `.gitignore` never untracks what is already committed, so inventory the half-state with `git ls-files -ci --exclude-standard -- implementations-plan`, `git rm --cached` the intended artifacts, and re-run until it returns nothing.
+
+Why plans stay in git at all: the lessons logs are what stop a future run repeating a dead end, and a plan committed with its code keeps provenance (`git log -- <file>` leads to the plan that changed it). What they must not do is pollute search or masquerade as live instructions — hence the archive, the two ignore files, and the Outcome block every closed plan carries. Full discipline, including the close-out that promotes lessons and follow-ups before archiving and the size budget that stops `lessons.md` rotting into the same problem, lives in the `blueprint` skill and the personal `AGENTS.md`.
+
+`linguist-generated=true` does two things: collapses the diff in GitHub review AND drops the files from the repo's language statistics. `linguist-documentation=true` only does the latter — it does **not** collapse diffs, so it is not a substitute here. Use neither for `docs/`, which should stay visible in review.
 
 Create `CLAUDE.md` at repo root describing:
 - Current state (packages, architecture)

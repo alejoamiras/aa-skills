@@ -136,6 +136,17 @@ Blueprint work lives in its own git worktree, named after the plan. Home the ses
    - Not a git repository? Skip homing entirely, say so, and proceed in place.
    - Otherwise call `EnterWorktree` with `name: <slug>`. This skill instruction is the standing authorization the tool requires. The native default base (`fresh`, from origin's default branch) is correct — plans start from a clean tree; set `worktree.baseRef: "head"` in settings only when the plan must build on unpushed local work. On a Codex driver: `agent-worktree new <slug> --no-start` creates the identical worktree + manifest row; work from the path it prints (there is no session-level cwd switch — every subsequent command runs there).
 3. **Set up + register**: run `bun install` if a `package.json` exists, then `agent-worktree register <slug> --status "phase 0.75: homed, drafting"` (derives path/branch/repo from cwd; plan defaults to `implementations-plan/<slug>`). If `agent-worktree` is not on PATH, note it and continue — homing works without the manifest.
+3b. **Ensure the plan-folder hygiene files carry the required rules.** Do not test for the files' existence and skip — a pre-existing `.gitignore` missing these lines is exactly the case that silently stays wrong. Append what is absent, never overwrite what is there, and never append a line twice:
+   - `implementations-plan/.gitignore` → `audit-*.md`, `plan-*.md`, `_*.md`, `eli5.html`, then `!**/lessons/**` so a scratch pattern can never swallow a debugging log. Unanchored on purpose: nested sub-plans (`<plan>/<sub-plan>/`) and `research/` drafts must be caught too. `plan-*.md` does NOT match `plan.md`.
+   - `implementations-plan/.ignore` → `/archive/`, with the leading slash so it anchors to that one directory rather than every descendant named `archive`.
+   - `implementations-plan/` also needs `index.md`, `lessons.md`, `follow-ups.md` and `archive/index.md` to exist, plus in the repo's `.gitattributes`:
+     ```gitattributes
+     implementations-plan/** linguist-generated=true
+     implementations-plan/lessons.md -linguist-generated
+     implementations-plan/follow-ups.md -linguist-generated
+     ```
+     The blanket rule collapses plan diffs in GitHub review; the two exemptions keep the curated layer reviewable, which is the part that most needs a human eye.
+   - **On an existing repo this is a migration, not scaffolding.** `.gitignore` does not untrack anything already committed, so inventory what is now ignored-but-tracked with `git ls-files -ci --exclude-standard -- implementations-plan`, review the list, `git rm --cached` the intended artifact classes, and re-run until it comes back empty. Skipping this leaves a half-state where searches look clean while every future commit still publishes transcripts.
 4. **Status discipline**: keep the manifest's one-line status current at every gate — after approval (`agent-worktree status <slug> "approved: implementing phase 1"`), at each phase-gate pass (`"phase N green: <next>"`), and at wrap-up (`"done: PR #N"`). That line is what `agent-worktree list` shows a human scanning "what was this one doing?" — it is the discovery layer, not decoration.
 5. **Close-out**: after the PR merges (or the plan is abandoned), suggest `agent-worktree done <slug>` (removes worktree + branch + manifest row). Never run it unprompted while the branch is unmerged.
 
@@ -483,7 +494,7 @@ Replace `<test>` and `<lint>` with the project's actual commands (e.g. `bun run 
 
 ```
 /loop 15m Drive implementations-plan/<plan> forward. Never idle waiting for my input. Each firing:
-1. **Reality check**: read implementations-plan/<plan>/plan.md and lessons/ (authoritative state — not the chat); native task list empty (fresh session)? rebuild it from plan.md, one task per remaining step; run `git status` and `git log --oneline -5`. If a PR exists, `gh pr view --json statusCheckRollup` (no --watch; multi-arc plans: `gh stack view` for the whole stack). Without a PR but with CI configured, `gh run list --branch $(git branch --show-current) --limit 1 --json status,databaseId`.
+1. **Reality check**: read implementations-plan/<plan>/plan.md and lessons/ (authoritative state — not the chat). If that path is gone, look for implementations-plan/archive/<plan>/plan.md — the plan closed and was archived: STOP the loop and say so, never resume work from an archived plan. If plan.md carries an `## Outcome` block, it is closed: STOP. Otherwise, native task list empty (fresh session)? rebuild it from plan.md, one task per remaining step; run `git status` and `git log --oneline -5`. If a PR exists, `gh pr view --json statusCheckRollup` (no --watch; multi-arc plans: `gh stack view` for the whole stack). Without a PR but with CI configured, `gh run list --branch $(git branch --show-current) --limit 1 --json status,databaseId`.
 2. **Waiting on CI is fine** — confirm it's actually progressing (`gh run watch <run-id>` up to 10 minutes; queued or stuck past that → inspect logs, log it as blocked in lessons). Use the wait productively: review the diff, prep the next phase, strengthen tests. Don't start work that would conflict with the in-flight change.
 3. **No task in hand?** Pick the next pending step from plan.md and start it. After each meaningful edit, run the fast validation layers (`<lint>` + `<test>` for the touched packages) — catch mistakes in-step, not phases later. Then commit → push (multi-arc plans: `gh stack push`; `gh stack sync` if trunk or a lower arc moved).
 4. **Stuck, or facing a decision you'd normally bring to me?** Don't wait. Call `/codex high` with full context and go back and forth until you two reach a defensible decision, then act on it. Log every consult + verdict in lessons/phase-N.md. Exception — hard limits stay hard: never merge to main or release branches, never publish or deploy, never expand scope beyond plan.md; if the decision requires crossing one, surface it and hold.
@@ -648,7 +659,21 @@ Triage codex's findings — verify factual claims against the repo before acting
 
 ### Delivery
 
-Ship per plan.md's Delivery section — PRs are created ONLY here, after every required quality loop has converged (per-arc loops + the final cross-arc pass on multi-arc plans; opening PRs earlier burns CI on every push while the loops are still changing the code). Single-arc → plain `gh pr create`; multi-arc → `gh stack sync` first if trunk moved, then `gh stack submit --auto` + `gh pr edit` bodies. Watch checks (`gh pr checks --watch`). `gh stack merge` (lands the named PR and everything below it) stays the user's call. Then maintain `implementations-plan/index.md` with the completed marker.
+Ship per plan.md's Delivery section — PRs are created ONLY here, after every required quality loop has converged (per-arc loops + the final cross-arc pass on multi-arc plans; opening PRs earlier burns CI on every push while the loops are still changing the code). Single-arc → plain `gh pr create`; multi-arc → `gh stack sync` first if trunk moved, then `gh stack submit --auto` + `gh pr edit` bodies. Watch checks (`gh pr checks --watch`). `gh stack merge` (lands the named PR and everything below it) stays the user's call.
+
+#### Closing the plan
+
+**Steps 1 to 3 belong in the delivery PR. Step 4 waits until that PR merges** — a running `/loop` still reads the live plan path, and moving the folder under it strands the loop mid-flight. **Steps 2 and 3 are how lessons and follow-ups survive; never skip them.**
+
+1. Write an `## Outcome` block in `plan.md`, directly **after** the YAML front matter, never above it. It carries: date, final status (`completed` / `superseded by <plan>` / `abandoned — <reason>`), what shipped with PR numbers, what was dropped and why, and one explicit line retiring the plan's `/goal` and `/loop` seeds so a later reader cannot mistake them for live instructions.
+2. **Promote the generalizable gotchas** into `implementations-plan/lessons.md` — one line each, linking to the archived detail. Promote what would bite a future run on a *different* task: a tool's real behaviour, an ordering requirement, a dead end and why it was dead. Leave run-specific noise behind. **Promotion is also a pruning pass**: that file is read at the start of every task, so it holds a budget of roughly 8 KiB. Deduplicate against what is there, retire whatever your entry supersedes, and date-stamp anything tied to a tool version. A stale workaround in that file is worse than an empty file — it gets injected into every future run. The raw `lessons/phase-N.md` logs travel into the archive intact; promotion never deletes them.
+3. **Move open follow-ups** into `implementations-plan/follow-ups.md`, or open a GitHub issue and keep only a pointer to it there — never a second status to maintain by hand. A plan never closes while it still owns an open follow-up. Read this file during Phase 0 recon and delete entries as they resolve.
+4. **After the delivery PR merges**, from the repo root: create `implementations-plan/archive/` if absent, `git mv implementations-plan/<plan-name> implementations-plan/archive/<plan-name>`, then repair what the extra directory level broke. Inventory first with `git grep -n '<plan-name>'` and check for `../../` targets that now resolve one level short, links to sibling plans that did not move in the same commit, and any reference from CI, scripts or docs. An `index.md` entry of the form `<plan-name>/plan.md` moves into `archive/index.md` unchanged. Keep this move in its own commit: mixing it with rewrites makes history traversal useless, and `git log --follow` tracks single files, not directories.
+5. Move its `index.md` line into `archive/index.md`, marked completed.
+
+`implementations-plan/.ignore` keeps the archive out of **default recursive searches** while it stays fully committed. That is a default, not a guarantee: a lesson link, an explicit path, `git grep`, or a resumed conversation can all still surface a closed plan — which is exactly why step 1's Outcome block exists. Treat anything under `archive/` as evidence of what was decided and why, never as a task list to execute. `implementations-plan/lessons.md` and `follow-ups.md` are never archived and never ignored: they are the durable layer.
+
+**Parallel worktrees share `index.md`, `lessons.md` and `follow-ups.md`.** Reconcile against trunk immediately before delivery, keep stable topical sections, and never re-sort or reformat wholesale. A clean line-level merge can still leave two contradictory lessons, or resurrect a follow-up another branch just resolved, so read what the other side added instead of trusting the merge. Do not configure a union merge driver for these files.
 
 ---
 
@@ -662,17 +687,23 @@ When the plan touches UI, **copywriting is part of the design surface**. Clear, 
 
 ```
 implementations-plan/<plan-name>/
-├── plan.md           # The plan: Architecture & Implementation + Security & Adversarial + Assumptions sections, per-phase validation gates, Post-implementation section (codex fix loop; `/code-review` first only if `code_review` ≠ off), Delivery section (arcs → PRs), audit verdicts inline (mid/deep/mega-deep), decision ledger (mid+), Seeds at bottom
-├── recon.md          # Phase 0.4 codebase-recon findings (reuse / adapt / dedup-risk map) — feeds the draft + every audit
-├── audit-codex.md    # Codex audit transcript(s)
-├── audit-fable.md    # Fable audit transcript (mid/deep/mega-deep only)
-├── eli5.html         # ELI5 FALLBACK only — primary is a Claude Artifact (hosted off-repo); /goal + /loop embedded, one marked Recommended
-├── research/         # Persisted research subagent findings (mega-deep only; deepest rung of the recon ladder)
+├── plan.md           # COMMITTED. The plan: Architecture & Implementation + Security & Adversarial + Assumptions sections, per-phase validation gates, Post-implementation section (codex fix loop; `/code-review` first only if `code_review` ≠ off), Delivery section (arcs → PRs), audit verdicts inline (mid/deep/mega-deep), decision ledger (mid+), Seeds at bottom
+├── recon.md          # COMMITTED. Phase 0.4 codebase-recon findings (reuse / adapt / dedup-risk map) — feeds the draft + every audit
+├── research/         # COMMITTED. Persisted research subagent findings (mega-deep only; deepest rung of the recon ladder)
 │   └── <module>.md
-└── lessons/
-    └── phase-N.md    # Per-phase debugging logs (filled during implementation)
+├── lessons/
+│   └── phase-N.md    # COMMITTED. Per-phase debugging logs (filled during implementation)
+├── audit-codex.md    # local only — Codex audit transcript(s)
+├── audit-fable.md    # local only — Fable audit transcript (mid/deep/mega-deep only)
+├── plan-<family>.md  # local only — competing drafts (deep/mega-deep); superseded by plan.md
+├── _*.md             # local only — scratch briefs and reviewer prompts
+└── eli5.html         # local only — ELI5 FALLBACK; primary is a Claude Artifact (hosted off-repo); /goal + /loop embedded, one marked Recommended
 ```
 
-Update `implementations-plan/index.md` with `- [<plan-name>](<plan-name>/plan.md) — <status> — <one-line hook>` when the plan is created and again when it closes.
+**Transcripts and drafts are written, then left uncommitted** (`implementations-plan/.gitignore`, seeded at Phase 0.75). They are real working files during the run — write them, read them, resume against them — they just never enter history: the verdicts already live inline in `plan.md`, the drafts are superseded by it, and reviewer transcripts are the single worst source of absolute local paths, which must never reach a public repo.
 
-All of this lands INSIDE the plan's worktree (Phase 0.75) and merges to the canonical clone with the PR — EXCEPT a published Artifact, which is hosted off-repo on claude.ai (only its source `eli5.html` + the URL recorded in `plan.md` live in the worktree). At close-out, suggest `agent-worktree done <plan-name>`.
+**Uncommitted means disposable, and `agent-worktree done` deletes them** along with the worktree — its clean-status check does not protect ignored files. So the committed record has to stand alone BEFORE close-out: `plan.md` carries each audit's accepted findings, the rejected ones with reasons, and any unresolved concern. "Audit passed" is not a record. No committed file may link to `audit-*.md`, `eli5.html` or a draft, because those links will dangle. If a transcript must survive, copy it somewhere outside the worktree — never rely on the worktree keeping it.
+
+Update `implementations-plan/index.md` with `- [<plan-name>](<plan-name>/plan.md) — <status> — <one-line hook>` when the plan is created. The index lists ACTIVE plans only; closing moves the line to `archive/index.md` (see Delivery).
+
+The committed artifacts land INSIDE the plan's worktree (Phase 0.75) and merge to the canonical clone with the PR. A published Artifact is hosted off-repo on claude.ai, so only its URL, recorded in `plan.md`, survives. At close-out, suggest `agent-worktree done <plan-name>`.

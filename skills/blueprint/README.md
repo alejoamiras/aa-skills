@@ -75,11 +75,21 @@ The plan ships with two ready-to-paste strings:
 ## Artifacts
 
 ```
-implementations-plan/<plan>/
-├── plan.md            # the plan (incl. Architecture & Implementation section)
-├── recon.md           # Phase 0.4 recon: reuse / adapt / dedup map
-├── audit-codex.md     # codex audit transcript
-├── audit-fable.md     # fable audit transcript (mid+)
-├── eli5.html          # ELI5 FALLBACK (primary is a shareable Claude Artifact) + seeds
-└── lessons/phase-N.md # per-phase debugging logs
+implementations-plan/
+├── index.md              # ACTIVE plans only
+├── lessons.md            # gotchas promoted out of closed plans
+├── follow-ups.md         # open follow-ups lifted out of closing plans
+├── <plan>/
+│   ├── plan.md           # COMMITTED — the plan, audit verdicts inline
+│   ├── recon.md          # COMMITTED — Phase 0.4 reuse / adapt / dedup map
+│   ├── lessons/phase-N.md# COMMITTED — per-phase debugging logs
+│   ├── audit-codex.md    # local only — codex audit transcript
+│   ├── audit-fable.md    # local only — fable audit transcript (mid+)
+│   ├── plan-<family>.md  # local only — competing drafts (deep+)
+│   └── eli5.html         # local only — ELI5 FALLBACK (primary is a shareable Artifact)
+└── archive/<closed-plan>/ # committed, but out of the search path
 ```
+
+Transcripts, competing drafts and the ELI5 fallback are written during the run and left uncommitted (`implementations-plan/.gitignore`): the verdicts already live inline in `plan.md`, and reviewer transcripts are the worst source of absolute local paths. They are disposable — `agent-worktree done` deletes them with the worktree — so the committed plan has to stand alone.
+
+Closing a plan writes an Outcome block (date, final status, and a line retiring its seeds), promotes the durable lessons to `lessons.md` under an ~8 KiB budget that forces pruning, moves open follow-ups to `follow-ups.md`, then archives the folder once the delivery PR merges. `implementations-plan/.ignore` keeps the archive out of *default* ripgrep traversal — an explicit path, `git grep` or a lesson link still reaches it, which is why the Outcome block, not the ignore file, is what stops a closed plan being read as live instructions.
