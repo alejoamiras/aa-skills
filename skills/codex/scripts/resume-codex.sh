@@ -115,6 +115,21 @@ fi
 [[ -f "$CODEX_DIR/session_id" ]] || printf '%s' "$SID" > "$CODEX_DIR/session_id"
 [[ -f "$CODEX_DIR/codex_home" ]] || printf '%s' "${CODEX_HOME:-}" > "$CODEX_DIR/codex_home"
 
+# A resume inherits the session's sandbox but not its approvals reviewer, so an
+# approve-for-me session would fall back to prompting nobody and run nothing.
+# Gated on THIS machine's opt-in file, so a dir carried to another host never
+# re-arms it. With no record (UUID-only resume, older dir) the opt-in alone
+# decides: on a session that was really read-only the reviewer is inert.
+SANDBOX_OVERRIDE_FILE="$HOME/.agents/codex-sandbox"
+HOST_OPT_IN=""
+[[ -r "$SANDBOX_OVERRIDE_FILE" ]] && HOST_OPT_IN=$(tr -d '[:space:]' < "$SANDBOX_OVERRIDE_FILE")
+RECORDED_SANDBOX="$HOST_OPT_IN"
+[[ -f "$CODEX_DIR/sandbox" ]] && RECORDED_SANDBOX=$(cat "$CODEX_DIR/sandbox")
+REVIEWER_ARGS=()
+if [[ "$HOST_OPT_IN" == approve-for-me && "$RECORDED_SANDBOX" == approve-for-me ]]; then
+  REVIEWER_ARGS=(-c 'approvals_reviewer="auto_review"')
+fi
+
 N=1
 while [[ -e "$CODEX_DIR/response-$N.md" ]]; do
   N=$((N + 1))
@@ -134,6 +149,7 @@ codex exec resume "$SID" \
   "${MODEL_ARGS[@]}" \
   -c "model_reasoning_effort=$EFFORT" \
   -c "project_doc_max_bytes=$DOC_MAX" \
+  ${REVIEWER_ARGS[@]+"${REVIEWER_ARGS[@]}"} \
   -o "$RESPONSE_FILE" \
   - < "$PROMPT_FILE" \
   >> "$LOG_FILE" 2>&1

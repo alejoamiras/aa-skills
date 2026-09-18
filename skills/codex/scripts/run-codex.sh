@@ -5,7 +5,10 @@
 #   prompt-file  Required. Path to a file containing the prompt for codex.
 #   cwd          Optional. Defaults to $PWD. Passed to codex via -C.
 #   effort       Optional. Defaults to xhigh. Passed via -c model_reasoning_effort=...
-#   sandbox      Optional. Defaults to read-only. Passed via --sandbox.
+#   sandbox      Optional. Defaults to read-only. Passed via --sandbox, except
+#                approve-for-me, which becomes --approve-for-me: workspace-write
+#                plus a model auto-reviewer that may rerun a command outside
+#                the sandbox. Refused unless this machine opted in (see Env).
 #   model        Optional. Defaults to $CODEX_MODEL, else gpt-6-astra.
 #                (gpt-6-astra became the default 2026-09-04: OpenAI's
 #                flagship since 2026-09-03 (Codex CLI >= 0.153.1), runs on
@@ -18,6 +21,11 @@
 #                     "best" to let it pick the one with headroom. The run then
 #                     uses that account's CODEX_HOME instead of ~/.codex, and
 #                     the home is recorded so resume-codex.sh stays on it.
+#      ~/.agents/codex-sandbox  Optional machine-local file holding the single
+#                     word approve-for-me. It upgrades a read-only request on
+#                     hosts whose kernel policy blocks bwrap (nested containers,
+#                     AppArmor userns restriction), where read-only means codex
+#                     can run nothing at all. Absent everywhere else.
 #      CODEX_PROJECT_DOC_MAX_BYTES  Optional. Instruction-file budget, default
 #                     131072. Raise it when a global + project AGENTS.md pair
 #                     exceeds it; anything past the cap is dropped in silence.
@@ -49,6 +57,27 @@ MODEL="${5:-${CODEX_MODEL:-gpt-6-astra}}"
 DOC_MAX="${CODEX_PROJECT_DOC_MAX_BYTES:-131072}"
 MODEL_ARGS=()
 [[ -n "$MODEL" ]] && MODEL_ARGS=(-m "$MODEL")
+
+# The override file may only name approve-for-me: a stray file must never be
+# able to widen a consult to danger-full-access.
+SANDBOX_OVERRIDE_FILE="$HOME/.agents/codex-sandbox"
+HOST_OPT_IN=""
+if [[ -r "$SANDBOX_OVERRIDE_FILE" ]]; then
+  HOST_OPT_IN=$(tr -d '[:space:]' < "$SANDBOX_OVERRIDE_FILE")
+  if [[ "$HOST_OPT_IN" != approve-for-me ]]; then
+    echo "ERROR: $SANDBOX_OVERRIDE_FILE must contain exactly: approve-for-me" >&2
+    exit 2
+  fi
+fi
+# The machine opts in, never the caller: a prompt-driven agent must not be able
+# to pick automatic approvals on a host whose sandbox works.
+if [[ "$SANDBOX" == approve-for-me && -z "$HOST_OPT_IN" ]]; then
+  echo "ERROR: approve-for-me needs this machine's opt-in ($SANDBOX_OVERRIDE_FILE)" >&2
+  exit 2
+fi
+[[ "$SANDBOX" == read-only && -n "$HOST_OPT_IN" ]] && SANDBOX="$HOST_OPT_IN"
+SANDBOX_ARGS=(--sandbox "$SANDBOX")
+[[ "$SANDBOX" == approve-for-me ]] && SANDBOX_ARGS=(--approve-for-me)
 
 if [[ ! -f "$PROMPT_FILE" ]]; then
   echo "ERROR: prompt file not found: $PROMPT_FILE" >&2
@@ -85,7 +114,17 @@ RESPONSE_FILE="$CODEX_DIR/response.md"
 LOG_FILE="$CODEX_DIR/log.jsonl"
 SESSION_ID_FILE="$CODEX_DIR/session_id"
 
-cp "$PROMPT_FILE" "$CODEX_DIR/prompt.md"
+# Without being told, codex reports the bwrap failure as its answer instead of
+# asking the auto-reviewer for an unsandboxed rerun.
+if [[ "$SANDBOX" == approve-for-me ]]; then
+  {
+    echo "[Host note: the command sandbox cannot start here (bwrap fails). When a command fails with a bwrap/sandbox error, rerun it requesting escalated permissions with a one-line justification. This is a review: read and inspect only, do not modify files.]"
+    echo
+    cat "$PROMPT_FILE"
+  } > "$CODEX_DIR/prompt.md"
+else
+  cp "$PROMPT_FILE" "$CODEX_DIR/prompt.md"
+fi
 # Sessions live under the home that created them, so a resume must reuse it.
 # Recorded canonical: a relative or symlinked home would mean something else
 # from another cwd. Empty means the slot (~/.codex).
@@ -94,6 +133,7 @@ if [[ -n "${CODEX_HOME:-}" ]]; then
   export CODEX_HOME
 fi
 printf '%s' "${CODEX_HOME:-}" > "$CODEX_DIR/codex_home"
+printf '%s' "$SANDBOX" > "$CODEX_DIR/sandbox"
 
 echo "Running codex (model=${MODEL:-config default}, effort=$EFFORT, sandbox=$SANDBOX, cwd=$CWD, home=${CODEX_HOME:-~/.codex})..." >&2
 echo "Output dir: $CODEX_DIR" >&2
@@ -101,14 +141,14 @@ echo "Output dir: $CODEX_DIR" >&2
 set +e
 codex exec \
   --json \
-  --sandbox "$SANDBOX" \
+  "${SANDBOX_ARGS[@]}" \
   --skip-git-repo-check \
   "${MODEL_ARGS[@]}" \
   -c "model_reasoning_effort=$EFFORT" \
   -c "project_doc_max_bytes=$DOC_MAX" \
   -C "$CWD" \
   -o "$RESPONSE_FILE" \
-  - < "$PROMPT_FILE" \
+  - < "$CODEX_DIR/prompt.md" \
   > "$LOG_FILE" 2>&1
 EXIT=$?
 set -e
