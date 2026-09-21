@@ -68,6 +68,7 @@ This skill is one `SKILL.md` installed for both **Claude Code** and **Codex**. T
 **The plan is the most important step. Don't draft against a fuzzy target.** Before any drafting, ask the user:
 
 - **Success criterion**: what does "done" look like? Measurable signals?
+- **Who it is for, and what excellent looks like to them**: the user or consumer of the change (end user on a phone, a dApp integrating the SDK, an operator reading logs, a future maintainer) and the two to four qualities they would notice in a top implementation versus a merely working one. Feeds the Outcome & Quality Bar section.
 - **Scope trade-offs**: what's in, what's out, where can scope be cut?
 - **Constraints**: time, infra, external deps, capacity
 - **Quality bar**: PoC, staging, or production? Calibrates testing rigor and audit depth.
@@ -230,6 +231,18 @@ Same shape as `/blueprint deep`, but with an upfront research phase AND a split 
 
 ---
 
+## Required: Outcome & Quality Bar section (ALL tiers)
+
+Every plan must include an "Outcome & Quality Bar" section, placed before Architecture & Implementation. It states who the change is for and what an excellent result looks like **to them**, in terms the implementing session can act on. This is the answer to "why does the quality of this matter", and it is what makes a top-quality implementation different from a working one.
+
+- **For whom**: the concrete user or consumer, and the situation they are in when they meet the change.
+- **What excellent looks like**: two to four criteria, each observable in the delivered work (behaviour, copy, latency, failure handling, API ergonomics, readability of the code a maintainer inherits). "Every async step shows pending, failed and recovered states, and error copy says what to do next" is a criterion; "polished UX" is not.
+- **What good enough looks like**: where the bar deliberately stops, so quality effort goes where it is felt and not everywhere.
+
+No motivational or emotional language ("deliver something to be proud of", "think how satisfied users will be"): evidence that such framing improves model output is weak on current models, and it gives the implementer nothing to check. Concrete criteria do both jobs. Validation gates should reference these criteria where a command or test can prove one, and audit prompts may cite them when judging whether the plan serves its user. The section goes in the ELI5 companion too, in plain language: it is the human decision layer's view of the same thing.
+
+For `light` plans two criteria suffice.
+
 ## Required: Architecture & Implementation section
 
 Every plan must include an "Architecture & Implementation" section — the engineering layer. Blueprint audits must argue about *how to build it*, not only *whether the idea is right*; this section is what they argue over. It stays in `plan.md` ONLY — it does NOT go in the ELI5 companion (that's the human decision layer; keep the jargon out of it).
@@ -373,6 +386,7 @@ Either way, the CONTENTS are the same:
 
 - **Title + one-paragraph summary** in plain language
 - **Why this tier was chosen** (Phase 0.5 rubric outcome, with the rubric scores)
+- **Who it is for and what excellent looks like** (the Outcome & Quality Bar, in plain language)
 - **Phases**: ELI5 of each (what + why, no jargon) + its validation gate in one plain-language line ("proves itself by: unit tests for the new parser + lint")
 - **Human context**: simplified background needed to understand decisions
 - **Open questions**: with their human-context framing
@@ -494,7 +508,7 @@ Replace `<test>` and `<lint>` with the project's actual commands (e.g. `bun run 
 
 ```
 /loop 15m Drive implementations-plan/<plan> forward. Never idle waiting for my input. Each firing:
-1. **Reality check**: read implementations-plan/<plan>/plan.md and lessons/ (authoritative state — not the chat). If that path is gone, look for implementations-plan/archive/<plan>/plan.md — the plan closed and was archived: STOP the loop and say so, never resume work from an archived plan. If plan.md carries an `## Outcome` block, it is closed: STOP. Otherwise, native task list empty (fresh session)? rebuild it from plan.md, one task per remaining step; run `git status` and `git log --oneline -5`. If a PR exists, `gh pr view --json statusCheckRollup` (no --watch; multi-arc plans: `gh stack view` for the whole stack). Without a PR but with CI configured, `gh run list --branch $(git branch --show-current) --limit 1 --json status,databaseId`.
+1. **Reality check**: read implementations-plan/<plan>/plan.md and lessons/ (authoritative state — not the chat), including its Outcome & Quality Bar section: every step is judged against those criteria, not just against "it runs". If that path is gone, look for implementations-plan/archive/<plan>/plan.md — the plan closed and was archived: STOP the loop and say so, never resume work from an archived plan. If plan.md carries an `## Outcome` block, it is closed: STOP. Otherwise, native task list empty (fresh session)? rebuild it from plan.md, one task per remaining step; run `git status` and `git log --oneline -5`. If a PR exists, `gh pr view --json statusCheckRollup` (no --watch; multi-arc plans: `gh stack view` for the whole stack). Without a PR but with CI configured, `gh run list --branch $(git branch --show-current) --limit 1 --json status,databaseId`.
 2. **Waiting on CI is fine** — confirm it's actually progressing (`gh run watch <run-id>` up to 10 minutes; queued or stuck past that → inspect logs, log it as blocked in lessons). Use the wait productively: review the diff, prep the next phase, strengthen tests. Don't start work that would conflict with the in-flight change.
 3. **No task in hand?** Pick the next pending step from plan.md and start it. After each meaningful edit, run the fast validation layers (`<lint>` + `<test>` for the touched packages) — catch mistakes in-step, not phases later. Then commit → push (multi-arc plans: `gh stack push`; `gh stack sync` if trunk or a lower arc moved).
 4. **Stuck, or facing a decision you'd normally bring to me?** Don't wait. Call `/codex high` with full context and go back and forth until you two reach a defensible decision, then act on it. Log every consult + verdict in lessons/phase-N.md. Exception — hard limits stay hard: never merge to main or release branches, never publish or deploy, never expand scope beyond plan.md; if the decision requires crossing one, surface it and hold.
