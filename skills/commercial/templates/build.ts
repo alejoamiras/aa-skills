@@ -316,8 +316,9 @@ async function buildText(out: string, L: Layout, pre: string, withCaptions: bool
   if (frameCount(p(out)) !== starts.at(-1)) throw new Error(`${out} has ${frameCount(p(out))} frames, want ${starts.at(-1)}`);
 }
 
-// The square crop follows each segment's `x` and only jumps on cuts.
-const squareX = TIMELINE.slice(0, -1).reduceRight((acc, s, i) => `if(lt(t,${(starts[i + 1] / FPS).toFixed(4)}),${s.x},${acc})`, String(TIMELINE.at(-1)!.x));
+// The square crop follows each segment's `x` and only jumps on cuts. It switches on the frame number:
+// a rounded time threshold ((106/24).toFixed(4) is 4.4167) kept the old crop on a new shot's first frame.
+const squareX = TIMELINE.slice(0, -1).reduceRight((acc, s, i) => `if(lt(n,${starts[i + 1]}),${s.x},${acc})`, String(TIMELINE.at(-1)!.x));
 
 function srt() {
   const ts = (s: number) => {

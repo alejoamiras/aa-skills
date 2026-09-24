@@ -77,19 +77,20 @@ The foreign reviewer checks the script at `high`. **Gate:** the owner approves t
 
 - **`bible.md`** holds one descriptor string each for the characters, the location, the hero props and the style. Paste them verbatim into every still prompt, and put scale words in every prompt ("about 25 cm, true-to-life scale"). The patterns are in `references/prompts.md`.
 - **References:** a full-body still of each character on grey, the empty location, and a studio still of each hero prop.
-- **Keyframes.** Make `kf/s<N>-start.png` from the references, then `kf/s<N>-end.png` as an **edit of the start** ("keep … identical. N seconds later: …"). For each pair, list every object in both frames (anything only in the end materialises), compare shot N's end with shot N+1's start, and check hands, lettering and scale at full resolution.
+- **Keyframes.** Make `kf/s<N>-start.png` from the references, and put everything the shot needs in it: anything that appears only in the end state materialises mid-shot. The end state goes in the shot prompt, never in an end image (see Shots). Compare shot N's end state with shot N+1's start, and check hands, lettering and scale at full resolution.
 - **Animatic.** Record scratch VO (0.15 a line), then run `bun $C/scripts/animatic.ts <spot>/review/animatic.mp4 <spot>/kf/s1-start.png@4.25 … --audio <spot>/audio/vo1.mp3@0.4 …`. Watch it muted, then with sound. It is the last free place to change timing.
 
 ## 6 · Shots
 
 ```sh
 bun $C/scripts/hf.ts <spot>/shots s3-t1 seedance_2_5 --mode omni_reference \
-  --start-image <spot>/kf/s3-start.png --end-image <spot>/kf/s3-end.png \
+  --start-image <spot>/kf/s3-start.png \
   --image-references <spot>/refs/<character>.png \
   --duration 5 --resolution 1080p --aspect_ratio 16:9 --generate_audio false \
   --prompt "<camera. ordered action. conservation. physicality. tone.> No lettering or logos."
 ```
 
+- **Start image only.** A take given an end image, even one identical to its start, came back re-lit and repainted from frame 0. Name the keyframe's own shot size and say "exactly the framing of the first frame; keep the light exactly as in the first frame": a different shot size in the prompt reframes the shot.
 - **Pilot the riskiest shot on its own.** Launch the rest together once it has survived the slop hunt.
 - **Generated audio stays off.** The build places every sound on a measured frame.
 - **Output** is 24 fps, and a 5 s take is 121 frames. Frame 0 is the start keyframe.
@@ -108,8 +109,9 @@ bun $C/scripts/hf.ts <spot>/shots s3-t1 seedance_2_5 --mode omni_reference \
 | An object materialises | start after it has formed and give the frames to the neighbouring shot; failing that, add it to the start keyframe and retake |
 | A feather-slow fall | a frame map: hold, then 3 accelerating frames that land on the original landing frame |
 | Duplicates near the end | trim before the first one |
-| A touched object vanishes | retake from keyframes that show the result, with a conservation clause |
-| A skipped beat (the end state from frame 0) | new start and end keyframes, one action |
+| A touched object vanishes | retake with a prompt that states the result, with a conservation clause |
+| A skipped beat (the end state from frame 0) | a new start keyframe, one action |
+| A still between live shots reads as a photograph | animate it from the still with one small action |
 | Pseudo-lettering | blur it on the still; leave soft background text |
 
 Try fixes cheapest first: trim, retime, hold, pixel patch, still edit, retake. Log each in `lessons.md`. Every trap so far is in `references/gotchas.md`.

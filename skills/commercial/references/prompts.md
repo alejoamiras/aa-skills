@@ -34,9 +34,9 @@ Restate the descriptor even though the reference image is attached. The image ca
 
 **Name the wrong readings.** When a model keeps drawing the wrong thing, list what it isn't: "It is a chip in the rim, NOT a crack, NOT a missing piece."
 
-## Shots (`seedance_2_5 --mode omni_reference`, start and end keyframes)
+## Shots (`seedance_2_5 --mode omni_reference`, start image only)
 
-> Locked `<shot size>` at `<location short name>`; the camera never moves. `<Who>` `<does the action, in order, with timing words: "for a long reluctant beat, then">`. `<Conservation clauses>`. `<Physicality clause>`. `<Light>`, `<tone>`, photoreal. No lettering or logos.
+> Locked `<the keyframe's own shot size>` at `<location short name>`, exactly the framing of the first frame; the camera never moves. Keep the light exactly as in the first frame. `<Who>` `<does the action, in order, with timing words: "for a long reluctant beat, then">`. `<Conservation clauses>`. `<Physicality clause>`. `<Light>`, `<tone>`, photoreal. No lettering or logos.
 
 - **Conservation clauses** make vanishing and morphing less likely; they guarantee nothing, so the slop hunt still checks. Name the object and the property that must not change: "Every other `<item>` stays exactly where it is and never disappears." "Once taken, the `<mark>` keeps exactly the same shape." "Both `<props>` keep their `<feature>` facing the camera and never change shape."
 - **Physicality clauses**: "natural walking with real weight, no sliding feet"; "a visible tug"; "sets it down gently".
