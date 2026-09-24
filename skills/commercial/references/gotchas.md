@@ -49,7 +49,7 @@ Every entry here produced a real defect, or nearly did, in a finished spot. Most
 - **Parallel generation jobs must append to the ledger with O_APPEND**, as `scripts/hf.ts` does. A read-modify-write loses whichever job finishes second.
 - **A shared Higgsfield account shows other sessions' spend.** Run `scripts/ledger.ts` at every gate. It lists account jobs missing from the ledger, so a gap has a name instead of being a mystery. One day, the balance fell 210 credits below the ledger: three clips from another session on the same account.
 - **Higgsfield login on a headless machine.** The OAuth redirect is pinned to `localhost:8765` (another `--port` fails with a redirect_uri mismatch). Run the login on the server and forward the port from the laptop with `ssh -N -L 8765:localhost:8765 <host>`. "Address already in use" there is the login's own listener, not an intruder.
-- **`higgsfield account status` prints the account email.** Keep its output out of boards, ledgers and transcripts you share; `hf.ts` stores only the balance.
+- **`higgsfield account status` prints the account email, `--json` included.** Keep its output out of boards, ledgers and transcripts you share; `hf.ts` and `ledger.ts` read only `credits`.
 - **`text2speech_v2` requires `--variant`** (`elevenlabs` is 0.15). Pricing without it errors.
 - **`seed_audio` is priced by the prompt**, from 0.1 for three words to about 1.4 for a long one. The quote is exact, so trust `hf.ts`'s logged price over a table.
 - **`seed_audio` refused an orchestral sting.** The job failed and wasn't charged; `sonilo_music --duration 4` produced it.
