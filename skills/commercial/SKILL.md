@@ -17,7 +17,7 @@ Three rules carry the flow:
 ## Setup
 
 - **Workspace.** One folder outside any repo, e.g. `~/ads`, holds `expenses.jsonl`, the ledger (`touch` one to start). Commands run from there. Each spot gets a kebab-case folder: `cap` (the approved budget), `spot.md` (status line, brief, script, shot list, defects, rounds), `bible.md`, `refs/ kf/ shots/ audio/` (each file beside its `.job.json`), `review/`, `build.ts` with `work/`, and `lessons.md`.
-- **Pre-flight.** `higgsfield account status --json` shows a login and enough credits; its text form prints the account email, so keep that out of anything shared. The foreign reviewer is logged in, and `ffmpeg`, `ffprobe`, `bun` 1.4+, `curl` and a font are installed.
+- **Pre-flight.** `higgsfield account status --json` shows a login, enough credits and the plan; both its forms print the account email, so keep the output out of anything shared. The foreign reviewer is logged in, and `ffmpeg`, `ffprobe`, `bun` 1.4+, `curl` and a font are installed.
 - **Resuming.** `spot.md` opens with a status line (`shots · s1–s4 accepted · s5 retake queued · 312 / 620 credits`). Read it, then run `ledger.ts`.
 
 ## Money
