@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+# op-remote — the Mac half of keyed runs. Shows the owner exactly what a request on <host> will
+# run and, only on their "y" at the terminal, streams the 1Password values into it over ssh.
+#
+#   op-remote <host> <id>          approve and run the request (exits with the command's code)
+#   op-remote create <host> <id>   create the 1Password item the request's template describes
+#
+# macOS /bin/bash 3.2. Needs `op` (app integration), jq for `create`, and env-exec next to this
+# file: it is shipped to the host on every call, so the host runs this Mac's receiver.
+set -euo pipefail
+set +x +v +a
+
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in /*) self=$link ;; *) self=$(dirname "$self")/$link ;; esac
+done
+LIB="$(cd "$(dirname "$self")" && pwd)/env-exec"
+# shellcheck disable=SC2034 # read by env-exec
+KEYED_LIB=1 KEYED_TOOL=op-remote
+# shellcheck source-path=SCRIPTDIR source=env-exec
+. "$LIB"
+
+VAULTS=${OP_REMOTE_VAULTS:-Keyed-Runs}
+REPO='' TEMPLATE='' HEAD='' URL='' TIPS='' SUBJECT='' RUN_PATH='' ARGV0='' TPL=''
+SECP256K1_N=fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
+BN254_R=30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
+
+mode=run
+if [ "${1:-}" = create ]; then mode=create; shift; fi
+[ $# -eq 2 ] || keyed_fail "usage: op-remote [create] <host> <id>"
+host=$1 id=$2
+[[ $host =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || keyed_fail "bad host: $host"
+keyed_check_id "$id"
+{ exec 4<> /dev/tty; } 2> /dev/null || keyed_fail "needs a terminal: approval is read from /dev/tty"
+
+SHIP=$(base64 < "$LIB" | tr -d '\n')
+remote() { # remote <subcommand>: the shipped env-exec on the host, from an empty environment
+  ssh -T -a -x -o ClearAllForwardings=yes -o PermitLocalCommand=no -- "$host" \
+    "/usr/bin/env -i HOME=\"\$HOME\" LANG=C.UTF-8 /bin/bash --noprofile --norc -c \"\$(printf %s $SHIP | /usr/bin/base64 -d)\" env-exec $1 $id"
+}
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+say() { printf '%s\n' "$@" >&4; }
+
+confirm() { # confirm <question>: only a typed y/yes on the terminal counts
+  local ans=''
+  printf '%s [y/N] ' "$1" >&4
+  IFS= read -r ans <&4 || ans=''
+  case $ans in y | Y | yes) return 0 ;; esac
+  say "aborted"
+  exit 1
+}
+
+fetch() { # inspect the request; everything the host says is data, rendered through keyed_quote
+  local magic rid n i a
+  # ulimit -f caps what the host can make this Mac write (1024-byte blocks).
+  if ! (ulimit -f 1024; remote inspect > "$tmp/inspect" 2> "$tmp/err"); then
+    say "the host refused request $id:"
+    head -c 4096 "$tmp/err" | keyed_sanitize >&4
+    exit 1
+  fi
+  {
+    keyed_get magic
+    [ "$magic" = KEYED-INSPECT1 ] || keyed_fail "not an inspect reply"
+    keyed_get rid
+    [ "$rid" = "$id" ] || keyed_fail "reply is for $rid"
+    keyed_get REPO
+    keyed_get TEMPLATE
+    keyed_get HEAD
+    keyed_get URL
+    keyed_get TIPS
+    keyed_get SUBJECT
+    keyed_get RUN_PATH
+    keyed_get ARGV0
+    keyed_get n
+    keyed_count "$n" 1 "$KEYED_MAX_ARGS"
+    ARGV=()
+    for ((i = 0; i < n; i++)); do keyed_get a; ARGV+=("$a"); done
+    keyed_get TPL
+    keyed_end
+  } < "$tmp/inspect"
+  [[ $HEAD =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || keyed_fail "bad commit id from host"
+  case $REPO in /*) ;; *) keyed_fail "host sent a relative repo path" ;; esac
+  case $ARGV0 in /*) ;; *) keyed_fail "host sent a relative command path" ;; esac
+  printf '%s\n' "$TPL" > "$tmp/template"
+  keyed_parse_template "$tmp/template"
+  S_NAME=() S_REF=() P_NAME=() P_VALUE=()
+  for ((i = 0; i < ${#t_name[@]}; i++)); do
+    if [ "${t_kind[i]}" = secret ]; then
+      [[ ${t_value[i]} =~ $KEYED_REF_RE ]]
+      case " $VAULTS " in *" ${BASH_REMATCH[1]} "*) ;;
+        *) keyed_fail "${t_name[i]}: vault '${BASH_REMATCH[1]}' is not one of: $VAULTS" ;; esac
+      S_NAME+=("${t_name[i]}") S_REF+=("${t_value[i]}")
+    else
+      P_NAME+=("${t_name[i]}") P_VALUE+=("${t_value[i]}")
+    fi
+  done
+  [ "${#S_NAME[@]}" -gt 0 ] || keyed_fail "template has no op:// secrets"
+}
+
+show_request() {
+  local i web=''
+  case $URL in
+    git@github.com:*) web=${URL#git@github.com:} ;;
+    https://github.com/* | ssh://git@github.com/*) web=${URL#*github.com/} ;;
+  esac
+  [ -z "$web" ] || web="https://github.com/${web%.git}/commit/$HEAD"
+  say "" "keyed run $id on $host" \
+    "  repo      $(keyed_quote "$REPO")" \
+    "  remote    $(keyed_quote "$URL")" \
+    "  commit    $HEAD  tip of $(keyed_quote "$TIPS")" \
+    "            $(keyed_quote "$SUBJECT")"
+  [ -z "$web" ] || say "            $(keyed_quote "$web")"
+  say "  template  $(keyed_quote "$TEMPLATE") at that commit" \
+    "  PATH      $(keyed_quote "$RUN_PATH")" \
+    "  command   [0] $(keyed_quote "$ARGV0")  (asked for $(keyed_quote "${ARGV[0]}"))"
+  for ((i = 1; i < ${#ARGV[@]}; i++)); do say "            [$i] $(keyed_quote "${ARGV[i]}")"; done
+  for ((i = 0; i < ${#S_NAME[@]}; i++)); do say "  secret    ${S_NAME[i]} <- ${S_REF[i]}"; done
+  for ((i = 0; i < ${#P_NAME[@]}; i++)); do say "  plain     ${P_NAME[i]}=$(keyed_quote "${P_VALUE[i]}")"; done
+}
+
+raw_value() { # stdin → stdout unchanged; fails on NUL, CR or LF, checked before $(…) could strip them
+  local v=''
+  if IFS= read -r -d '' v; then return 1; fi
+  case $v in *$'\n'* | *$'\r'*) return 1 ;; esac
+  printf '%s' "$v"
+}
+
+run_request() {
+  local i v rc st
+  fetch
+  show_request
+  confirm "Release ${#S_NAME[@]} secret(s) to this command?"
+  S_VALUE=()
+  for ((i = 0; i < ${#S_NAME[@]}; i++)); do
+    v=$(op read -n "${S_REF[i]}" | raw_value) || keyed_fail "${S_NAME[i]}: op read failed or the value is not one line"
+    keyed_check_value "${S_NAME[i]}" "$v" 8
+    S_VALUE+=("$v")
+  done
+  v=''
+  set +e
+  {
+    printf '%s\0' KEYED-RUN1 "$id" "$HEAD" "$REPO" "$ARGV0" "${#ARGV[@]}" "${ARGV[@]}" "${#P_NAME[@]}"
+    for ((i = 0; i < ${#P_NAME[@]}; i++)); do printf '%s=%s\0' "${P_NAME[i]}" "${P_VALUE[i]}"; done
+    printf '%s\0' "${#S_NAME[@]}"
+    for ((i = 0; i < ${#S_NAME[@]}; i++)); do printf '%s=%s\0' "${S_NAME[i]}" "${S_VALUE[i]}"; done
+    printf '%s\0' END
+  } | remote receive 2>&1 | keyed_sanitize
+  S_VALUE=()
+  st=$(remote status 2> /dev/null)
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ] || [ -z "$st" ]; then
+    say "op-remote: lost the connection; the run may still be going: ssh $host env-exec wait $id"
+    exit 255
+  fi
+  say "op-remote: $id $(keyed_quote "$st")"
+  case $st in
+    "finished "*) exit "${st#finished }" ;;
+    running | claimed) say "still running on $host (connection dropped?): ssh $host env-exec wait $id"; exit 255 ;;
+    *) exit 125 ;;
+  esac
+}
+
+rand_hex() { # 32 random bytes as 64 lowercase hex chars
+  local h
+  h=$(openssl rand -hex 32) || return 1
+  [[ $h =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s' "$h"
+}
+
+rand_below() { # rand_below <limit-hex>: uniform in [1, limit) by rejection sampling
+  local h LC_ALL=C
+  while :; do
+    h=$(rand_hex) || return 1
+    if [[ $h < $1 ]] && [[ $h =~ [1-9a-f] ]]; then printf '0x%s' "$h"; return 0; fi
+  done
+}
+
+create_item() {
+  local i vault='' item='' names=() values=() v exists
+  fetch
+  for ((i = 0; i < ${#t_name[@]}; i++)); do
+    [ -n "${t_directive[i]}" ] || continue
+    [[ ${t_value[i]} =~ $KEYED_REF_RE ]]
+    [ "${BASH_REMATCH[3]}" = "${t_name[i]}" ] || keyed_fail "${t_name[i]}: the field must be named like the variable"
+    [ -z "$vault" ] || [ "$vault/$item" = "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}" ] \
+      || keyed_fail "every '# op:' secret must live in one item ($vault/$item vs ${BASH_REMATCH[1]}/${BASH_REMATCH[2]})"
+    vault=${BASH_REMATCH[1]} item=${BASH_REMATCH[2]}
+    names+=("${t_name[i]}")
+  done
+  [ "${#names[@]}" -gt 0 ] || keyed_fail "the template has no '# op:' directives"
+  command -v jq > /dev/null || keyed_fail "create needs jq (brew install jq)"
+  say "" "create op://$vault/$item from $(keyed_quote "$TEMPLATE") at ${HEAD:0:12} ($host, $id):"
+  for ((i = 0; i < ${#t_name[@]}; i++)); do
+    [ -z "${t_directive[i]}" ] || say "  ${t_name[i]}  (${t_directive[i]})"
+  done
+  confirm "Create it? Values are never printed."
+  # A failed lookup must stop here, not read as "absent"; titles compare case-insensitively like
+  # op:// refs do. Not atomic: don't race two creates.
+  exists=$(op item list --vault "$vault" --format json | jq --arg t "$item" 'any(.[]; (.title | ascii_downcase) == ($t | ascii_downcase))') \
+    || keyed_fail "could not list vault $vault"
+  [ "$exists" = false ] || keyed_fail "op://$vault/$item already exists: rotate or delete it in 1Password, then rerun"
+  for ((i = 0; i < ${#t_name[@]}; i++)); do
+    case ${t_directive[i]} in
+      '') continue ;;
+      'generate eth-key') v=$(rand_below "$SECP256K1_N") ;;
+      'generate fr') v=$(rand_below "$BN254_R") ;;
+      'generate hex32') v=0x$(rand_hex) ;;
+      import)
+        printf 'paste %s (hidden): ' "${t_name[i]}" >&4
+        IFS= read -rs v <&4 || v=''
+        say "" ;;
+    esac
+    keyed_check_value "${t_name[i]}" "$v" 8
+    values+=("$v")
+  done
+  v=''
+  {
+    printf '%s\n' "$item"
+    for ((i = 0; i < ${#names[@]}; i++)); do printf '%s\n%s\n' "${names[i]}" "${values[i]}"; done
+  } | jq -R -n '[inputs] as $l | {title: $l[0], category: "SECURE_NOTE", tags: ["keyed-runs"],
+      fields: [range(1; $l | length; 2) as $i | {id: $l[$i], label: $l[$i], type: "CONCEALED", value: $l[$i + 1]}]}' \
+    | op item create --vault "$vault" --format json - > /dev/null \
+    || keyed_fail "op item create failed"
+  values=()
+  say "created op://$vault/$item with ${names[*]} (values not shown)"
+}
+
+if [ "$mode" = create ]; then create_item; else run_request; fi

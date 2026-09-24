@@ -1,6 +1,6 @@
 ---
 name: my-stack
-description: "Use when scaffolding a new repository, configuring development tooling, setting up CI/CD pipelines, or when working on owned repositories. Covers the preferred stack: bun 1.4+ (native-first — Bun.cron, Bun.Image, node:sqlite, Bun.Archive, isolated linker, test --parallel/--shard/--changed — before reaching for deps), biome, husky, commitlint, lint-staged, shellcheck, actionlint, sort-package-json, playwright, vitest, monorepo structure, trusted publisher for npm, OIDC, React + Vite frontend defaults, supply-chain hardening (7-day min-age, frozen lockfile), parallel-safe E2E patterns, and tiered infrastructure (Cloudflare Workers with static assets by default — not Pages; OpenTofu only once there's real cloud infra to track)."
+description: "Use when scaffolding a new repository, configuring development tooling, setting up CI/CD pipelines, or when working on owned repositories. Covers the preferred stack: bun 1.4+ (native-first — Bun.cron, Bun.Image, node:sqlite, Bun.Archive, isolated linker, test --parallel/--shard/--changed — before reaching for deps), biome, husky, commitlint, lint-staged, shellcheck, actionlint, sort-package-json, playwright, vitest, monorepo structure, trusted publisher for npm, OIDC, React + Vite frontend defaults, supply-chain hardening (7-day min-age, frozen lockfile), parallel-safe E2E patterns, and tiered infrastructure (Cloudflare Workers with static assets by default — not Pages; OpenTofu only once there's real cloud infra to track), and keyed runs: a command that needs real secrets (deploy or operator keys) gets them from 1Password on the Mac via env-exec/op-remote, never from a .env with values."
 ---
 
 # My Preferred Development Stack
@@ -975,6 +975,46 @@ Preview URLs are on by default (`preview_urls` follows `workers_dev`); set `"pre
 - `tofu apply` on merge to main (or manual trigger)
 - State stored remotely in S3
 - OIDC for AWS credentials
+
+---
+
+## Keyed runs: 1Password environments, run from the Mac
+
+Secrets (a funded deploy key, an operator key, a deployer secret) live in 1Password on the Mac and nowhere else: never in a `.env` with values, a repo, CI, or an agent's context. A command that needs them is a **keyed run**: the agent files a request on the host, the owner approves it on the Mac, and the values stream over ssh into that one process's environment. `env-exec` (host) and `op-remote` (Mac) are aa-skills `bin/` tools.
+
+**The template.** The repo commits `<env>.env.example`; a `.env` with values never exists.
+
+```
+# op: generate eth-key
+ACME_L1_PRIVATE_KEY=op://Keyed-Runs/Acme-Testnet/ACME_L1_PRIVATE_KEY
+# op: generate hex32
+ACME_DEPLOYER_SECRET=op://Keyed-Runs/Acme-Testnet/ACME_DEPLOYER_SECRET
+ACME_L1_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+```
+
+- `NAME=VALUE`, value verbatim: no quotes, no expansion, no `export`. Names are UPPER_SNAKE with at least one underscore; loader, interpreter, TLS and proxy prefixes (`LD_`, `NODE_`, `BUN_`, `GIT_`, `SSL_`, `*_PROXY`…) are refused.
+- An `op://<vault>/<item>/<field>` value is a secret; anything else is plain config, passed as-is. One item per project and environment, named `<Project>-<Env>`, in the `Keyed-Runs` vault (refs to any other vault are refused), with concealed fields named exactly like the variables.
+- `# op: <directive>` directly above a secret tells `op-remote create` how to fill it: `generate eth-key` (secp256k1 scalar), `generate fr` (BN254 field element, for Aztec APIs that reject values ≥ the modulus), `generate hex32`, or `import` (the owner pastes it, hidden).
+- Secret values are one line, 8–4096 bytes.
+
+**The flow.**
+
+1. Agent: commit and push everything the command reads, the template included. `env-exec request` refuses a dirty tree, untracked files, edits hidden with assume-unchanged, an uncommitted `bunfig.toml` / `.env*` (Bun reads them even when ignored), and a HEAD that is not the tip of a branch on the remote.
+2. Agent: `env-exec request --template deployments/testnet.env.example --slug l1-deploy -- bun tools/deploy/scripts/l1-deploy.ts deployments/testnet.json` prints the id. Start `env-exec wait <id>` as a background task, then give the owner the exact line: `op-remote <host> <id>` (the Mac's ssh alias for this host is in `~/.agents/machine.md`).
+3. Owner, once per new item: `op-remote create <host> <id>` creates it from the directives and prints no value.
+4. Owner: `op-remote <host> <id>` shows the repo, remote, commit (with its GitHub link), the run PATH, every argv element quoted, and each secret's name and ref. On `y` it reads each value with `op read`, streams them, and follows the masked log; it exits with the command's code.
+5. Agent: the watcher exits with the command's code and prints the masked log. Commit the results.
+
+The command is non-interactive (stdin is `/dev/null`) and takes secrets only from its environment: never pass one as an argument (`cast --private-key "$KEY"` shows it in `ps`; read the variable in a bun/viem script instead). A multi-step run is one `bash -c '…'` chain or one request per step, and each request runs once.
+
+**What it guarantees, and what it does not.**
+
+- No value crosses an argv (strace-tested) or reaches disk through the transport, and output is masked before it is logged: literal, case-insensitive, hex with or without `0x`. The approved program can still write a key to a file or print it in another encoding.
+- The approval pins committed sources at a pushed commit. Gitignored inputs (`node_modules`, build outputs) are not covered, and pushed code is only as safe as the review of it: read the commit, not just the command line.
+- During the run the values sit in that process's environment on the host, readable by any process of the same user and by root. Keyed runs keep keys out of files, logs and agent context; they do not make a shared host trustworthy.
+- An ssh drop does not stop the run (it is detached). `env-exec status <id>` / `wait <id>` report `finished N`, `failed …` or `unknown …`; `unknown` means the outcome is unknown, so check the chain before filing another request.
+
+**One-time setup.** Mac: the `op` CLI with 1Password app integration, `jq`, aa-skills installed (`op-remote` and `env-exec` on PATH), an ssh alias for the host. 1Password: the `Keyed-Runs` vault. Host: aa-skills installed. Agents there use only `request` / `wait` / `status`; op-remote ships its own copy of `env-exec` for the receiving side on every call.
 
 ---
 

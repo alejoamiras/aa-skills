@@ -1,0 +1,492 @@
+#!/usr/bin/env bash
+# env-exec — the host half of keyed runs: an agent files a request, the owner approves it on the
+# Mac with op-remote, and 1Password values stream over ssh into that one command. Nothing here
+# writes a secret to disk or puts one in an argv.
+#
+#   env-exec request --template <path> [--slug <slug>] -- <cmd> [args…]
+#   env-exec wait <id>       block until the run ends; print its masked log; exit with its code
+#   env-exec status <id>
+#
+# op-remote ships THIS file from the Mac on every call and runs inspect / receive / status from
+# that copy under `env -i`, so the code that receives secrets is the Mac's, not a copy an agent
+# could have edited. op-remote also sources it (KEYED_LIB=1): everything it reaches must stay
+# bash 3.2-compatible (no associative arrays, no ${x,,}, `${a[@]+"${a[@]}"}` for maybe-empty arrays).
+# Internal variables are lowercase or KEYED_*/BASH_*, so an accepted env name can never alias one.
+set -euo pipefail
+set +x +v +a
+
+KEYED_DIR="$HOME/.agents/keyed"
+# The approved command's PATH. It ships inside this file, so the Mac decides it, not the request.
+# shellcheck disable=SC2088 # ~ is expanded on the host by keyed_run_path
+KEYED_RUN_PATH='~/.bun/bin:~/.local/bin:~/.foundry/bin:/opt/foundry/bin:/usr/local/bin:/usr/bin:/bin'
+# The underscore rules out the specials that evaluate what is assigned to them (RANDOM, SECONDS,
+# LINENO…); the prefixes take BASH_* and the loader, interpreter, TLS, proxy and config hooks.
+KEYED_NAME_RE='^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$'
+KEYED_DENY_RE='^(BASH|COMP|LC|PROMPT|READLINE|POSIXLY|LD|DYLD|GLIBC|MALLOC|NODE|NPM|BUN|DENO|YARN|PNPM|JAVA|GCONV|RES|SSL|OPENSSL|CURL|REQUESTS|HTTP|HTTPS|ALL|NO|FTP|XDG|GIT|SSH|GPG|ELECTRON|PYTHON|RUBY|PERL|KEYED)_|_PROXY$'
+KEYED_REF_RE='^op://([A-Za-z0-9][A-Za-z0-9._-]*)/([A-Za-z0-9][A-Za-z0-9._-]*)/([A-Za-z0-9_][A-Za-z0-9._-]*)$'
+KEYED_MAX_VARS=64
+KEYED_MAX_ARGS=256
+KEYED_MAX_ARG=65536 # execve refuses a single argument over 128 KiB
+KEYED_MAX_FILE=262144
+keyed_repo='' keyed_template='' keyed_argv0='' keyed_argv=()
+
+# Host text shown on a terminal keeps tab, newline and printable ASCII only: no C0/C1 controls, no
+# bidi overrides. Non-ASCII output reads as ? — the price of not parsing UTF-8 here.
+keyed_sanitize() { LC_ALL=C tr '\000-\010\013-\037\177-\377' '?'; }
+
+keyed_fail() { printf '%s: %s\n' "${KEYED_TOOL:-env-exec}" "$*" | keyed_sanitize >&2; exit 1; }
+
+keyed_check_id() { [[ $1 =~ ^[a-z0-9][a-z0-9-]{2,63}$ ]] || keyed_fail "bad request id: $1"; }
+
+keyed_count() { # keyed_count <value> <min> <max>
+  [[ $1 =~ ^(0|[1-9][0-9]{0,3})$ ]] && [ "$1" -ge "$2" ] && [ "$1" -le "$3" ] || keyed_fail "bad count: $1"
+}
+
+keyed_get() { IFS= read -r -d '' "$1" || keyed_fail "truncated input"; }
+
+keyed_end() { # the END frame, then nothing
+  local end extra=''
+  keyed_get end
+  [ "$end" = END ] || keyed_fail "missing END frame"
+  if IFS= read -r -d '' extra || [ -n "$extra" ]; then keyed_fail "trailing bytes after END"; fi
+}
+
+keyed_check_name() {
+  [[ $1 =~ $KEYED_NAME_RE ]] || keyed_fail "$1: names are UPPER_SNAKE with at least one underscore"
+  if [[ $1 =~ $KEYED_DENY_RE ]]; then keyed_fail "$1: reserved prefix (shell, loader, interpreter, TLS or proxy hook)"; fi
+}
+
+keyed_check_value() { # keyed_check_value <name> <value> <min-length>
+  local LC_ALL=C
+  [ "${#2}" -ge "$3" ] && [ "${#2}" -le 4096 ] || keyed_fail "$1: value must be $3-4096 bytes"
+  case $2 in *$'\n'* | *$'\r'*) keyed_fail "$1: value must be a single line" ;; esac
+}
+
+keyed_check_template_path() {
+  [[ $1 =~ ^[A-Za-z0-9._/-]+$ ]] || keyed_fail "bad template path: $1"
+  case /$1/ in //* | */../* | */./*) keyed_fail "bad template path: $1" ;; esac
+}
+
+# keyed_parse_template <file> fills parallel arrays t_name t_value t_kind (secret|plain)
+# t_directive. Grammar: blank lines, `# comments`, `# op: <directive>` directly above the secret
+# it creates, and NAME=VALUE with VALUE verbatim (no quotes, no expansion, no `export`).
+keyed_parse_template() {
+  local line n=0 directive='' name value kind i re_var='^([A-Za-z0-9_]+)=(.*)$' re_dir='^# op: (.*)$'
+  t_name=() t_value=() t_kind=() t_directive=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    case $line in *$'\r'*) keyed_fail "template line $n: carriage return" ;; esac
+    if [[ $line =~ $re_dir ]]; then
+      [ -z "$directive" ] || keyed_fail "template line $n: two '# op:' lines in a row"
+      directive=${BASH_REMATCH[1]}
+      case $directive in 'generate eth-key' | 'generate fr' | 'generate hex32' | import) ;;
+        *) keyed_fail "template line $n: unknown directive '# op: $directive'" ;; esac
+      continue
+    fi
+    if [[ $line =~ ^[[:space:]]*$ ]] || [[ $line == \#* ]]; then
+      [ -z "$directive" ] || keyed_fail "template line $n: '# op:' must sit directly above its variable"
+      continue
+    fi
+    [[ $line =~ $re_var ]] || keyed_fail "template line $n: expected NAME=VALUE"
+    name=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
+    keyed_check_name "$name"
+    for ((i = 0; i < ${#t_name[@]}; i++)); do
+      [ "${t_name[i]}" != "$name" ] || keyed_fail "template line $n: $name defined twice"
+    done
+    kind=plain
+    case $value in op://*)
+      kind=secret
+      [[ $value =~ $KEYED_REF_RE ]] || keyed_fail "template line $n: $name: expected op://<vault>/<item>/<field>" ;;
+    esac
+    [ "$kind" = secret ] || [ -z "$directive" ] || keyed_fail "template line $n: '# op:' needs an op:// value"
+    [ "$kind" = secret ] || keyed_check_value "$name" "$value" 0
+    t_name+=("$name") t_value+=("$value") t_kind+=("$kind") t_directive+=("$directive")
+    directive=''
+    [ "${#t_name[@]}" -le "$KEYED_MAX_VARS" ] || keyed_fail "template: more than $KEYED_MAX_VARS variables"
+  done < "$1"
+  [ -z "$directive" ] || keyed_fail "template: '# op:' on the last line has no variable"
+}
+
+keyed_quote() { # one unambiguous "…" per string: \ and " escaped, bytes outside printable ASCII as \xNN
+  local s=$1 out='"' c n i
+  local LC_ALL=C
+  for ((i = 0; i < ${#s}; i++)); do
+    c=${s:i:1}
+    # shellcheck disable=SC1003 # '\' is a lone backslash
+    case $c in
+      '\' | '"') out+="\\$c" ;;
+      [' '-'~']) out+=$c ;;
+      *) printf -v n '%d' "'$c"; printf -v c '\\x%02x' $((n & 255)); out+=$c ;;
+    esac
+  done
+  printf '%s"' "$out"
+}
+
+keyed_run_path() { local p=$KEYED_RUN_PATH; printf '%s' "${p//\~\//$HOME/}"; }
+
+keyed_resolve() { # keyed_resolve <cmd>: the absolute executable file the run will exec (no functions, no builtins)
+  local cmd=$1 dir
+  case $cmd in
+    /*) ;;
+    */*) cmd=$keyed_repo/${cmd#./} ;;
+    *)
+      local IFS=:
+      for dir in $(keyed_run_path); do
+        if [ -f "$dir/$cmd" ] && [ -x "$dir/$cmd" ]; then printf '%s' "$dir/$cmd"; return 0; fi
+      done
+      return 1 ;;
+  esac
+  [ -f "$cmd" ] && [ -x "$cmd" ] && printf '%s' "$cmd"
+}
+
+keyed_git() { # git in the request's repo with its executable hooks off and stdin closed
+  GIT_NO_REPLACE_OBJECTS=1 GIT_TERMINAL_PROMPT=0 git -C "$keyed_repo" -c core.fsmonitor=false \
+    -c core.hooksPath=/dev/null -c core.untrackedCache=false "$@" < /dev/null
+}
+
+# Every tracked file byte-identical to HEAD's blob (and its execute bit), hashed here rather than
+# by git: clean filters, attributes and index flags are repo-local config an agent can set to make
+# an edited file look clean. Reads `ls-tree -r -z` on stdin; paths are raw bytes, never unquoted.
+# shellcheck disable=SC2016 # perl source, not shell
+KEYED_TREECHECK='
+use strict; use warnings; use Digest::SHA;
+my ($root, $alg) = ($ARGV[0], $ARGV[1] eq "sha256" ? 256 : 1);
+local $/ = "\0";
+while (my $e = <STDIN>) {
+  chomp $e;
+  my ($meta, $path) = split /\t/, $e, 2;
+  my ($mode, undef, $sha) = split / /, $meta;
+  next if $mode eq "160000";
+  my $f = "$root/$path";
+  my $data;
+  if ($mode eq "120000") { $data = readlink $f }
+  elsif (!-l $f && open my $fh, "<:raw", $f) { local $/; $data = <$fh> // ""; close $fh }
+  my $ok = defined $data
+    && Digest::SHA->new($alg)->add("blob " . length($data) . "\0", $data)->hexdigest eq $sha
+    && ($mode eq "120000" || (-x $f ? "100755" : "100644") eq $mode);
+  next if $ok;
+  $path =~ s/[^\x20-\x7e]/?/g;
+  print STDERR "env-exec: differs from HEAD although git may call it clean: $path\n";
+  exit 1;
+}
+'
+
+keyed_same_as_head() {
+  local format
+  format=$(keyed_git rev-parse --show-object-format) || keyed_fail "cannot read the object format"
+  keyed_git ls-tree -r -z --full-tree HEAD | /usr/bin/perl -e "$KEYED_TREECHECK" "$keyed_repo" "$format" \
+    || keyed_fail "the work tree does not match HEAD"
+}
+
+# keyed_pin [approved-head]: the commit-pin checks. Sets pin_head pin_url pin_tips pin_subject or
+# fails. Covers committed sources only: node_modules and other ignored build inputs are outside it,
+# and it trusts the host's git and ssh.
+keyed_pin() {
+  local want=${1:-} top st f branch remote=origin
+  top=$(keyed_git rev-parse --show-toplevel 2> /dev/null) || keyed_fail "not a git work tree: $keyed_repo"
+  [ "$top" = "$keyed_repo" ] || keyed_fail "not the work tree root: $keyed_repo"
+  pin_head=$(keyed_git rev-parse --verify -q 'HEAD^{commit}') || keyed_fail "no HEAD commit in $keyed_repo"
+  [ -z "$want" ] || [ "$pin_head" = "$want" ] || keyed_fail "HEAD moved since approval: $want -> $pin_head"
+  st=$(keyed_git status --porcelain=v1 --untracked-files=all --ignore-submodules=none | head -5)
+  [ -z "$st" ] || keyed_fail "working tree not clean: $st"
+  keyed_same_as_head
+  # Bun reads these even when git ignores them: preloads (bunfig) and extra env (.env*).
+  while IFS= read -r -d '' f; do
+    keyed_git ls-files --error-unmatch -- "${f#"$keyed_repo"/}" > /dev/null 2>&1 \
+      || keyed_fail "untracked $f: bunfig and .env files must be committed or absent"
+  done < <(find "$keyed_repo" \( -name node_modules -o -name .git -o -path "$keyed_repo/.claude/worktrees" \) -prune \
+    -o \( -name bunfig.toml -o -name .bunfig.toml -o -name .env -o -name '.env.*' \) -print0 < /dev/null)
+  branch=$(keyed_git symbolic-ref --short -q HEAD) || branch=''
+  [ -z "$branch" ] || remote=$(keyed_git config --get "branch.$branch.remote") || remote=origin
+  pin_url=$(keyed_git config --get "remote.$remote.url") || keyed_fail "no URL for remote '$remote'"
+  # Ask the server with no git config at all, so repo-local insteadOf or helpers can't answer for it.
+  pin_tips=$(cd / && GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+    git ls-remote --heads -- "$pin_url" < /dev/null 2> /dev/null \
+    | awk -v h="$pin_head" '$1 == h { sub("^refs/heads/", "", $2); printf "%s%s", s, $2; s = " " }') \
+    || keyed_fail "could not list branches on $pin_url"
+  [ -n "$pin_tips" ] || keyed_fail "HEAD ${pin_head:0:12} is not the tip of any branch on $pin_url: push it first"
+  pin_subject=$(keyed_git log -1 --format=%s HEAD)
+}
+
+keyed_read_request() { # <request-file> → keyed_repo keyed_template keyed_argv
+  local magic argc a i
+  [ "$(wc -c < "$1")" -le "$KEYED_MAX_FILE" ] || keyed_fail "request file too large"
+  {
+    keyed_get magic
+    [ "$magic" = KEYED-REQ1 ] || keyed_fail "not a keyed request"
+    keyed_get keyed_repo
+    keyed_get keyed_template
+    keyed_get argc
+    keyed_count "$argc" 1 "$KEYED_MAX_ARGS"
+    keyed_argv=()
+    for ((i = 0; i < argc; i++)); do keyed_get a; keyed_argv+=("$a"); done
+    keyed_end
+  } < "$1"
+  case $keyed_repo in /*) ;; *) keyed_fail "request: repo must be an absolute path" ;; esac
+  keyed_check_template_path "$keyed_template"
+  [ -n "${keyed_argv[0]}" ] || keyed_fail "request: empty command"
+  for a in "${keyed_argv[@]}"; do [ "${#a}" -le "$KEYED_MAX_ARG" ] || keyed_fail "request: argument over $KEYED_MAX_ARG bytes"; done
+}
+
+keyed_request_dir() {
+  keyed_check_id "$1"
+  [ -f "$KEYED_DIR/$1/request" ] || keyed_fail "no request $1"
+  printf '%s' "$KEYED_DIR/$1"
+}
+
+keyed_start_time() { # field 22 of /proc/<pid>/stat: with the pid, an identity pid reuse can't fake
+  local stat
+  read -r stat 2> /dev/null < "/proc/$1/stat" || return 1
+  # shellcheck disable=SC2086 # split on purpose: the fields after "(comm) "
+  set -- ${stat##*) }
+  printf '%s' "${20}"
+}
+
+keyed_alive() { # keyed_alive <run-dir>: the supervisor that wrote pid is still that process
+  local pid start
+  read -r pid start 2> /dev/null < "$1/pid" || return 1
+  [ -n "$pid" ] && [ "$(keyed_start_time "$pid" || true)" = "$start" ]
+}
+
+keyed_set_status() { # atomic replace: readers never see a partial line
+  local tmp="$1/.status.$$.$RANDOM"
+  (set -C; printf '%s\n' "$2" > "$tmp") && /bin/mv -f "$tmp" "$1/status"
+}
+
+# keyed_state <run-dir> prints one line: claimed | running | finished <code> |
+# failed <cd|masker> <code|-> | unknown <never-started|supervisor-vanished>.
+# "unknown" means the outcome is unknown, not that the command failed; the request stays consumed.
+keyed_state() {
+  local run=$1 st age
+  st=$(cat "$run/status" 2> /dev/null) || st=claimed
+  case $st in
+    claimed | running)
+      if [ -s "$run/pid" ]; then
+        if ! keyed_alive "$run"; then
+          st=$(cat "$run/status" 2> /dev/null) || st=claimed
+          case $st in claimed | running) st='unknown supervisor-vanished' ;; esac
+        fi
+      else
+        age=$(($(date +%s) - $(stat -c %Y "$run" 2> /dev/null || date +%s)))
+        [ "$age" -le 60 ] || st='unknown never-started'
+      fi ;;
+  esac
+  printf '%s\n' "$st"
+}
+
+keyed_code() { # exit code for a state line: the command's own, else 125
+  case $1 in "finished "*) printf '%s' "${1#finished }" ;; *) printf 125 ;; esac
+}
+
+# Masks every value named in @ARGV (read from %ENV, never from argv) before output reaches the log.
+# Hex values match with or without 0x, case-insensitively. Whole lines are flushed as they end; a
+# line longer than 64 KiB goes out in steps, holding back what could be the head of a secret.
+# shellcheck disable=SC2016 # perl source, not shell
+KEYED_MASKER='
+use strict; use warnings;
+my (%name, @v);
+for my $n (@ARGV) {
+  my $s = $ENV{$n};
+  die "masker: $n is empty\n" unless defined $s && length $s;
+  $s =~ s/^0x(?=[0-9a-f]+\z)//i;
+  $name{lc $s} = $n; push @v, $s;
+}
+die "masker: nothing to mask\n" unless @v;
+my $re = join "|", map { quotemeta } sort { length $b <=> length $a } @v;
+$re = qr/$re/i;
+my $keep = 0; for (@v) { $keep = length if length > $keep } $keep--;
+binmode STDIN; binmode STDOUT; $| = 1;
+my ($buf, $in) = ("", "");
+while (1) {
+  my $r = sysread STDIN, $in, 65536;
+  die "masker: read: $!\n" unless defined $r;
+  $buf .= $in;
+  my $cut = $r ? rindex($buf, "\n") + 1 : length $buf;
+  $cut = length($buf) - $keep if $r && length($buf) - $cut > 65536 + $keep;
+  while ($buf =~ /$re/g) { $cut = $+[0] if $-[0] < $cut && $+[0] > $cut }
+  my $out = substr $buf, 0, $cut, "";
+  $out =~ s/($re)/"[masked:" . $name{lc $1} . "]"/ge;
+  if (length $out) { print STDOUT $out or die "masker: write: $!\n" }
+  last unless $r;
+}
+close STDOUT or die "masker: close: $!\n";
+'
+
+cmd_request() {
+  local template='' slug=run rel id n=0 i a
+  local usage='usage: env-exec request --template <path> [--slug <slug>] -- <cmd> [args...]'
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --template) template=${2:-}; shift 2 || keyed_fail "$usage" ;;
+      --slug) slug=${2:-}; shift 2 || keyed_fail "$usage" ;;
+      --) shift; break ;;
+      *) keyed_fail "$usage" ;;
+    esac
+  done
+  [ $# -ge 1 ] && [ -n "$template" ] || keyed_fail "$usage"
+  [ $# -le "$KEYED_MAX_ARGS" ] || keyed_fail "more than $KEYED_MAX_ARGS arguments"
+  for a in "$@"; do [ "${#a}" -le "$KEYED_MAX_ARG" ] || keyed_fail "an argument is over $KEYED_MAX_ARG bytes"; done
+  [[ $slug =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || keyed_fail "slug must be lowercase letters, digits and dashes"
+  keyed_repo=$(git rev-parse --show-toplevel 2> /dev/null) || keyed_fail "run it inside the repo the command runs in"
+  rel=$(git --literal-pathspecs ls-files --full-name --error-unmatch -- "$template" 2> /dev/null) \
+    || keyed_fail "template is not tracked: $template"
+  keyed_check_template_path "$rel"
+  keyed_parse_template "$keyed_repo/$rel"
+  for ((i = 0; i < ${#t_kind[@]}; i++)); do [ "${t_kind[i]}" = plain ] || n=$((n + 1)); done
+  [ "$n" -gt 0 ] || keyed_fail "template has no op:// secrets"
+  # The same checks op-remote runs, so the agent hears "push first" instead of the owner.
+  keyed_pin
+  keyed_resolve "$1" > /dev/null || keyed_fail "$1: not an executable on the run PATH ($KEYED_RUN_PATH)"
+  id=$slug-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
+  umask 077
+  mkdir -p "$KEYED_DIR"
+  mkdir "$KEYED_DIR/$id"
+  printf '%s\0' KEYED-REQ1 "$keyed_repo" "$rel" "$#" "$@" END > "$KEYED_DIR/$id/request"
+  printf '%s\n' "request $id: ${pin_head:0:12} on $pin_tips, $n secret(s) from $rel" \
+    "owner, on the Mac:  op-remote <host> $id" \
+    "agent, in the background:  env-exec wait $id"
+}
+
+cmd_inspect() {
+  local d tpl size
+  d=$(keyed_request_dir "$1")
+  [ ! -e "$d/run" ] || keyed_fail "request $1 already ran (one run per request)"
+  keyed_read_request "$d/request"
+  keyed_pin
+  keyed_argv0=$(keyed_resolve "${keyed_argv[0]}") || keyed_fail "${keyed_argv[0]}: not an executable on the run PATH"
+  size=$(keyed_git cat-file -s "HEAD:$keyed_template" 2> /dev/null) || keyed_fail "template not in HEAD: $keyed_template"
+  [ "$size" -le "$KEYED_MAX_FILE" ] || keyed_fail "template too large"
+  [ "$(keyed_git cat-file blob "HEAD:$keyed_template" | tr -d '\000' | wc -c)" -eq "$size" ] \
+    || keyed_fail "template contains NUL bytes"
+  tpl=$(keyed_git cat-file blob "HEAD:$keyed_template")
+  printf '%s\0' KEYED-INSPECT1 "$1" "$keyed_repo" "$keyed_template" "$pin_head" "$pin_url" \
+    "$pin_tips" "$pin_subject" "$(keyed_run_path)" "$keyed_argv0" "${#keyed_argv[@]}" "${keyed_argv[@]}" "$tpl" END
+}
+
+keyed_take_vars() { # keyed_take_vars <kind> <count>: NAME=VALUE frames → r_name r_value r_kind
+  local kv name i j
+  for ((i = 0; i < $2; i++)); do
+    keyed_get kv
+    case $kv in *=*) ;; *) keyed_fail "malformed variable frame" ;; esac
+    name=${kv%%=*}
+    keyed_check_name "$name"
+    for ((j = 0; j < ${#r_name[@]}; j++)); do [ "${r_name[j]}" != "$name" ] || keyed_fail "$name sent twice"; done
+    if [ "$1" = secret ]; then keyed_check_value "$name" "${kv#*=}" 8; else keyed_check_value "$name" "${kv#*=}" 0; fi
+    r_name+=("$name") r_value+=("${kv#*=}") r_kind+=("$1")
+  done
+}
+
+keyed_follow() { # stream the log to ssh until the supervisor is done, then exit with its code
+  local run=$1 off=0 size st
+  while :; do
+    st=$(keyed_state "$run")
+    size=$(stat -c %s "$run/log" 2> /dev/null || echo 0)
+    if [ "$size" -gt "$off" ]; then
+      dd if="$run/log" iflag=skip_bytes,count_bytes skip="$off" count="$((size - off))" status=none
+      off=$size
+    fi
+    case $st in
+      claimed | running) sleep 0.3 ;;
+      *) [ "$(stat -c %s "$run/log" 2> /dev/null || echo 0)" -gt "$off" ] || break ;;
+    esac
+  done
+  exit "$(keyed_code "$st")"
+}
+
+cmd_receive() {
+  local id=$1 d magic rid commit n a i names=() user path
+  d=$(keyed_request_dir "$id")
+  [ ! -e "$d/run" ] || keyed_fail "request $id already ran (one run per request)"
+  keyed_get magic
+  [ "$magic" = KEYED-RUN1 ] || keyed_fail "not a keyed run payload"
+  keyed_get rid
+  [ "$rid" = "$id" ] || keyed_fail "payload is for $rid, not $id"
+  keyed_get commit
+  keyed_get keyed_repo
+  keyed_get keyed_argv0
+  keyed_get n
+  keyed_count "$n" 1 "$KEYED_MAX_ARGS"
+  keyed_argv=()
+  for ((i = 0; i < n; i++)); do keyed_get a; keyed_argv+=("$a"); done
+  r_name=() r_value=() r_kind=()
+  keyed_get n
+  keyed_count "$n" 0 "$KEYED_MAX_VARS"
+  keyed_take_vars plain "$n"
+  # git and find run here, before the first secret leaves the pipe, and never see it.
+  keyed_pin "$commit" < /dev/null
+  [ "$(keyed_resolve "${keyed_argv[0]}" || true)" = "$keyed_argv0" ] || keyed_fail "${keyed_argv[0]} resolves differently than approved"
+  keyed_get n
+  keyed_count "$n" 1 "$KEYED_MAX_VARS"
+  keyed_take_vars secret "$n"
+  keyed_end
+  mkdir "$d/run" 2> /dev/null || keyed_fail "request $id already ran (one run per request)"
+  keyed_set_status "$d/run" claimed
+  for ((i = 0; i < ${#r_name[@]}; i++)); do [ "${r_kind[i]}" = plain ] || names+=("${r_name[i]}"); done
+  user=$(id -un) path=$(keyed_run_path)
+  (
+    export HOME LANG=C.UTF-8 PATH="$path" USER="$user" LOGNAME="$user"
+    for ((i = 0; i < ${#r_name[@]}; i++)); do export "${r_name[i]}=${r_value[i]}"; done
+    set -- supervise "$d/run" "$keyed_repo" "${#names[@]}" "${names[@]}" "$keyed_argv0" "${keyed_argv[@]:1}"
+    if [ -n "${BASH_EXECUTION_STRING:-}" ]; then
+      exec /usr/bin/setsid /bin/bash -c "$BASH_EXECUTION_STRING" env-exec "$@"
+    else
+      exec /usr/bin/setsid /bin/bash "$0" "$@"
+    fi
+  ) < /dev/null > /dev/null 2>&1 &
+  r_value=()
+  keyed_follow "$d/run"
+}
+
+cmd_supervise() { # supervise <run> <repo> <n> <secret names…> <argv0> [args…]: detached; owns the outcome
+  local run=$1 repo=$2 n=$3 codes
+  shift 3
+  local names=("${@:1:n}")
+  shift "$n"
+  (set -C; printf '%s %s\n' "$$" "$(keyed_start_time $$)" > "$run/pid") || exit 1
+  keyed_set_status "$run" running || exit 1
+  cd "$repo" 2> /dev/null || { keyed_set_status "$run" 'failed cd -'; exit 1; }
+  set +e +o pipefail -C
+  "$@" < /dev/null 2>&1 | /usr/bin/perl -e "$KEYED_MASKER" -- "${names[@]}" > "$run/log"
+  codes=("${PIPESTATUS[@]}")
+  set -e +C
+  if [ "${codes[1]}" -eq 0 ]; then
+    keyed_set_status "$run" "finished ${codes[0]}"
+  else
+    keyed_set_status "$run" "failed masker ${codes[0]}"
+  fi
+}
+
+cmd_status() {
+  local d
+  d=$(keyed_request_dir "$1")
+  if [ -d "$d/run" ]; then keyed_state "$d/run"; else echo pending; fi
+}
+
+cmd_wait() {
+  local d st
+  d=$(keyed_request_dir "$1")
+  while :; do
+    if [ -d "$d/run" ]; then
+      st=$(keyed_state "$d/run")
+      case $st in finished* | failed* | unknown*) break ;; esac
+    fi
+    sleep 2
+  done
+  keyed_sanitize < "$d/run/log" 2> /dev/null || true
+  printf 'env-exec: %s %s\n' "$1" "$st" >&2
+  exit "$(keyed_code "$st")"
+}
+
+keyed_main() {
+  case ${1:-} in
+    request) shift; cmd_request "$@" ;;
+    wait | status | inspect | receive)
+      [ $# -eq 2 ] || keyed_fail "usage: env-exec $1 <id>"
+      case $1 in inspect | receive) ulimit -c 0; umask 077; PATH=/usr/bin:/bin ;; esac
+      "cmd_$1" "$2" ;;
+    supervise) shift; ulimit -c 0; cmd_supervise "$@" ;;
+    *) keyed_fail "usage: env-exec request|wait|status (see the header of this file)" ;;
+  esac
+}
+
+[ -n "${KEYED_LIB:-}" ] || keyed_main "$@"
