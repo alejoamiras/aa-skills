@@ -274,6 +274,10 @@ probe() {
   usage=$(usage_text "${dir}" 2> /dev/null)
   # A subscription login that lists no windows has none open: nothing spent
   # this week, so every bucket is full. The premium bucket's name is unknown.
+  # A busy account occasionally gets one windowless reply too, so an idle
+  # reading must repeat before it is believed.
+  [[ ${usage} == *"using your subscription"* && ${usage} != *"Current "* ]] &&
+    usage=$(usage_text "${dir}" 2> /dev/null)
   if [[ ${usage} == *"using your subscription"* && ${usage} != *"Current "* ]]; then
     printf '000%s\t%s\t%s\t%s\t100\tidle\t100\tidle\t-\t100\t0\t\n' \
       "${NEVER}" "${name}" "${email:--}" "${plan:--}"

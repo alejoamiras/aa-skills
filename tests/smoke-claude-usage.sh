@@ -26,6 +26,8 @@ acct=$(basename "${CLAUDE_CONFIG_DIR:-main}")
 [[ $1 == auth ]] && { printf '{\n  "loggedIn": true,\n  "email": "%s@x",\n  "subscriptionType": "max"\n}\n' "$acct"; exit 0; }
 echo "You are currently using your subscription to power your Claude Code usage"
 [[ -f $CLAUDE_CONFIG_DIR/reset ]] || exit 0   # idle: no window open anywhere
+# flaky: the first reply of a busy account comes back windowless.
+[[ -f $CLAUDE_CONFIG_DIR/flaky ]] && { rm -f "$CLAUDE_CONFIG_DIR/flaky"; exit 0; }
 r=$(cat "$CLAUDE_CONFIG_DIR/reset")
 printf '\nCurrent session: 0%% used · resets %s (UTC)\n' "$r"
 printf 'Current week (all models): 50%% used · resets %s (UTC)\n' "$r"
@@ -38,12 +40,13 @@ chmod +x "$S/bin/claude"
 mkdir -p "$CLAUDE_ACCOUNTS_ROOT"/{aaa-late,zzz-soon,fresh,fresh.lock}
 ahead 3 > "$CLAUDE_ACCOUNTS_ROOT/aaa-late/reset"
 ahead 1 > "$CLAUDE_ACCOUNTS_ROOT/zzz-soon/reset"
+touch "$CLAUDE_ACCOUNTS_ROOT/zzz-soon/flaky"
 
 "$CU" --json > "$S/out.json"
 order=$(grep -o '"account":"[^"]*"' "$S/out.json" | cut -d'"' -f4 | tr '\n' ' ')
 t "roster: lockfile dir is not an account" test "$order" = "fresh zzz-soon aaa-late "
 t "idle: full headroom, marked idle" grep -q '"account":"fresh".*"week_left_pct":100,"week_resets":"idle".*"premium_left_pct":100' "$S/out.json"
-t "spent: premium parsed as 0 left" grep -q '"account":"zzz-soon".*"premium_left_pct":0' "$S/out.json"
+t "flaky: one windowless reply is re-probed, not read as idle" grep -q '"account":"zzz-soon".*"premium_left_pct":0' "$S/out.json"
 
 "$CU" refresh
 t "best: idle account wins" grep -q '^fresh (idle' <("$CU" best)
