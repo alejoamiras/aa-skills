@@ -76,8 +76,9 @@ die() { printf '%s\n' "$*" >&2; exit 1; }
 UNKNOWN='?'   # rejected by valid_name, so no real account can collide with it
 
 # Names become path components and JSON strings, so a leading dot (".."), a
-# quote, or a tab are all disqualifying.
-valid_name() { [[ $1 =~ ^[A-Za-z0-9._-]+$ && $1 != .* ]]; }
+# quote, or a tab are all disqualifying. "<dir>.lock" is the lockfile Claude
+# Code keeps beside a config dir; one can outlive the session that took it.
+valid_name() { [[ $1 =~ ^[A-Za-z0-9._-]+$ && $1 != .* && $1 != *.lock ]]; }
 
 command -v claude > /dev/null || die "claude CLI not on PATH"
 
@@ -111,9 +112,12 @@ key_for() {
 account_rows() {
   [[ -d ${MAIN_DIR} && -z ${CLAUDE_USAGE_SKIP_MAIN:-} ]] && printf '%s\t%s\n' "$(label_for main)" "${MAIN_DIR}"
   [[ -d ${ACCOUNTS_ROOT} ]] || return 0
+  local dir key
   for dir in "${ACCOUNTS_ROOT}"/*/; do
     [[ -d ${dir} ]] || continue
-    printf '%s\t%s\n' "$(label_for "$(basename "${dir}")")" "${dir%/}"
+    key=$(basename "${dir}")
+    valid_name "${key}" || continue
+    printf '%s\t%s\n' "$(label_for "${key}")" "${dir%/}"
   done
 }
 
@@ -159,7 +163,9 @@ parse_when() {
 to_epoch() {
   local when="$1" norm now year out
   [[ -z ${when} || ${when} == "-" ]] && { printf '%s' "${NEVER}"; return; }
-  norm=${when/ at / }
+  # Older CLIs print "Sep 19 at 6am", newer ones "Sep 19, 6am"; date(1)
+  # rejects the comma.
+  norm=${when/ at / }; norm=${norm//,/}
   # BSD date fills unspecified fields from the current clock, so a bare "6am"
   # would inherit this minute and seconds. Pin them.
   norm=$(sed -E -e 's/ ([0-9]{1,2})(am|pm)$/ \1:00\2/' -e 's/ ([0-9]{1,2}):([0-9]{2})(am|pm)$/ \1:\2:00\3/' <<< "${norm}")
@@ -243,6 +249,12 @@ run_claude() {
   fi
 }
 
+# Without --no-session-persistence every probe saves a transcript into the
+# account's projects/, one per account per refresh.
+usage_text() {
+  run_claude "$1" -p "/usage" --allowed-tools "" --no-session-persistence
+}
+
 # One tab-separated record per account, prefixed with a sort key. Runs in a
 # subshell per account so the whole table fans out in parallel.
 probe() {
@@ -259,7 +271,14 @@ probe() {
   email=$(sed -n 's/.*"email": "\([^"]*\)".*/\1/p' <<< "${auth}" | head -1)
   plan=$(sed -n 's/.*"subscriptionType": "\([^"]*\)".*/\1/p' <<< "${auth}" | head -1)
 
-  usage=$(run_claude "${dir}" -p "/usage" --allowed-tools "" 2> /dev/null)
+  usage=$(usage_text "${dir}" 2> /dev/null)
+  # A subscription login that lists no windows has none open: nothing spent
+  # this week, so every bucket is full. The premium bucket's name is unknown.
+  if [[ ${usage} == *"using your subscription"* && ${usage} != *"Current "* ]]; then
+    printf '000%s\t%s\t%s\t%s\t100\tidle\t100\tidle\t-\t100\t0\t\n' \
+      "${NEVER}" "${name}" "${email:--}" "${plan:--}"
+    return
+  fi
   if [[ -z ${usage} || ${usage} != *"Current session:"* ]]; then
     printf '%s\t%s\t%s\t%s\t-\t-\t-\t-\t-\t-\t0\tno usage data (API-key auth or CLI error)\n' \
       "${NEVER}" "${name}" "${email:--}" "${plan:--}"
@@ -326,9 +345,12 @@ gather() {
   local tmp name dir i=0
   tmp=$(mktemp -d)
   trap 'rm -rf "${tmp}"' RETURN
+  mkdir -p "${CACHE_DIR}"
   while IFS=$'\t' read -r name dir; do
     [[ -z ${name} ]] && continue
-    probe "${name}" "${dir}" > "${tmp}/$(printf '%03d' "${i}")" &
+    # A neutral cwd: from inside a repo, every probe would load that repo's
+    # project settings under each roster login.
+    (cd "${CACHE_DIR}" && probe "${name}" "${dir}") > "${tmp}/$(printf '%03d' "${i}")" &
     ((i++))
   done < <(account_rows)
   [[ ${i} -eq 0 ]] && die "no accounts found. Add one: claude-usage add <name>"
@@ -603,12 +625,17 @@ cmd_best() {
     printf '%s (nothing usable right now; frees up first, %s)\n' "${name}" "${wr}"
   elif [[ ${pv} == "-" ]]; then
     printf '%s (%s usage unknown; resets %s)\n' "${name}" "${pl}" "${wr}"
+  elif [[ ${wr} == idle ]]; then
+    printf '%s (idle: no window open, everything left)\n' "${name}"
   elif ((pv == 0)); then
     printf '%s (no %s left on any usable account; resets %s)\n' "${name}" "${pl}" "${wr}"
   else
     printf '%s (%s%% %s left)\n' "${name}" "${pv}" "${pl}"
   fi
 }
+
+# "Sep 28, 7:59am" or "Sep 28 at 7:59am" → "Sep 28".
+reset_day() { local d=${1/ at */}; printf '%s' "${d%%,*}"; }
 
 # One compact status-line segment. Reads cache only — never probes inline.
 # Deliberately omits 5h/week percentages: the status line already gets those
@@ -626,7 +653,7 @@ cmd_statusline() {
 
   while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
     [[ ${name} == "${cur}" ]] || continue
-    cur_pv="${pv}"; cur_pl="${pl}"; found=1; break
+    cur_pv="${pv}"; cur_pl="${pl}"; [[ ${wr} == idle ]] && cur_pl=idle; found=1; break
   done <<< "${rows}"
 
   # The sentinel is unspellable as an account name on purpose; spell it out
@@ -640,14 +667,14 @@ cmd_statusline() {
     if [[ ${best_how} == fallback ]]; then
       # A fallback pick is not usable yet; quoting its premium headroom would
       # read as "switch here now".
-      out="${out} ${DIM}back ${best_wr/ at */}${RST}"
+      out="${out} ${DIM}back $(reset_day "${best_wr}")${RST}"
     elif [[ ${best_pv} != "-" ]] && ((best_pv > 0)); then
       out="${out} $(paint_left "${best_pv}")"
     else
-      out="${out} ${DIM}${best_wr/ at */}${RST}"
+      out="${out} ${DIM}$(reset_day "${best_wr}")${RST}"
     fi
   elif [[ ${best_how} == fallback ]]; then
-    out="${out} ${DIM}all spent, back ${best_wr/ at */}${RST}"
+    out="${out} ${DIM}all spent, back $(reset_day "${best_wr}")${RST}"
   else
     out="${out} ${GRN}✓${RST}"
   fi
@@ -759,7 +786,7 @@ cmd_show() {
   local name="${1:-}"
   [[ -n ${name} ]] || die "usage: claude-usage show <name>"
   local dir; dir=$(resolve_dir "${name}") || exit 1
-  run_claude "${dir}" -p "/usage" --allowed-tools ""
+  usage_text "${dir}"
 }
 
 case "${1:-table}" in
