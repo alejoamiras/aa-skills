@@ -1,0 +1,4 @@
+[install]
+# 14 days: this UI runs next to an authorized 1Password session.
+minimumReleaseAge = 1209600
+exact = true

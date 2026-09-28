@@ -1,0 +1,26 @@
+;; DRAFT. The op-remote UI profile: deny by default. The allowances below are a first guess; the
+;; Phase 1 measurement replaces them, each with the denial that asked for it and why it is safe.
+;; Never allow: network, process-fork, exec of anything but Bun, $HOME reads outside the UI package,
+;; file writes other than the tty and the result file, other processes' info, 1Password services.
+(version 1)
+(deny default)
+
+(allow process-exec (literal (param "BUN")))
+
+(allow file-read*
+  (literal (param "BUN")) (subpath (param "UI"))
+  (subpath "/System") (subpath "/usr/lib") (subpath "/usr/share")
+  (subpath "/private/var/db/dyld") (subpath "/private/var/db/timezone") (literal "/private/etc/localtime")
+  (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/random")
+  (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))
+(allow file-read-metadata)
+(allow file-map-executable (literal (param "BUN")) (subpath (param "UI")) (subpath "/System") (subpath "/usr/lib"))
+
+(allow file-write-data
+  (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$")
+  (literal (param "RESULT")))
+(allow file-ioctl (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))
+
+(allow sysctl-read)
+(allow process-info* (target self))
+(allow signal (target self))

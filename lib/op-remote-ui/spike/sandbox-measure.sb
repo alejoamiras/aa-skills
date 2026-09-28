@@ -1,0 +1,22 @@
+;; Measurement profile, never used by op-remote. The capability classes the UI must never have are
+;; denied; everything else is allowed WITH REPORT, so the unified log lists exactly what Bun and
+;; OpenTUI use. That list, reviewed allowance by allowance, becomes ../sandbox.sb.
+(version 1)
+(allow default (with report))
+
+(deny network*)
+(deny process-fork)
+(deny process-exec)
+(allow process-exec (literal (param "BUN")))
+
+(deny file-write*)
+(allow file-write-data
+  (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$")
+  (literal (param "RESULT")))
+
+(deny file-read-data file-read-xattr (subpath (param "HOME_DIR")))
+(allow file-read-data file-read-xattr (literal (param "BUN")) (subpath (param "UI")))
+
+(deny mach-lookup (global-name "com.apple.pasteboard.1") (global-name-regex #"1[Pp]assword"))
+(deny process-info*)
+(allow process-info* (target self))
