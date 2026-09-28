@@ -7,8 +7,8 @@
 #   env-exec wait <id>       block until the run ends; print its masked log; exit with its code
 #   env-exec status <id>
 #
-# op-remote ships THIS file from the Mac on every call and runs inspect / receive / status from
-# that copy under `env -i`, so the code that receives secrets is the Mac's, not a copy an agent
+# op-remote ships THIS file from the Mac on every call and runs inspect / receive / status / list /
+# follow / report from that copy under `env -i`, so the code that receives secrets is the Mac's, not a copy an agent
 # could have edited. op-remote also sources it (KEYED_LIB=1): everything it reaches must stay
 # bash 3.2-compatible (no associative arrays, no ${x,,}, `${a[@]+"${a[@]}"}` for maybe-empty arrays).
 # Internal variables are lowercase or KEYED_*/BASH_*, so an accepted env name can never alias one.
@@ -28,6 +28,11 @@ KEYED_MAX_VARS=64
 KEYED_MAX_ARGS=256
 KEYED_MAX_ARG=65536 # execve refuses a single argument over 128 KiB
 KEYED_MAX_FILE=262144
+KEYED_MAX_LIST=50
+# Every state line a host may report. Exit codes are 0-255: op-remote passes a finished code to `exit`.
+KEYED_CODE_RE='([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])'
+# shellcheck disable=SC2034 # read by op-remote, which sources this file
+KEYED_STATE_RE="^(pending|invalid|claimed|running|finished $KEYED_CODE_RE|failed (cd|masker) ($KEYED_CODE_RE|-)|unknown (never-started|supervisor-vanished))\$"
 keyed_repo='' keyed_template='' keyed_argv0='' keyed_argv=()
 
 # Host text shown on a terminal keeps tab, newline and printable ASCII only: no C0/C1 controls, no
@@ -248,10 +253,12 @@ keyed_alive() { # keyed_alive <run-dir>: the supervisor that wrote pid is still 
   [ -n "$pid" ] && [ "$(keyed_start_time "$pid" || true)" = "$start" ]
 }
 
-keyed_set_status() { # atomic replace: readers never see a partial line
-  local tmp="$1/.status.$$.$RANDOM"
-  (set -C; printf '%s\n' "$2" > "$tmp") && /bin/mv -f "$tmp" "$1/status"
+keyed_put() { # keyed_put <run-dir> <file> <line>: atomic replace, so readers never see a partial line
+  local tmp="$1/.$2.$$.$RANDOM"
+  (set -C; printf '%s\n' "$3" > "$tmp") && /bin/mv -f "$tmp" "$1/$2"
 }
+
+keyed_set_status() { keyed_put "$1" status "$2"; }
 
 # keyed_state <run-dir> prints one line: claimed | running | finished <code> |
 # failed <cd|masker> <code|-> | unknown <never-started|supervisor-vanished>.
@@ -281,6 +288,8 @@ keyed_code() { # exit code for a state line: the command's own, else 125
 # Masks every value named in @ARGV (read from %ENV, never from argv) before output reaches the log.
 # Hex values match with or without 0x, case-insensitively. Whole lines are flushed as they end; a
 # line longer than 64 KiB goes out in steps, holding back what could be the head of a secret.
+# After a clean close it writes the number of redactions to fd 3 when fd 3 is open; that count is
+# telemetry, so a failure there never touches the log or the exit status.
 # shellcheck disable=SC2016 # perl source, not shell
 KEYED_MASKER='
 use strict; use warnings;
@@ -296,7 +305,7 @@ my $re = join "|", map { quotemeta } sort { length $b <=> length $a } @v;
 $re = qr/$re/i;
 my $keep = 0; for (@v) { $keep = length if length > $keep } $keep--;
 binmode STDIN; binmode STDOUT; $| = 1;
-my ($buf, $in) = ("", "");
+my ($buf, $in, $count) = ("", "", 0);
 while (1) {
   my $r = sysread STDIN, $in, 65536;
   die "masker: read: $!\n" unless defined $r;
@@ -305,11 +314,12 @@ while (1) {
   $cut = length($buf) - $keep if $r && length($buf) - $cut > 65536 + $keep;
   while ($buf =~ /$re/g) { $cut = $+[0] if $-[0] < $cut && $+[0] > $cut }
   my $out = substr $buf, 0, $cut, "";
-  $out =~ s/($re)/"[masked:" . $name{lc $1} . "]"/ge;
+  $count += ($out =~ s/($re)/"[masked:" . $name{lc $1} . "]"/ge) || 0;
   if (length $out) { print STDOUT $out or die "masker: write: $!\n" }
   last unless $r;
 }
 close STDOUT or die "masker: close: $!\n";
+if (open my $c, ">&=", 3) { print $c "$count\n"; close $c }
 '
 
 cmd_request() {
@@ -438,17 +448,25 @@ cmd_receive() {
 }
 
 cmd_supervise() { # supervise <run> <repo> <n> <secret names…> <argv0> [args…]: detached; owns the outcome
-  local run=$1 repo=$2 n=$3 codes
+  local run=$1 repo=$2 n=$3 codes count
   shift 3
   local names=("${@:1:n}")
   shift "$n"
   (set -C; printf '%s %s\n' "$$" "$(keyed_start_time $$)" > "$run/pid") || exit 1
   keyed_set_status "$run" running || exit 1
-  cd "$repo" 2> /dev/null || { keyed_set_status "$run" 'failed cd -'; exit 1; }
+  keyed_put "$run" started "$(date +%s)" || true
+  # A report that sees the final status must also see these, so they are written first.
+  cd "$repo" 2> /dev/null || { keyed_put "$run" ended "$(date +%s)" || true; keyed_set_status "$run" 'failed cd -'; exit 1; }
   set +e +o pipefail -C
-  "$@" < /dev/null 2>&1 | /usr/bin/perl -e "$KEYED_MASKER" -- "${names[@]}" > "$run/log"
+  # Only the masker gets the count fd, as its fd 3; a count file that can't be opened becomes /dev/null.
+  { exec 7> "$run/.redactions"; } 2> /dev/null || exec 7> /dev/null
+  "$@" < /dev/null 7>&- 2>&1 | /usr/bin/perl -e "$KEYED_MASKER" -- "${names[@]}" 3>&7 7>&- > "$run/log"
   codes=("${PIPESTATUS[@]}")
+  exec 7>&-
   set -e +C
+  count=$(head -c 32 "$run/.redactions" 2> /dev/null || true)
+  if [[ $count =~ ^[0-9]{1,12}$ ]]; then /bin/mv -f "$run/.redactions" "$run/redactions" || true; fi
+  keyed_put "$run" ended "$(date +%s)" || true
   if [ "${codes[1]}" -eq 0 ]; then
     keyed_set_status "$run" "finished ${codes[0]}"
   else
@@ -460,6 +478,63 @@ cmd_status() {
   local d
   d=$(keyed_request_dir "$1")
   if [ -d "$d/run" ]; then keyed_state "$d/run"; else echo pending; fi
+}
+
+# list: KEYED-LIST1 <total> <n>, then per request, newest first: id state age-seconds repo preview.
+# Read-only and offline: no keyed_pin, so no git or network per row. A request that fails to parse
+# is listed as `invalid` with an empty repo and preview.
+cmd_list() {
+  local now d f id rows=() total age preview IFS=' '
+  local LC_ALL=C
+  now=$(date +%s)
+  for f in "$KEYED_DIR"/*/request; do
+    [ -f "$f" ] || continue
+    d=${f%/request} id=${d##*/}
+    [[ $id =~ ^[a-z0-9][a-z0-9-]{2,63}$ ]] || continue
+    rows+=("$(stat -c %Y "$f") $id")
+  done
+  total=${#rows[@]}
+  printf '%s\0' KEYED-LIST1 "$total"
+  [ "$total" -gt 0 ] || { printf '%s\0' 0 END; return; }
+  # awk, not head: it reads everything, so sort never takes a SIGPIPE that pipefail would report.
+  f=$(printf '%s\n' "${rows[@]}" | sort -rn | awk -v n="$KEYED_MAX_LIST" 'NR <= n')
+  rows=()
+  while IFS= read -r d; do rows+=("$d"); done <<< "$f"
+  printf '%s\0' "${#rows[@]}"
+  for f in "${rows[@]}"; do
+    id=${f#* } age=$((now - ${f%% *}))
+    d=$KEYED_DIR/$id
+    # A subshell, because keyed_read_request exits on a malformed request.
+    if ! (
+      keyed_read_request "$d/request"
+      preview="${keyed_argv[*]}"
+      [ "${#preview}" -le 160 ] || preview="${preview:0:160} ...(+$((${#preview} - 160)) bytes)"
+      if [ -d "$d/run" ]; then st=$(keyed_state "$d/run"); else st=pending; fi
+      printf '%s\0' "$id" "$st" "$age" "$keyed_repo" "$preview"
+    ) 2> /dev/null; then
+      printf '%s\0' "$id" invalid "$age" '' ''
+    fi
+  done
+  printf '%s\0' END
+}
+
+cmd_follow() { # follow <id>: replay and follow the masked log of a run; exits with the command's code
+  local d
+  d=$(keyed_request_dir "$1")
+  [ -d "$d/run" ] || keyed_fail "request $1 has not run"
+  keyed_follow "$d/run"
+}
+
+cmd_report() { # report <id>: KEYED-REPORT1 <state> <redactions|-> <started|-> <ended|-> END
+  local d st f v vals=()
+  d=$(keyed_request_dir "$1")
+  if [ -d "$d/run" ]; then st=$(keyed_state "$d/run"); else st=pending; fi
+  for f in redactions started ended; do
+    v=$(head -c 32 "$d/run/$f" 2> /dev/null || true)
+    [[ $v =~ ^[0-9]{1,12}$ ]] || v=-
+    vals+=("$v")
+  done
+  printf '%s\0' KEYED-REPORT1 "$st" "${vals[@]}" END
 }
 
 cmd_wait() {
@@ -480,9 +555,12 @@ cmd_wait() {
 keyed_main() {
   case ${1:-} in
     request) shift; cmd_request "$@" ;;
-    wait | status | inspect | receive)
+    list)
+      [ $# -eq 1 ] || keyed_fail "usage: env-exec list"
+      PATH=/usr/bin:/bin cmd_list ;;
+    wait | status | inspect | receive | follow | report)
       [ $# -eq 2 ] || keyed_fail "usage: env-exec $1 <id>"
-      case $1 in inspect | receive) ulimit -c 0; umask 077; PATH=/usr/bin:/bin ;; esac
+      case $1 in inspect | receive) ulimit -c 0; umask 077; PATH=/usr/bin:/bin ;; follow | report) PATH=/usr/bin:/bin ;; esac
       "cmd_$1" "$2" ;;
     supervise) shift; ulimit -c 0; cmd_supervise "$@" ;;
     *) keyed_fail "usage: env-exec request|wait|status (see the header of this file)" ;;

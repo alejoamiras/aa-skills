@@ -158,6 +158,7 @@ run_request() {
     exit 255
   fi
   say "op-remote: $id $(keyed_quote "$st")"
+  [[ $st =~ $KEYED_STATE_RE ]] || { say "op-remote: the host sent an invalid state"; exit 125; }
   case $st in
     "finished "*) exit "${st#finished }" ;;
     running | claimed) say "still running on $host (connection dropped?): ssh $host env-exec wait $id"; exit 255 ;;

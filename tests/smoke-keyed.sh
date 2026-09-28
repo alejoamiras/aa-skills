@@ -201,6 +201,59 @@ sleep 0.7 && kill "$rpid" 2> /dev/null
 out=$("$BIN/env-exec" wait "$ID" 2> /dev/null)
 t "ssh loss after launch: the run still finishes and wait sees it" bash -c "[ $? -eq 0 ] && grep -q late-line <<< \"\$1\"" _ "$out"
 
+# --- list / follow / report / redaction count ---
+frames() { tr '\0' '\n' < "$1"; } # NUL frames as lines, for grepping
+field() { frames "$1" | sed -n "$2p"; }
+ID=$(req count /bin/bash -c 'echo "$KT_KEY and again $KT_KEY"; exit 4')
+{ run1 "$ID" 'echo "$KT_KEY twice: $KT_KEY"; exit 4'; printf '%s\0' 1 "KT_KEY=$KEY" END; } | "$BIN/env-exec" receive "$ID" > /dev/null 2>&1
+"$BIN/env-exec" report "$ID" > "$S/report"
+t "report: finished run, its code and 2 redactions" test "$(frames "$S/report" | sed -n '1,3p' | tr '\n' ' ')" = 'KEYED-REPORT1 finished 4 2 '
+t "report: started and ended stamps, ended >= started" bash -c '[ "$(sed -n 5p <<< "$1")" -ge "$(sed -n 4p <<< "$1")" ]' _ "$(frames "$S/report")"
+out=$("$BIN/env-exec" follow "$ID" 2> /dev/null)
+t "follow: replays a finished run's masked log and exits with its code" bash -c "[ $? -eq 4 ] && grep -q 'masked:KT_KEY\] twice' <<< \"\$1\"" _ "$out"
+FRESH=$(req fresh ./probe.sh)
+tn "follow: refuses a request that never ran" "$BIN/env-exec" follow "$FRESH"
+"$BIN/env-exec" report "$FRESH" > "$S/report2"
+t "report: a request that never ran is pending with no stamps" test "$(frames "$S/report2" | tr '\n' ' ')" = 'KEYED-REPORT1 pending - - - END '
+ID=legacy-00000001
+mkdir -p "$KD/$ID/run" && : > "$KD/$ID/request" && echo 'finished 0' > "$KD/$ID/run/status"
+touch -d "@$(($(date +%s) + 100))" "$KD/$ID/request" # the newest request, and a malformed one
+"$BIN/env-exec" report "$ID" > "$S/report3"
+t "report: a legacy run reports - for what it never recorded" test "$(frames "$S/report3" | tr '\n' ' ')" = 'KEYED-REPORT1 finished 0 - - - END '
+mkdir -p "$S/sup/run/.redactions"
+(export KT_KEY="$KEY"; "$BIN/env-exec" supervise "$S/sup/run" "$S/repo" 1 KT_KEY /bin/bash -c 'echo "$KT_KEY"; echo x >&3; echo y >&7; exit 0') > /dev/null 2>&1 3>&- 7>&-
+t "count: an unopenable count file still masks, and the command still finishes" bash -c "grep -q '^0x\[masked:KT_KEY\]$' '$S/sup/run/log' && [ \"\$(cat '$S/sup/run/status')\" = 'finished 0' ]"
+t "count: unopenable → no redactions file" test ! -f "$S/sup/run/redactions"
+t "count: the command gets neither fd 3 nor fd 7" bash -c "[ \$(grep -c 'Bad file descriptor' '$S/sup/run/log') -eq 2 ]"
+"$BIN/env-exec" list > "$S/list"
+t "list: newest first, and a malformed request is listed as invalid" bash -c '[ "$(sed -n 1p <<< "$1")" = KEYED-LIST1 ] && [ "$(sed -n 4,5p <<< "$1" | tr "\n" " ")" = "legacy-00000001 invalid " ]' _ "$(frames "$S/list")"
+t "list: a request that never ran is pending" bash -c '[ "$(grep -x -A1 "$2" <<< "$1" | sed -n 2p)" = pending ]' _ "$(frames "$S/list")" "$FRESH"
+cat > "$S/stub/git" << 'EOF'
+#!/bin/bash
+echo "$*" >> "${GIT_CALLS:?}"
+exec /usr/bin/git "$@"
+EOF
+chmod +x "$S/stub/git"
+GIT_CALLS="$S/git.calls" "$BIN/env-exec" list > /dev/null
+t "list: never calls git" test ! -e "$S/git.calls"
+rm "$S/stub/git"
+for i in $(seq 1 55); do mkdir -p "$KD/bulk-$(printf %08d "$i")" && printf '%s\0' KEYED-REQ1 "$S/repo" keyed.env.example 1 ./probe.sh END > "$KD/bulk-$(printf %08d "$i")/request"; done
+"$BIN/env-exec" list > "$S/list2"
+t "list: total counts every request, rows cap at 50" bash -c '[ "$(sed -n 2p <<< "$1")" -gt 55 ] && [ "$(sed -n 3p <<< "$1")" = 50 ] && [ "$(tail -n1 <<< "$1")" = END ]' _ "$(frames "$S/list2")"
+mkdir -p "$S/lie"
+cat > "$S/lie/ssh" << EOF
+#!/bin/bash
+case "\$*" in *" env-exec status "*) cat "$S/lie/state"; exit 0 ;; esac
+exec "$S/stub/ssh" "\$@"
+EOF
+chmod +x "$S/lie/ssh"
+for lie in 'finished 999' 'finished x' 'failed cd 999'; do
+  ID=$(req lie ./probe.sh)
+  printf '%s\n' "$lie" > "$S/lie/state"
+  PATH="$S/lie:$PATH" approve y "$BIN/op-remote" testhost "$ID" > "$S/lie.out" 2>&1
+  t "status: op-remote rejects '$lie' (exit 125)" bash -c "[ $? -eq 125 ] && grep -q 'invalid state' '$S/lie.out'"
+done
+
 # --- create: generated and imported values reach op on stdin only ---
 ID=$(req create ./probe.sh)
 touch "$S/list-fails"
@@ -243,6 +296,9 @@ EOF
   t "bash 3.2: op-remote approves and exits 0" grep -q 'finished 0' "$S/b32.out"
   "$BIN/env-exec" receive "$ID" < "$S/b32/payload" > "$S/b32.run" 2>&1
   t "bash 3.2: its payload runs on the bash 5 receiver" grep -q words-literal-ok "$S/b32.run"
+elif [ -n "${KEYED_REQUIRE_B32:-}" ]; then
+  echo "FAIL  bash 3.2 pass required, but docker or the bash:3.2 image is missing"
+  FAIL=1
 else
   echo "skip  bash 3.2 pass (docker or the bash:3.2 image missing)"
 fi
