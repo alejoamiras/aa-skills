@@ -18,7 +18,7 @@
 # proves the worktree's HEAD is fully contained in origin's trunk, then removes
 # the worktree, every local branch of its stack, their merged remote
 # counterparts, and the row. It refuses instead of forcing: unmerged or
-# uncommitted work is never discarded. Needs git >= 2.38.
+# uncommitted work, or a worktree holding submodules, stays. Needs git >= 2.38.
 #
 # <slug> may be qualified as <repo>/<slug> when the same slug exists in two
 # repos, or given as the absolute worktree path when even that is ambiguous;
@@ -30,6 +30,7 @@
 set -euo pipefail
 
 AGENTS_DIR="${AGENTS_DIR:-$HOME/.agents}"
+case "$AGENTS_DIR" in /*) ;; *) AGENTS_DIR="$PWD/$AGENTS_DIR" ;; esac   # `done` changes directory mid-run
 MANIFEST="$AGENTS_DIR/workspaces.md"
 LOCK_DIR="$AGENTS_DIR/.workspaces.lock"
 LOCKED=0
@@ -249,18 +250,6 @@ landed() {
   [ -n "$tree" ] && [ "$tree" = "$(git -C "$root" rev-parse "$trunk^{tree}")" ]
 }
 
-# submodules_pushed <worktree> <newline-separated submodule paths> — true when
-# no ref in any of them reaches a commit its own remotes lack. Removing a
-# worktree deletes its submodule repositories outright, so a clean superproject
-# status says nothing about commits made inside one.
-submodules_pushed() {
-  local sm out
-  while IFS= read -r sm; do
-    out="$(git -C "$1/$sm" rev-list --all --not --remotes -n 1 2>/dev/null)" || return 1
-    [ -z "$out" ] || return 1
-  done <<< "$2"
-}
-
 # --- subcommands ---------------------------------------------------------------
 
 cmd_new() {
@@ -447,7 +436,10 @@ cmd_done() {
   # The merge proof needs origin's current trunk, and a fetch is too slow to
   # run under the manifest lock (waiters give up after ~10s). A failed fetch
   # ends the run: a stale trunk could vouch for a merge origin no longer has.
-  local fetched_root=""
+  # Trunk is an exact branch, fetched by name so a narrowed refspec can't
+  # leave it stale: `--trunk HEAD` or a revision like `main~0` would slip past
+  # the name comparisons that keep trunk out of the delete list.
+  local fetched_root="" trunk_ref=""
   if [ "$merged" = 1 ]; then
     resolve_row "$arg"
     if [ -d "$RESOLVED_PATH" ]; then
@@ -457,7 +449,16 @@ cmd_done() {
         || die "--merged needs an 'origin' remote to prove the merge against"
       GIT_TERMINAL_PROMPT=0 git -C "$fetched_root" fetch --quiet --prune origin \
         || die "can't fetch origin — the merge can't be proven against a stale trunk. Nothing was removed"
-      git -C "$fetched_root" remote set-head origin --auto >/dev/null 2>&1 || true
+      if [ -n "$trunk_name" ]; then
+        trunk_ref="refs/remotes/origin/$trunk_name"
+      else
+        git -C "$fetched_root" remote set-head origin --auto >/dev/null 2>&1 || true
+        trunk_ref="$(git -C "$fetched_root" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
+      fi
+      { [ -n "$trunk_ref" ] && [ "$trunk_ref" != refs/remotes/origin/HEAD ] \
+        && GIT_TERMINAL_PROMPT=0 git -C "$fetched_root" fetch --quiet origin \
+             "+refs/heads/${trunk_ref#refs/remotes/origin/}:$trunk_ref" 2>/dev/null; } \
+        || die "can't fetch the trunk branch from origin — pass --trunk <branch>. Nothing was removed"
     fi
   fi
 
@@ -468,7 +469,7 @@ cmd_done() {
   # gone" branch below drops its row instead of dying "unknown workspace".
   lock; ensure_manifest
   local slug path root live_branch expected_branch
-  local trunk="" trunk_ref trunk_short="" head="" mb b tip st subs doomed deleted=""
+  local trunk="" trunk_short="" head="" mb b tip st doomed deleted=""
   resolve_row "$arg"
   prune_dead_rows
   slug="$RESOLVED_SLUG"
@@ -494,16 +495,7 @@ cmd_done() {
       # merge proof, not the branch name.
       [ "$root" = "$fetched_root" ] || die "refusing: the row for '$arg' changed while fetching — rerun"
       [ -n "$live_branch" ] || die "refusing: $path is on a detached HEAD — --merged needs a branch to prove merged"
-      if [ -n "$trunk_name" ]; then
-        trunk_ref="refs/remotes/origin/$trunk_name"
-      else
-        trunk_ref="$(git -C "$root" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
-      fi
-      # An exact branch only: `--trunk HEAD` or a revision like `main~0` would
-      # slip past the name comparisons that keep trunk out of the delete list.
-      { [ -n "$trunk_ref" ] && [ "$trunk_ref" != refs/remotes/origin/HEAD ] \
-        && git -C "$root" show-ref --verify --quiet "$trunk_ref"; } \
-        || die "can't resolve the trunk on origin — pass --trunk <branch>"
+      git -C "$root" show-ref --verify --quiet "$trunk_ref" || die "can't resolve the trunk on origin — pass --trunk <branch>"
       trunk_short="${trunk_ref#refs/remotes/origin/}"
       trunk="$(git -C "$root" rev-parse "$trunk_ref")"   # pinned: a concurrent fetch must not move the proof's target
       [ "$live_branch" != "$trunk_short" ] || die "refusing: $path is on the trunk branch itself"
@@ -533,22 +525,16 @@ cmd_done() {
       fi
 
       # Checked last, right before the removal it guards. Flags are explicit
-      # because status.showUntrackedFiles / diff.ignoreSubmodules can hide work.
+      # because status.showUntrackedFiles / diff.ignoreSubmodules can hide work
+      # from git's own pre-removal check.
       st="$(git -C "$path" status --porcelain --untracked-files=all --ignore-submodules=none)" \
         || die "refusing: can't read the status of $path"
       [ -z "$st" ] || die "refusing: $path has uncommitted or untracked files — commit or delete them and rerun (--merged never discards work)"
-      subs="$(git -C "$path" submodule foreach --quiet --recursive 'printf "%s\n" "$displaypath"')" \
-        || die "refusing: can't enumerate the submodules of $path"
-      if [ -n "$subs" ]; then
-        submodules_pushed "$path" "$subs" \
-          || die "refusing: a submodule in $path holds commits its remote lacks — push them (or fetch inside it) and rerun"
-        # git refuses any worktree holding submodules unless forced; the two
-        # checks above are what make forcing this one safe.
-        git -C "$root" worktree remove --force "$path" || die "could not remove $path — nothing else was touched"
-      else
-        git -C "$root" worktree remove "$path" \
-          || die "git would not remove $path (changed since the check, or locked) — nothing else was touched"
-      fi
+      # Never forced. That also leaves a worktree holding submodules in place:
+      # git refuses it, and removing it would delete those repositories along
+      # with any commit, stash or reflog entry that exists nowhere else.
+      git -C "$root" worktree remove "$path" \
+        || die "git would not remove $path (reason above: changed since the check, locked, or it holds submodules — check those by hand, then 'git worktree remove --force'). Nothing else was touched"
       echo "removed worktree: $path"
       while read -r b tip; do
         if [ "$(git -C "$root" rev-parse --verify --quiet "refs/heads/$b")" != "$tip" ]; then

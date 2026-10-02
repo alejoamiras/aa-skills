@@ -214,8 +214,8 @@ tn "stack: merged remote branch deleted" on_origin stk-close-out
 t "stack: remote branch with a foreign commit kept" on_origin stk-arc2
 t "stack: kept remote is reported" grep -q "remote branch kept.*origin/stk-arc2" "$S/stk.out"
 
-# A worktree's submodule repositories die with it: unpushed commits inside one
-# must block the teardown even though the superproject is clean and merged.
+# A worktree's submodule repositories die with it, so one that holds any is
+# left alone even though the superproject is clean and merged.
 FILE_OK=(-c protocol.file.allow=always)
 git init -q --bare -b main "$S/sub.git"
 git clone -q "$S/sub.git" "$S/subsrc" 2>/dev/null
@@ -225,14 +225,9 @@ git -C "$MR" "${FILE_OK[@]}" submodule --quiet add "$S/sub.git" vendor >/dev/nul
 "${GC[@]}" -C "$MR" commit -qm "add submodule" && git -C "$MR" push -q origin main
 env -C "$MR" "$AW" new subm --no-start >/dev/null 2>&1
 git -C "$(wt subm)" "${FILE_OK[@]}" submodule --quiet update --init >/dev/null 2>&1
-git -C "$(wt subm)/vendor" checkout -q -b local-only
-"${GC[@]}" -C "$(wt subm)/vendor" commit -q --allow-empty -m "never pushed"
-git -C "$(wt subm)/vendor" checkout -q --detach HEAD~1   # back on the recorded gitlink: superproject is clean
-tn "submodule: unpushed commits inside it refuse the teardown" "$AW" done subm --merged
+tn "submodule: a worktree holding one is not removed" "$AW" done subm --merged
 t "submodule: refusal removed nothing" test -d "$(wt subm)/vendor"
-git -C "$(wt subm)/vendor" push -q origin local-only
-t "submodule: torn down once its commits are pushed" "$AW" done subm --merged
-t "submodule: worktree gone" test ! -d "$(wt subm)"
+t "submodule: branch and row survive the refusal" bash -c "git -C \"$MR\" show-ref --verify --quiet refs/heads/worktree-subm && grep -q '^| subm |' \"$AGENTS_DIR/workspaces.md\""
 
 # --- prune on list ---
 env -C "$REPO" "$AW" new gone-task --no-start >/dev/null 2>&1
