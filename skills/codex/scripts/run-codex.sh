@@ -62,9 +62,11 @@ MODEL_ARGS=()
 
 # An older CLI gets a 400 for this model that reads like an entitlement problem
 # ("not supported when using Codex with a ChatGPT account"); name the real cause.
+# An unreadable version, or a sort without -V, lets the call through to that 400.
 if [[ "$MODEL" == gpt-6.1-* ]]; then
   CLI_VERSION=$(codex --version 2> /dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
-  if [[ -n "$CLI_VERSION" && "$(printf '%s\n' 0.159.1 "$CLI_VERSION" | sort -V | head -n 1)" != 0.159.1 ]]; then
+  OLDEST=$(printf '%s\n' 0.159.1 "$CLI_VERSION" | sort -V 2> /dev/null | head -n 1 || true)
+  if [[ -n "$CLI_VERSION" && -n "$OLDEST" && "$OLDEST" != 0.159.1 ]]; then
     echo "ERROR: $MODEL needs Codex CLI >= 0.159.1 (found $CLI_VERSION): run 'codex update', or pass gpt-6-astra" >&2
     exit 2
   fi
@@ -146,6 +148,7 @@ if [[ -n "${CODEX_HOME:-}" ]]; then
 fi
 printf '%s' "${CODEX_HOME:-}" > "$CODEX_DIR/codex_home"
 printf '%s' "$SANDBOX" > "$CODEX_DIR/sandbox"
+printf '%s' "$MODEL" > "$CODEX_DIR/model"   # a resume stays on it; the script default would not
 
 echo "Running codex (model=${MODEL:-config default}, effort=$EFFORT, sandbox=$SANDBOX, cwd=$CWD, home=${CODEX_HOME:-~/.codex})..." >&2
 echo "Output dir: $CODEX_DIR" >&2

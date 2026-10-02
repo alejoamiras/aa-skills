@@ -437,9 +437,11 @@ cmd_done() {
   # The merge proof needs origin's current trunk, and a fetch is too slow to
   # run under the manifest lock (waiters give up after ~10s). A failed fetch
   # ends the run: a stale trunk could vouch for a merge origin no longer has.
-  # Trunk is an exact branch, fetched by name so a narrowed refspec can't
-  # leave it stale: `--trunk HEAD` or a revision like `main~0` would slip past
-  # the name comparisons that keep trunk out of the delete list.
+  # Only trunk's own tracking ref is fetched, by exact name: a broad
+  # `fetch --prune` obeys the remote's configured refspecs, and one mapping
+  # into refs/heads would delete local branches before any proof ran. The exact
+  # name also keeps `--trunk HEAD` or `main~0` from slipping past the name
+  # comparisons that keep trunk out of the delete list.
   local fetched_root="" trunk_ref=""
   if [ "$merged" = 1 ]; then
     resolve_row "$arg"
@@ -448,8 +450,6 @@ cmd_done() {
       fetched_root="$WT_ROOT"
       git -C "$fetched_root" remote get-url origin >/dev/null 2>&1 \
         || die "--merged needs an 'origin' remote to prove the merge against"
-      GIT_TERMINAL_PROMPT=0 git -C "$fetched_root" fetch --quiet --prune origin \
-        || die "can't fetch origin — the merge can't be proven against a stale trunk. Nothing was removed"
       if [ -n "$trunk_name" ]; then
         trunk_ref="refs/remotes/origin/$trunk_name"
       else
@@ -459,7 +459,7 @@ cmd_done() {
       { [ -n "$trunk_ref" ] && [ "$trunk_ref" != refs/remotes/origin/HEAD ] \
         && GIT_TERMINAL_PROMPT=0 git -C "$fetched_root" fetch --quiet origin \
              "+refs/heads/${trunk_ref#refs/remotes/origin/}:$trunk_ref" 2>/dev/null; } \
-        || die "can't fetch the trunk branch from origin — pass --trunk <branch>. Nothing was removed"
+        || die "can't fetch the trunk branch from origin (offline, or pass --trunk <branch>) — the merge can't be proven against a stale trunk. Nothing was removed"
     fi
   fi
 
@@ -536,7 +536,7 @@ cmd_done() {
       # git refuses it, and removing it would delete those repositories along
       # with any commit, stash or reflog entry that exists nowhere else.
       git -C "$root" worktree remove "$path" \
-        || die "git would not remove $path (reason above: changed since the check, locked, or it holds submodules — check those by hand, then 'git worktree remove --force'). Nothing else was touched"
+        || die "git would not remove $path (reason above: changed since the check, locked, or it holds submodules, whose repositories would be deleted with it). Nothing else was touched"
       echo "removed worktree: $path"
       while read -r b tip; do
         if [ "$(git -C "$root" rev-parse --verify --quiet "refs/heads/$b")" != "$tip" ]; then
@@ -575,13 +575,18 @@ cmd_done() {
   unlock
   echo "manifest row removed: $RESOLVED_REPO/$RESOLVED_SLUG"
 
-  # Remote counterparts go last and outside the lock (network). The lease pins
-  # each delete to the tip just proven landed, so a concurrent push wins.
+  # Remote counterparts go last and outside the lock (network). Tips come from
+  # origin itself, not from tracking refs that may be stale; one whose commit
+  # is not even here cannot be proven landed and is kept. The lease pins each
+  # delete to the tip just proven, so a concurrent push wins.
   [ -n "$deleted" ] || return 0
+  local remote_heads
+  remote_heads="$(GIT_TERMINAL_PROMPT=0 git -C "$root" ls-remote --heads origin 2>/dev/null)" \
+    || { echo "remote branches left alone: can't list origin"; return 0; }
   while IFS= read -r b; do
-    tip="$(git -C "$root" rev-parse --verify --quiet "refs/remotes/origin/$b" || true)"
+    tip="$(printf '%s\n' "$remote_heads" | awk -v r="refs/heads/$b" '$2 == r { print $1 }')"
     [ -n "$tip" ] || continue
-    if ! landed "$root" "$tip" "$trunk" "$head"; then
+    if ! git -C "$root" cat-file -e "$tip^{commit}" 2>/dev/null || ! landed "$root" "$tip" "$trunk" "$head"; then
       echo "remote branch kept (has commits not on origin/$trunk_short): origin/$b"
     elif GIT_TERMINAL_PROMPT=0 git -C "$root" push --quiet --force-with-lease="refs/heads/$b:$tip" origin ":refs/heads/$b" 2>/dev/null; then
       echo "deleted remote branch: origin/$b"

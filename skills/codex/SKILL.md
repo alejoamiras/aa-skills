@@ -41,7 +41,7 @@ The scripts do the whole flow in a single shell process — the per-invocation t
    ~/.claude/skills/codex/scripts/run-codex.sh <prompt-file> <cwd> xhigh read-only
    ```
 
-   Arguments are positional: `<prompt-file>` (required), `<cwd>` (defaults to `$PWD`), `<effort>` (defaults to `xhigh`), `<sandbox>` (defaults to `read-only`), `<model>` (defaults to codex's configured model). Pass `workspace-write` for the sandbox only if the user explicitly wants codex to make changes.
+   Arguments are positional: `<prompt-file>` (required), `<cwd>` (defaults to `$PWD`), `<effort>` (defaults to `xhigh`), `<sandbox>` (defaults to `read-only`), `<model>` (defaults to `$CODEX_MODEL`, else `gpt-6-astra`). Pass `workspace-write` for the sandbox only if the user explicitly wants codex to make changes.
 
    **Hosts where the sandbox cannot start.** Inside a nested container (Sysbox) or under an AppArmor userns restriction nobody can lift, codex's `bwrap` dies with `loopback: Failed RTM_NEWADDR: Operation not permitted` and a `read-only` consult can run nothing. Such a machine opts in — locally, never in this repo — with a one-word file: `echo approve-for-me > ~/.agents/codex-sandbox`. Keep calling the script with `read-only`; it swaps in `--approve-for-me` (workspace-write plus a model auto-reviewer that may rerun a command unsandboxed), prepends a host note telling codex to request escalation and not to modify files, and `resume-codex.sh` re-asserts `approvals_reviewer="auto_review"`, which a resume does not inherit. The machine opts in, never the caller: a positional `approve-for-me` without the file is a usage error, and a resume re-arms only where the file exists. **This mode is weaker than `read-only` and does not enforce it** — the host note is only prose, so treat whatever contains the host (the outer container, a throwaway VM) as the real boundary. Never create the file where the sandbox works, never use `danger-full-access` instead, and for untrusted content prefer pasting excerpts inline with shell use forbidden. `image-codex.sh` has no such mode; image generation is unsupported on these hosts.
 
@@ -81,6 +81,8 @@ If you only have the dir (the SESSION_ID scrolled out of context), pass an empty
 ```bash
 ~/.claude/skills/codex/scripts/resume-codex.sh "" <followup-prompt-file> <codex-dir> xhigh
 ```
+
+A resume stays on the model its session started with: `run-codex.sh` records it in `<codex-dir>/model` and `resume-codex.sh` reads it back, so the examples above need no model argument. Only a resume WITHOUT the codex-dir (UUID alone) has nothing to read and falls to the Astra default — pass the model as the fifth argument there if the session ran on anything else.
 
 Do not run `resume-codex.sh` in parallel against the same `<codex-dir>` — the numbered-suffix selection isn't atomic. Sequential resumes are fine.
 

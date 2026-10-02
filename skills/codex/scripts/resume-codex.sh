@@ -11,11 +11,11 @@
 #                are supplied, the script verifies they match and refuses to run
 #                if they do not. If codex-dir is omitted, a fresh dir is created.
 #   effort       Optional. Defaults to xhigh.
-#   model        Optional. Defaults to $CODEX_MODEL, else gpt-6-astra.
-#                (See run-codex.sh header. Pass a 5th arg or $CODEX_MODEL
-#                to override; a session started on another model — a
-#                blueprint or harden run's codex_model — must be resumed
-#                with that same slug.)
+#   model        Optional. Defaults to the model run-codex.sh recorded in
+#                <codex-dir>/model, so a session stays on the model it
+#                started with; without that record, $CODEX_MODEL, else
+#                gpt-6-astra. A UUID-only resume of a non-Astra session
+#                must therefore name its model here.
 #
 # The session is resumed in the CODEX_HOME recorded by run-codex.sh
 # (<codex-dir>/codex_home) — sessions live under the home that created them, so
@@ -37,13 +37,11 @@ PROMPT_FILE="${2:-}"
 [[ -n "$PROMPT_FILE" ]] || { echo "usage: resume-codex.sh <session-id-or-\"\"> <prompt-file> [codex-dir] [effort] [model]" >&2; exit 2; }
 CODEX_DIR="${3:-}"
 EFFORT="${4:-xhigh}"
-MODEL="${5:-${CODEX_MODEL:-gpt-6-astra}}"
+MODEL="${5:-}"
 # A roster home carries AGENTS.md but no config.toml, so a global
 # project_doc_max_bytes never reaches it and instructions silently truncate at
 # Codex's 32 KiB default. Pass it per call so every home agrees.
 DOC_MAX="${CODEX_PROJECT_DOC_MAX_BYTES:-131072}"
-MODEL_ARGS=()
-[[ -n "$MODEL" ]] && MODEL_ARGS=(-m "$MODEL")
 
 if [[ ! -f "$PROMPT_FILE" ]]; then
   echo "ERROR: prompt file not found: $PROMPT_FILE" >&2
@@ -116,6 +114,13 @@ fi
 # resume against it has no id and no home to go on.
 [[ -f "$CODEX_DIR/session_id" ]] || printf '%s' "$SID" > "$CODEX_DIR/session_id"
 [[ -f "$CODEX_DIR/codex_home" ]] || printf '%s' "${CODEX_HOME:-}" > "$CODEX_DIR/codex_home"
+
+# The session's own model beats the script default: a resume that silently
+# switched a Sol session to Astra would change the reviewer mid-conversation.
+[[ -z "$MODEL" && -s "$CODEX_DIR/model" ]] && MODEL=$(cat "$CODEX_DIR/model")
+MODEL="${MODEL:-${CODEX_MODEL:-gpt-6-astra}}"
+MODEL_ARGS=(-m "$MODEL")
+[[ -f "$CODEX_DIR/model" ]] || printf '%s' "$MODEL" > "$CODEX_DIR/model"
 
 # A resume inherits the session's sandbox but not its approvals reviewer, so an
 # approve-for-me session would fall back to prompting nobody and run nothing.
