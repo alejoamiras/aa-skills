@@ -16,7 +16,8 @@ The routing rule, since every finding belongs to exactly one focus: **security**
 
 ```mermaid
 flowchart TD
-    S0["Phase 0 — scope confirm"] --> S1["Phase 1 — repo map (hierarchical for monorepos)"]
+    S0["Phase 0 — scope confirm"] --> H["Phase 0.5 — home into its own worktree (harden-focus)"]
+    H --> S1["Phase 1 — repo map (hierarchical for monorepos)"]
     S1 --> CL["Main agent clusters the repo — by entrypoint/sink (security), state owner (bugs), or boundary/similarity (quality)"]
     CL --> A["Claude agent per cluster"]
     CL --> B["Codex agent per cluster"]
@@ -29,6 +30,7 @@ flowchart TD
 
 The design decisions that matter:
 
+- **Its own worktree.** Once scope is confirmed the run moves into a task-named git worktree (`harden-<focus>`), cut from origin's default branch unless told otherwise, and records the commit it audited. Nothing lands in the checkout everyone else shares, and a branch switch there cannot change the code mid-audit. The report is committed on the worktree branch and never pushed without a say-so: landing, keeping or discarding it is the user's call.
 - **Map before audit.** A structured repo map (entrypoints, trust boundaries, dependency edges, generated-code exclusions) is built first; agents audit *clusters* derived from it, never random files. Monorepos get two-level hierarchical mapping so one bad map can't poison every downstream phase.
 - **Cross-model always.** Every cluster gets a Claude agent *and* a Codex agent, at every effort level. Two same-family agents agreeing means nothing; cross-family convergence is the strongest confidence signal available, and disagreement is itself recorded as a signal.
 - **Evidence or it doesn't exist.** Security findings need a concrete source→sink trace; bugs need a minimal counter-example; quality needs a named smell (Fowler catalog or a mapped analog). "Could be vulnerable" is a non-finding by construction. Negative lists (what NOT to flag) cut more false positives than any prompting trick.

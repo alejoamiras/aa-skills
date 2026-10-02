@@ -1,6 +1,6 @@
 ---
 name: harden
-description: Whole-codebase audit skill with three focuses (security / bugs / quality) and five effort levels (low / medium / high / max / ultra). Map-reduce protocol with parallel Claude + Codex agents per cluster, coordinator-of-specialists shape (Cloudflare-style). Produces impact-bucketed reports under `audit/<focus>/<date-run-id>/` plus a stakeholder report — a Claude Artifact when Claude Code drives, a standalone `report.html` otherwise. Use when finishing a vibecoded project that needs cleanup passes before shipping, or any time the user wants a whole-codebase scan rather than a diff review. Trigger phrases include "/harden security", "/harden bugs", "/harden quality", "audit this codebase for X", "whole repo review", "bug hunt", "security pass", "maintainability audit", "scan this repo". Auto-fire ONLY on explicit audit verbs (audit / scan / whole repo review / bug hunt / security pass / maintainability audit), NOT on generic "shipping prep" or "implementation help" language. If the user invokes bare `/harden` or "harden this app" without specifying focus, ask which focus they want (security / bugs / quality / all three sequentially) before proceeding. NOT for diff-only review (use /code-review).
+description: Whole-codebase audit skill with three focuses (security / bugs / quality) and five effort levels (low / medium / high / max / ultra). Map-reduce protocol with parallel Claude + Codex agents per cluster, coordinator-of-specialists shape (Cloudflare-style). Once scope is confirmed the run homes itself into a task-named git worktree (`harden-<focus>`), so nothing is written into the canonical clone's checkout. Produces impact-bucketed reports under `audit/<focus>/<date-run-id>/` plus a stakeholder report — a Claude Artifact when Claude Code drives, a standalone `report.html` otherwise. Use when finishing a vibecoded project that needs cleanup passes before shipping, or any time the user wants a whole-codebase scan rather than a diff review. Trigger phrases include "/harden security", "/harden bugs", "/harden quality", "audit this codebase for X", "whole repo review", "bug hunt", "security pass", "maintainability audit", "scan this repo". Auto-fire ONLY on explicit audit verbs (audit / scan / whole repo review / bug hunt / security pass / maintainability audit), NOT on generic "shipping prep" or "implementation help" language. If the user invokes bare `/harden` or "harden this app" without specifying focus, ask which focus they want (security / bugs / quality / all three sequentially) before proceeding. NOT for diff-only review (use /code-review).
 ---
 
 # Harden
@@ -43,12 +43,26 @@ Before any scanning, briefly confirm with the user (use `AskUserQuestion` for cl
 
 - What is in scope? Whole repo, a specific package, or a subset?
 - Anything to exclude (third-party, generated code, vendor dirs)?
+- **Which snapshot?** Default: origin's default branch as it is now — what the run's worktree is cut from (Phase 0.5). Name a branch, or say "my local HEAD", if the audit must cover work that is not on it yet.
 - Known concerns to flag early?
 - What is the project type (web app, CLI, library, backend service)?
 - **Top-tier Claude model** (ask only when the effort uses one: the Phase 3 coordinator at `high`, Phases 1–2 at `max`/`ultra`): **Opus 5.5** (`model: 'opus'`, recommended default) or **Fable 5.1** (`model: 'fable'`, opt-in: slower and more expensive). Record it as `claude_model` in the run's `raw/` notes; every slot the Effort table labels "Fable" runs on that choice.
 - **Where may the stakeholder report live?** Decide the `report_mode` ONCE here: **Artifact** (the default when the driver is Claude Code, the `Artifact` tool is present, and the report may be published to claude.ai as a default-private page) or **file** (`report.html` next to `report.md`: Codex or any other driver, no Artifact tool, or the report must stay on this machine). A security audit is a vulnerability inventory — if the user hesitates, choose file.
 
-**Unattended fallback** (CI, scheduled runs, AFK mode, or any non-interactive context): if no answer arrives within a reasonable wait, default to Opus 5.5 for the top-tier slot, the whole repo minus generated/vendor/`node_modules`/`dist`/`build` directories, and to **file** mode (never publish findings nobody approved). State the assumptions explicitly in the report's Methodology section so the user knows what was scanned.
+**Unattended fallback** (CI, scheduled runs, AFK mode, or any non-interactive context): if no answer arrives within a reasonable wait, default to Opus 5.5 for the top-tier slot, the whole repo minus generated/vendor/`node_modules`/`dist`/`build` directories at origin's default branch, and to **file** mode (never publish findings nobody approved). State the assumptions explicitly in the report's Methodology section so the user knows what was scanned.
+
+### Phase 0.5: Workspace homing
+
+A run writes dozens of files under `audit/` and keeps agents reading the tree for an hour or more. In the canonical clone that lands files in the checkout every other agent and human shares, and a branch switch there changes the code mid-audit. So once Phase 0 is answered (or its unattended fallback has fired), and BEFORE anything is written, home the run into its own git worktree.
+
+1. **Slug**: `harden-<focus>`, plus the package when the scope is a single package (`harden-security-sdk`). It names the work; numeric suffixes are banned. A worktree with that slug already existing means an earlier run is still open: show it (`agent-worktree list`) and ask whether to land or discard it first. Unattended: stop and report it rather than audit a stale tree.
+2. **Skip-or-create**:
+   - Already inside a worktree (`git rev-parse --git-dir` ≠ `--git-common-dir`)? Adopt it: take the slug from its path, and the audit covers that worktree's HEAD.
+   - Not a git repository? Skip homing, say so, and proceed in place.
+   - Otherwise call `EnterWorktree` with `name: <slug>` — this skill instruction is the standing authorization the tool requires. On a Codex driver: `agent-worktree new <slug> --no-start`, then work from the path it prints.
+3. **Pin what is audited.** The worktree is cut from origin's default branch (the native `fresh` base), and that commit is what the report describes: record `git rev-parse HEAD` in the run's `raw/` notes and in the report header. Unpushed commits and uncommitted changes in the canonical clone are NOT in it. If Phase 0 named another snapshot, cut the worktree from that ref instead (`git worktree add -b worktree-<slug> .claude/worktrees/<slug> <ref>`, then `EnterWorktree` with `path:`), and when uncommitted changes exist that the audit will not see, say so before scanning.
+4. **Set up + register**: `bun install` if a `package.json` exists (agents resolve imports and read dependency sources), then `agent-worktree register <slug> --plan audit/<focus>/<run-id> --status "phase 1: mapping"`. Keep that one-line status current at each phase; if `agent-worktree` is not on PATH, note it and continue.
+5. **Everything runs there.** Every subagent and every `/codex` call takes the worktree as its cwd (`run-codex.sh <prompt-file> <worktree path> …`); from here on nothing reads or writes the canonical clone.
 
 ### Phase 1: Repo map (with monorepo hierarchical option)
 
@@ -163,6 +177,7 @@ Two deliverables, for every focus: the engineering `report.md` (always, on disk)
 ```markdown
 # Harden Report: <focus>
 **Repo:** <path/name>
+**Commit:** <sha the worktree was cut from>
 **Date:** YYYY-MM-DD
 **Effort:** <level>
 **Run ID:** <id>
@@ -282,6 +297,14 @@ The page is a **standalone single-file HTML** (no external CSS, no JavaScript de
 **Reporting back to the user at end-of-task**: give the Artifact URL (Artifact mode) or the absolute path to `report.html` (file mode) so they can open it from the terminal. The stakeholder report is the primary artifact; the markdown is the engineering-facing companion.
 
 **Remote viewing (headless boxes, file mode only)**: if `BLUEPRINT_VIEW_CMD` is set, additionally run `$BLUEPRINT_VIEW_CMD <absolute path to audit/<focus>/<run-id>>` and print the returned URL + `/report.html` on its own standalone line — full contract (stdout validation, failure notice, `--down`) is defined once in the blueprint skill's "Remote viewing" section; same rules apply here. **Teardown discipline is stricter than blueprint's**: audit reports are a vulnerability inventory, so serve only while the user is actually reading — run `$BLUEPRINT_VIEW_CMD --down <same dir>` as soon as the user acknowledges the report (their next instruction counts), or at session end, whichever comes first, and confirm the teardown in chat. Note the mount covers the repo's whole `audit/` tree (all runs), mirroring blueprint's whole-tree behavior.
+
+**Leaving the worktree.** The report is the only copy until it lands, so the run ends by securing it, not by cleaning up:
+
+1. Commit the run directory on the worktree branch — one commit, `docs(audit): <focus> <date>`, nothing else in it. If the repo gitignores `audit/` there is nothing to commit and the report lives only in the worktree: say so.
+2. Do not push or open a PR on your own. A pushed `security` report is a published vulnerability inventory; where it goes is the user's call.
+3. Set the manifest status (`agent-worktree status <slug> "report ready: awaiting your call"`) and offer the three ways out: **land it** (a PR from the branch — once it merges, run `agent-worktree done <slug> --merged`, which removes the worktree and its branches), **keep it** while the fixes are planned, or **discard it** (`agent-worktree done <slug> --force`).
+
+Never remove the worktree unprompted while its report is unmerged.
 
 ## Per-focus prompts
 
@@ -540,7 +563,7 @@ audit/<focus>/<YYYY-MM-DD>-<run-id>/
 └── report.html                       # Phase 5 stakeholder report source (every focus; the published page in file mode)
 ```
 
-Multiple runs on the same codebase get separate dated directories; they do not overwrite each other. Compare runs by reading multiple `report.md` files side by side.
+The tree lives inside the run's worktree (Phase 0.5) until the user lands it. Multiple runs on the same codebase get separate dated directories; they do not overwrite each other. Compare runs by reading multiple `report.md` files side by side.
 
 **The stakeholder report is the primary artifact for every focus.** It gets opened by non-engineers and engineers alike to triage and prioritize; the markdown is the engineering-detail companion. Its ELI5 framing follows the focus (attacker / user / future change — see Phase 5), and its delivery mode follows the driver and the Phase 0 privacy answer: a Claude Artifact on Claude Code, `report.html` everywhere else.
 
