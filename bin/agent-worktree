@@ -62,7 +62,11 @@ lock() {
   done
   echo "$$ $(hostname)" > "$LOCK_DIR/owner"
   LOCKED=1
-  trap 'unlock' EXIT INT TERM
+  # A signal must end the run: a handler that only unlocked would let the
+  # interrupted command sequence carry on without the lock.
+  trap 'unlock' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 }
 
 unlock() {
@@ -228,17 +232,33 @@ verify_layout() {
   [ "$wt_common" = "$WT_ROOT/.git" ] || die "refusing: $path does not belong to $WT_ROOT"
 }
 
-# landed <root> <commit> <trunk> [<verified-head>] — true when nothing on
-# <commit> is missing from <trunk>: it is an ancestor of trunk (or of a head
-# already proven landed), or — after a squash merge, where ancestry is gone —
-# merging it into trunk would change nothing. A conflicting merge counts as not
+# landed <root> <commit> <trunk> [<verified-head>] — true when <commit> is in
+# trunk's history, in the history of a head already proven landed (a lower
+# layer of the same stack: its commits ARE that head's), or — after a squash
+# merge, where ancestry is gone — when merging it into trunk changes nothing.
+# Fails closed: a conflict, an unrelated history or git < 2.38 all read as not
 # landed, so trunk rewriting the same lines later errs towards keeping.
 landed() {
   local root="$1" c="$2" trunk="$3" head="${4:-}" tree
   git -C "$root" merge-base --is-ancestor "$c" "$trunk" 2>/dev/null && return 0
   if [ -n "$head" ] && git -C "$root" merge-base --is-ancestor "$c" "$head" 2>/dev/null; then return 0; fi
+  # A custom merge driver (merge=ours and friends) can settle a real conflict
+  # in trunk's favour, which would read as "changes nothing".
+  [ -z "$(git -C "$root" config --get-regexp '^merge\..*\.driver$' 2>/dev/null)" ] || return 1
   tree="$(git -C "$root" merge-tree --write-tree "$trunk" "$c" 2>/dev/null | head -n 1)" || return 1
   [ -n "$tree" ] && [ "$tree" = "$(git -C "$root" rev-parse "$trunk^{tree}")" ]
+}
+
+# submodules_pushed <worktree> <newline-separated submodule paths> — true when
+# no ref in any of them reaches a commit its own remotes lack. Removing a
+# worktree deletes its submodule repositories outright, so a clean superproject
+# status says nothing about commits made inside one.
+submodules_pushed() {
+  local sm out
+  while IFS= read -r sm; do
+    out="$(git -C "$1/$sm" rev-list --all --not --remotes -n 1 2>/dev/null)" || return 1
+    [ -z "$out" ] || return 1
+  done <<< "$2"
 }
 
 # --- subcommands ---------------------------------------------------------------
@@ -425,16 +445,19 @@ cmd_done() {
   [ "$merged" = 0 ] && [ -n "$trunk_name" ] && die "--trunk only applies to --merged"
 
   # The merge proof needs origin's current trunk, and a fetch is too slow to
-  # run under the manifest lock (waiters give up after ~10s).
+  # run under the manifest lock (waiters give up after ~10s). A failed fetch
+  # ends the run: a stale trunk could vouch for a merge origin no longer has.
+  local fetched_root=""
   if [ "$merged" = 1 ]; then
     resolve_row "$arg"
     if [ -d "$RESOLVED_PATH" ]; then
       verify_layout "$RESOLVED_PATH" "$RESOLVED_SLUG"
-      git -C "$WT_ROOT" remote get-url origin >/dev/null 2>&1 \
+      fetched_root="$WT_ROOT"
+      git -C "$fetched_root" remote get-url origin >/dev/null 2>&1 \
         || die "--merged needs an 'origin' remote to prove the merge against"
-      GIT_TERMINAL_PROMPT=0 git -C "$WT_ROOT" fetch --quiet --prune origin 2>/dev/null \
-        || echo "warn: fetch failed; checking against the last-known origin state" >&2
-      git -C "$WT_ROOT" remote set-head origin --auto >/dev/null 2>&1 || true
+      GIT_TERMINAL_PROMPT=0 git -C "$fetched_root" fetch --quiet --prune origin \
+        || die "can't fetch origin — the merge can't be proven against a stale trunk. Nothing was removed"
+      git -C "$fetched_root" remote set-head origin --auto >/dev/null 2>&1 || true
     fi
   fi
 
@@ -445,7 +468,7 @@ cmd_done() {
   # gone" branch below drops its row instead of dying "unknown workspace".
   lock; ensure_manifest
   local slug path root live_branch expected_branch
-  local trunk="" head="" mb b tip st deleted=""
+  local trunk="" trunk_ref trunk_short="" head="" mb b tip st subs doomed deleted=""
   resolve_row "$arg"
   prune_dead_rows
   slug="$RESOLVED_SLUG"
@@ -467,51 +490,71 @@ cmd_done() {
     cd "$root"   # the caller's cwd may be the worktree about to disappear
 
     if [ "$merged" = 1 ]; then
-      # A stack leaves the worktree on its top branch, so ownership here is the
+      # A stack leaves the worktree on its top branch, so the gate here is the
       # merge proof, not the branch name.
+      [ "$root" = "$fetched_root" ] || die "refusing: the row for '$arg' changed while fetching — rerun"
       [ -n "$live_branch" ] || die "refusing: $path is on a detached HEAD — --merged needs a branch to prove merged"
       if [ -n "$trunk_name" ]; then
-        trunk="refs/remotes/origin/$trunk_name"
+        trunk_ref="refs/remotes/origin/$trunk_name"
       else
-        trunk="$(git -C "$root" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
+        trunk_ref="$(git -C "$root" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
       fi
-      { [ -n "$trunk" ] && git -C "$root" rev-parse --verify --quiet "$trunk^{commit}" >/dev/null; } \
+      # An exact branch only: `--trunk HEAD` or a revision like `main~0` would
+      # slip past the name comparisons that keep trunk out of the delete list.
+      { [ -n "$trunk_ref" ] && [ "$trunk_ref" != refs/remotes/origin/HEAD ] \
+        && git -C "$root" show-ref --verify --quiet "$trunk_ref"; } \
         || die "can't resolve the trunk on origin — pass --trunk <branch>"
-      [ "$live_branch" != "${trunk#refs/remotes/origin/}" ] || die "refusing: $path is on the trunk branch itself"
+      trunk_short="${trunk_ref#refs/remotes/origin/}"
+      trunk="$(git -C "$root" rev-parse "$trunk_ref")"   # pinned: a concurrent fetch must not move the proof's target
+      [ "$live_branch" != "$trunk_short" ] || die "refusing: $path is on the trunk branch itself"
       head="$(git -C "$path" rev-parse HEAD)"
       landed "$root" "$head" "$trunk" \
-        || die "refusing: $live_branch carries changes that are not on ${trunk#refs/remotes/} — not merged yet, or trunk has since rewritten the same lines. Nothing was removed"
-      st="$(git -C "$path" status --porcelain)" || die "refusing: can't read the status of $path"
-      [ -z "$st" ] || die "refusing: $path has uncommitted or untracked files — commit or delete them and rerun (--merged never discards work)"
+        || die "refusing: $live_branch carries changes that are not on origin/$trunk_short — not merged yet, trunk has since rewritten the same lines, or the repo configures a custom merge driver (which voids the squash proof). Nothing was removed"
 
-      # The stack: every local branch between the fork point and HEAD. Branches
-      # at or behind the fork point sit on trunk's side and are someone else's.
+      # The stack is every local branch between the fork point and HEAD: their
+      # commits are HEAD's own history, whatever they are named. Branches at or
+      # behind the fork point sit on trunk's side and belong to someone else.
+      # Tips are pinned so a branch that moves before its delete is kept.
       mb="$(git -C "$root" merge-base "$head" "$trunk")"
-      local doomed="$live_branch"
-      while IFS= read -r b; do
+      doomed="$live_branch $head"
+      while read -r b tip; do
         [ "$b" = "$live_branch" ] && continue
-        [ "$b" = "${trunk#refs/remotes/origin/}" ] && continue
-        git -C "$root" merge-base --is-ancestor "$b" "$mb" && continue
-        doomed="$doomed"$'\n'"$b"
-      done < <(git -C "$root" for-each-ref --format='%(refname:short)' --merged "$head" refs/heads)
-      if [ "$live_branch" != "$expected_branch" ] && ! printf '%s\n' "$doomed" | grep -qxF "$expected_branch" \
-        && git -C "$root" show-ref --verify --quiet "refs/heads/$expected_branch"; then
-        if landed "$root" "refs/heads/$expected_branch" "$trunk" "$head"; then
-          doomed="$doomed"$'\n'"$expected_branch"
+        [ "$b" = "$trunk_short" ] && continue
+        git -C "$root" merge-base --is-ancestor "$tip" "$mb" && continue
+        doomed="$doomed"$'\n'"$b $tip"
+      done < <(git -C "$root" for-each-ref --format='%(refname:short) %(objectname)' --merged "$head" refs/heads)
+      if [ "$live_branch" != "$expected_branch" ] && ! printf '%s\n' "$doomed" | cut -d' ' -f1 | grep -qxF "$expected_branch" \
+        && tip="$(git -C "$root" rev-parse --verify --quiet "refs/heads/$expected_branch")"; then
+        if landed "$root" "$tip" "$trunk" "$head"; then
+          doomed="$doomed"$'\n'"$expected_branch $tip"
         else
-          echo "branch kept (not on ${trunk#refs/remotes/}): $expected_branch"
+          echo "branch kept (not on origin/$trunk_short): $expected_branch"
         fi
       fi
 
-      # Clean by the check above; --force only gets past git's blanket refusal
-      # of worktrees that hold submodules.
-      git -C "$root" worktree remove "$path" 2>/dev/null || git -C "$root" worktree remove --force "$path" \
-        || die "could not remove $path (locked?) — nothing else was touched"
+      # Checked last, right before the removal it guards. Flags are explicit
+      # because status.showUntrackedFiles / diff.ignoreSubmodules can hide work.
+      st="$(git -C "$path" status --porcelain --untracked-files=all --ignore-submodules=none)" \
+        || die "refusing: can't read the status of $path"
+      [ -z "$st" ] || die "refusing: $path has uncommitted or untracked files — commit or delete them and rerun (--merged never discards work)"
+      subs="$(git -C "$path" submodule foreach --quiet --recursive 'printf "%s\n" "$displaypath"')" \
+        || die "refusing: can't enumerate the submodules of $path"
+      if [ -n "$subs" ]; then
+        submodules_pushed "$path" "$subs" \
+          || die "refusing: a submodule in $path holds commits its remote lacks — push them (or fetch inside it) and rerun"
+        # git refuses any worktree holding submodules unless forced; the two
+        # checks above are what make forcing this one safe.
+        git -C "$root" worktree remove --force "$path" || die "could not remove $path — nothing else was touched"
+      else
+        git -C "$root" worktree remove "$path" \
+          || die "git would not remove $path (changed since the check, or locked) — nothing else was touched"
+      fi
       echo "removed worktree: $path"
-      while IFS= read -r b; do
-        tip="$(git -C "$root" rev-parse --short "refs/heads/$b")"
-        if git -C "$root" branch -D "$b" >/dev/null 2>&1; then
-          echo "deleted branch: $b (was $tip)"
+      while read -r b tip; do
+        if [ "$(git -C "$root" rev-parse --verify --quiet "refs/heads/$b")" != "$tip" ]; then
+          echo "branch kept (moved since it was checked): $b"
+        elif git -C "$root" branch -D "$b" >/dev/null 2>&1; then
+          echo "deleted branch: $b (was ${tip:0:9})"
           deleted="${deleted:+$deleted$'\n'}$b"
         else
           echo "branch kept (checked out in another worktree?): $b"
@@ -551,7 +594,7 @@ cmd_done() {
     tip="$(git -C "$root" rev-parse --verify --quiet "refs/remotes/origin/$b" || true)"
     [ -n "$tip" ] || continue
     if ! landed "$root" "$tip" "$trunk" "$head"; then
-      echo "remote branch kept (has commits not on ${trunk#refs/remotes/}): origin/$b"
+      echo "remote branch kept (has commits not on origin/$trunk_short): origin/$b"
     elif GIT_TERMINAL_PROMPT=0 git -C "$root" push --quiet --force-with-lease="refs/heads/$b:$tip" origin ":refs/heads/$b" 2>/dev/null; then
       echo "deleted remote branch: origin/$b"
     else

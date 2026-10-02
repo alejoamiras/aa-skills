@@ -12,7 +12,8 @@ REPO2="$S/otherrepo"
 FAIL=0
 
 t() { local label="$1"; shift; if "$@" >/dev/null 2>&1; then echo "ok    $label"; else echo "FAIL  $label"; FAIL=1; fi; }
-tn() { local label="$1"; shift; if "$@" >/dev/null 2>&1; then echo "FAIL  $label (expected failure)"; FAIL=1; else echo "ok    $label"; fi; }
+# SMOKE_VERBOSE=1 prints why each expected failure failed: a refusal for the wrong reason still exits non-zero.
+tn() { local label="$1" out; shift; if out="$("$@" 2>&1)"; then echo "FAIL  $label (expected failure)"; FAIL=1; else echo "ok    $label"; [ -z "${SMOKE_VERBOSE:-}" ] || echo "        ${out##*$'\n'}"; fi; }
 
 mkrepo() { # mkrepo <dir>
   mkdir -p "$1" && cd "$1"
@@ -180,6 +181,10 @@ tn "merged: --force is rejected" "$AW" done solo --merged --force
 echo "wip" > "$(wt solo)/wip.txt"
 tn "merged: untracked work refused" "$AW" done solo --merged
 rm "$(wt solo)/wip.txt"
+tn "merged: --trunk must be an exact branch" "$AW" done solo --merged --trunk HEAD
+git -C "$MR" config merge.ours.driver true   # could settle a conflict in trunk's favour
+tn "merged: a custom merge driver voids the squash proof" "$AW" done solo --merged
+git -C "$MR" config --unset merge.ours.driver
 t "merged: squash-merged worktree torn down" env -C "$(wt solo)" "$AW" done solo --merged
 t "merged: worktree gone" test ! -d "$(wt solo)"
 tn "merged: squashed branch deleted" has_branch worktree-solo
@@ -208,6 +213,26 @@ t "stack: trunk survives" has_branch main
 tn "stack: merged remote branch deleted" on_origin stk-close-out
 t "stack: remote branch with a foreign commit kept" on_origin stk-arc2
 t "stack: kept remote is reported" grep -q "remote branch kept.*origin/stk-arc2" "$S/stk.out"
+
+# A worktree's submodule repositories die with it: unpushed commits inside one
+# must block the teardown even though the superproject is clean and merged.
+FILE_OK=(-c protocol.file.allow=always)
+git init -q --bare -b main "$S/sub.git"
+git clone -q "$S/sub.git" "$S/subsrc" 2>/dev/null
+echo lib > "$S/subsrc/lib.txt" && git -C "$S/subsrc" add lib.txt \
+  && "${GC[@]}" -C "$S/subsrc" commit -qm lib && git -C "$S/subsrc" push -q origin HEAD:main
+git -C "$MR" "${FILE_OK[@]}" submodule --quiet add "$S/sub.git" vendor >/dev/null 2>&1
+"${GC[@]}" -C "$MR" commit -qm "add submodule" && git -C "$MR" push -q origin main
+env -C "$MR" "$AW" new subm --no-start >/dev/null 2>&1
+git -C "$(wt subm)" "${FILE_OK[@]}" submodule --quiet update --init >/dev/null 2>&1
+git -C "$(wt subm)/vendor" checkout -q -b local-only
+"${GC[@]}" -C "$(wt subm)/vendor" commit -q --allow-empty -m "never pushed"
+git -C "$(wt subm)/vendor" checkout -q --detach HEAD~1   # back on the recorded gitlink: superproject is clean
+tn "submodule: unpushed commits inside it refuse the teardown" "$AW" done subm --merged
+t "submodule: refusal removed nothing" test -d "$(wt subm)/vendor"
+git -C "$(wt subm)/vendor" push -q origin local-only
+t "submodule: torn down once its commits are pushed" "$AW" done subm --merged
+t "submodule: worktree gone" test ! -d "$(wt subm)"
 
 # --- prune on list ---
 env -C "$REPO" "$AW" new gone-task --no-start >/dev/null 2>&1
