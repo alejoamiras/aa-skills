@@ -158,6 +158,57 @@ echo "wip" > "$REPO/.claude/worktrees/dirty-task/wip.txt"
 tn "done: dirty refused without --force" "$AW" done dirty-task
 t "done: --force removes dirty" "$AW" done dirty-task --force
 
+# --- done --merged: squash-aware teardown, proven against origin's trunk ---
+GC=(git -c commit.gpgsign=false -c user.email=t@t -c user.name=t)
+MR="$S/mergerepo"
+mkrepo "$MR"
+git init -q --bare -b main "$S/origin.git"
+git -C "$MR" remote add origin "$S/origin.git" && git -C "$MR" push -q -u origin main
+wt() { echo "$MR/.claude/worktrees/$1"; }
+work() { echo "$2" > "$(wt "$1")/$2" && git -C "$(wt "$1")" add "$2" && "${GC[@]}" -C "$(wt "$1")" commit -qm "$2"; }   # work <slug> <file>
+squash() { git -C "$MR" merge -q --squash "$1" >/dev/null 2>&1 && "${GC[@]}" -C "$MR" commit -qm "squash $1" && git -C "$MR" push -q origin main; }
+has_branch() { git -C "$MR" show-ref --verify --quiet "refs/heads/$1"; }
+on_origin() { git -C "$S/origin.git" show-ref --verify --quiet "refs/heads/$1"; }
+
+env -C "$MR" "$AW" new solo --no-start >/dev/null 2>&1
+work solo solo.txt && git -C "$(wt solo)" push -q origin worktree-solo
+tn "merged: refused before the PR lands" "$AW" done solo --merged
+t "merged: refusal removed nothing" test -d "$(wt solo)"
+squash worktree-solo
+echo "transcript" > "$(wt solo)/.env"   # gitignored: disposable by design
+tn "merged: --force is rejected" "$AW" done solo --merged --force
+echo "wip" > "$(wt solo)/wip.txt"
+tn "merged: untracked work refused" "$AW" done solo --merged
+rm "$(wt solo)/wip.txt"
+t "merged: squash-merged worktree torn down" env -C "$(wt solo)" "$AW" done solo --merged
+t "merged: worktree gone" test ! -d "$(wt solo)"
+tn "merged: squashed branch deleted" has_branch worktree-solo
+tn "merged: remote branch deleted" on_origin worktree-solo
+t "merged: row removed" bash -c "! grep -q '^| solo |' \"$AGENTS_DIR/workspaces.md\""
+
+# A stack ends on its top branch; a bystander at the fork point must survive,
+# and so must a remote branch someone else pushed to.
+env -C "$MR" "$AW" new stk --no-start >/dev/null 2>&1
+git -C "$MR" branch -q --no-track bystander origin/main
+work stk arc1.txt
+git -C "$(wt stk)" checkout -q -b stk-arc2 && work stk arc2.txt
+git -C "$(wt stk)" checkout -q -b stk-close-out && work stk close.txt
+git -C "$(wt stk)" push -q origin worktree-stk stk-arc2 stk-close-out
+FOREIGN="$("${GC[@]}" -C "$S/origin.git" commit-tree "$(git -C "$S/origin.git" hash-object -w -t tree /dev/null)" -p refs/heads/stk-arc2 -m foreign)"
+git -C "$S/origin.git" update-ref refs/heads/stk-arc2 "$FOREIGN"
+squash stk-close-out
+"$AW" done stk --merged > "$S/stk.out" 2>&1
+t "stack: exit 0" test $? -eq 0
+t "stack: worktree gone" test ! -d "$(wt stk)"
+tn "stack: adopted layer deleted" has_branch worktree-stk
+tn "stack: middle arc deleted" has_branch stk-arc2
+tn "stack: top layer deleted" has_branch stk-close-out
+t "stack: bystander at the fork point survives" has_branch bystander
+t "stack: trunk survives" has_branch main
+tn "stack: merged remote branch deleted" on_origin stk-close-out
+t "stack: remote branch with a foreign commit kept" on_origin stk-arc2
+t "stack: kept remote is reported" grep -q "remote branch kept.*origin/stk-arc2" "$S/stk.out"
+
 # --- prune on list ---
 env -C "$REPO" "$AW" new gone-task --no-start >/dev/null 2>&1
 rm -rf "$REPO/.claude/worktrees/gone-task"
