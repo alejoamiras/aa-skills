@@ -437,10 +437,10 @@ cmd_done() {
   # The merge proof needs origin's current trunk, and a fetch is too slow to
   # run under the manifest lock (waiters give up after ~10s). A failed fetch
   # ends the run: a stale trunk could vouch for a merge origin no longer has.
-  # Only trunk's own tracking ref is fetched, by exact name: a broad
-  # `fetch --prune` obeys the remote's configured refspecs, and one mapping
-  # into refs/heads would delete local branches before any proof ran. The exact
-  # name also keeps `--trunk HEAD` or `main~0` from slipping past the name
+  # Only trunk's own tracking ref is written (`--refmap=` switches off the
+  # remote's configured refspecs): one mapping into refs/heads would let a
+  # fetch move or prune local branches before any proof ran. The exact name
+  # also keeps `--trunk HEAD` or `main~0` from slipping past the name
   # comparisons that keep trunk out of the delete list.
   local fetched_root="" trunk_ref=""
   if [ "$merged" = 1 ]; then
@@ -457,7 +457,7 @@ cmd_done() {
         trunk_ref="$(git -C "$fetched_root" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
       fi
       { [ -n "$trunk_ref" ] && [ "$trunk_ref" != refs/remotes/origin/HEAD ] \
-        && GIT_TERMINAL_PROMPT=0 git -C "$fetched_root" fetch --quiet origin \
+        && GIT_TERMINAL_PROMPT=0 git -C "$fetched_root" fetch --quiet --refmap= --no-prune --no-prune-tags origin \
              "+refs/heads/${trunk_ref#refs/remotes/origin/}:$trunk_ref" 2>/dev/null; } \
         || die "can't fetch the trunk branch from origin (offline, or pass --trunk <branch>) — the merge can't be proven against a stale trunk. Nothing was removed"
     fi

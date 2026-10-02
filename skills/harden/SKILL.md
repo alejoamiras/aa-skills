@@ -57,16 +57,15 @@ Before any scanning, briefly confirm with the user (use `AskUserQuestion` for cl
 A run writes dozens of files under `audit/` and keeps agents reading the tree for an hour or more. In the canonical clone that lands files in the checkout every other agent and human shares, and a branch switch there changes the code mid-audit. So once Phase 0 is answered (or its unattended fallback has fired), and BEFORE anything is written, home the run into its own git worktree.
 
 1. **Slug**: `harden-<focus>`, plus the package when the scope is a single package (`harden-security-sdk`). It names the work; numeric suffixes are banned. A worktree with that slug already existing means an earlier run is still open: show it (`agent-worktree list`) and ask whether to land or discard it first. Unattended: stop and report it rather than audit a stale tree.
-2. **Resolve the snapshot BEFORE creating anything**, from the Phase 0 answer, to one commit:
-   - Default — origin's default branch as it is now: nothing to resolve, the native `fresh` base is that commit.
-   - A named branch, or "my local HEAD": resolve it to a SHA now (`git rev-parse <ref>` in the canonical clone), so later movement there cannot change what is audited.
-   - Uncommitted changes in the canonical clone are in no snapshot. If any exist, say before scanning that the audit will not see them.
-3. **Skip-or-create**:
+2. **Skip-or-create**:
    - Already inside a worktree (`git rev-parse --git-dir` ≠ `--git-common-dir`)? The run is a **guest** there: that worktree belongs to another task. Audit its checkout as it stands — the Phase 0 snapshot question does not apply, and if `git status --porcelain` is not empty the report must say the tree was dirty — skip step 4's registration, and never dispose of the worktree (see Leaving the worktree).
    - Not a git repository? Skip homing, say so, and proceed in place.
-   - Default snapshot: call `EnterWorktree` with `name: <slug>` — this skill instruction is the standing authorization the tool requires. On a Codex driver: `agent-worktree new <slug> --no-start`, then work from the path it prints.
-   - Any other snapshot: `git worktree add -b worktree-<slug> .claude/worktrees/<slug> <sha>`, then `EnterWorktree` with `path:` (Codex driver: work from that path).
-   Record `git rev-parse HEAD` in the run's `raw/` notes and in the report header: that commit is what the report describes.
+   - Otherwise step 3.
+3. **Resolve the snapshot to one commit, then cut the worktree from exactly that commit.** One path for every case, so neither a failed fetch nor a `worktree.baseRef` setting can substitute a different base without anyone noticing:
+   - Default — origin's default branch as it is now: `git fetch -q origin <default-branch> && git rev-parse FETCH_HEAD`. A failed fetch is not "close enough": say so and ask, or stop when unattended.
+   - A named branch, or "my local HEAD": `git rev-parse <ref>` in the canonical clone, now, so later movement there cannot change what is audited.
+   - Uncommitted changes in the canonical clone are in no snapshot. If any exist, say before scanning that the audit will not see them.
+   - Create it: `git worktree add -b worktree-<slug> .claude/worktrees/<slug> <sha>`, then `EnterWorktree` with `path:` — this skill instruction is the standing authorization the tool requires (Codex driver: work from that path). Confirm `git rev-parse HEAD` equals the SHA, and record it in the run's `raw/` notes and the report header: that commit is what the report describes.
 4. **Set up + register**: `bun install` if a `package.json` exists (agents resolve imports and read dependency sources), then `agent-worktree register <slug> --plan audit/<focus>/<run-id> --status "phase 1: mapping"`. Keep that one-line status current at each phase; if `agent-worktree` is not on PATH, note it and continue.
 5. **Everything runs there.** Every subagent and every `/codex` call takes the worktree as its cwd (`run-codex.sh <prompt-file> <worktree path> …`); from here on nothing reads or writes the canonical clone.
 
@@ -306,7 +305,7 @@ The page is a **standalone single-file HTML** (no external CSS, no JavaScript de
 
 **Leaving the worktree.** The report is the only copy until it lands, so the run ends by securing it, not by cleaning up:
 
-1. Commit the run directory on the worktree branch — one commit, `docs(audit): <focus> <date>`, nothing else in it. **If the repo gitignores `audit/`** (`git check-ignore -q audit`), there is nothing to commit: the report exists only as files in the worktree, landing it is not on offer unless the user asks to force-add it, and removing the worktree deletes it. Say all three.
+1. Commit the run directory on the worktree branch — one commit, `docs(audit): <focus> <date>`, nothing else in it. **If the repo gitignores the report** (test a real file, since a pattern like `/audit/**` ignores the contents but not the directory: `git check-ignore -q audit/<focus>/<run-id>/report.md`), there is nothing to commit: the report exists only as files in the worktree, landing it is not on offer unless the user asks to force-add it, and removing the worktree deletes it. Say all three.
 2. Do not push or open a PR on your own. A pushed `security` report is a published vulnerability inventory; where it goes is the user's call.
 3. **In a worktree this run created**: set the manifest status (`agent-worktree status <slug> "report ready: awaiting your call"`) and offer the ways out — **land it** (a PR from the branch; once it merges, run `agent-worktree done <slug> --merged`, which removes the worktree and its branches), **keep it** while the fixes are planned, or **discard it** (`agent-worktree done <slug> --force`).
 4. **As a guest in another task's worktree** (Phase 0.5): none of those apply. The worktree is that task's to land or remove, and `done --force` here would destroy its uncommitted work. Leave the report where it is and say that it travels with that task's branch — or, if `audit/` is ignored, that it will be deleted when that worktree is torn down, so copy it out first if it must survive.
