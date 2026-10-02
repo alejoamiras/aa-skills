@@ -30,7 +30,8 @@
 set -euo pipefail
 
 AGENTS_DIR="${AGENTS_DIR:-$HOME/.agents}"
-case "$AGENTS_DIR" in /*) ;; *) AGENTS_DIR="$PWD/$AGENTS_DIR" ;; esac   # `done` changes directory mid-run
+# `done` changes directory and may delete the one a relative path runs through.
+case "$AGENTS_DIR" in /*) ;; *) mkdir -p "$AGENTS_DIR" && AGENTS_DIR="$(cd "$AGENTS_DIR" && pwd -P)" ;; esac
 MANIFEST="$AGENTS_DIR/workspaces.md"
 LOCK_DIR="$AGENTS_DIR/.workspaces.lock"
 LOCKED=0
@@ -515,7 +516,8 @@ cmd_done() {
         git -C "$root" merge-base --is-ancestor "$tip" "$mb" && continue
         doomed="$doomed"$'\n'"$b $tip"
       done < <(git -C "$root" for-each-ref --format='%(refname:short) %(objectname)' --merged "$head" refs/heads)
-      if [ "$live_branch" != "$expected_branch" ] && ! printf '%s\n' "$doomed" | cut -d' ' -f1 | grep -qxF "$expected_branch" \
+      if [ "$live_branch" != "$expected_branch" ] && [ "$expected_branch" != "$trunk_short" ] \
+        && ! printf '%s\n' "$doomed" | cut -d' ' -f1 | grep -qxF "$expected_branch" \
         && tip="$(git -C "$root" rev-parse --verify --quiet "refs/heads/$expected_branch")"; then
         if landed "$root" "$tip" "$trunk" "$head"; then
           doomed="$doomed"$'\n'"$expected_branch $tip"
