@@ -12,8 +12,10 @@
 #                if they do not. If codex-dir is omitted, a fresh dir is created.
 #   effort       Optional. Defaults to xhigh.
 #   model        Optional. Defaults to $CODEX_MODEL, else gpt-6-astra.
-#                (See run-codex.sh header; verified current 2026-09-04.
-#                Pass a 5th arg or $CODEX_MODEL to override.)
+#                (See run-codex.sh header. Pass a 5th arg or $CODEX_MODEL
+#                to override; a session started on another model — a
+#                blueprint or harden run's codex_model — must be resumed
+#                with that same slug.)
 #
 # The session is resumed in the CODEX_HOME recorded by run-codex.sh
 # (<codex-dir>/codex_home) — sessions live under the home that created them, so

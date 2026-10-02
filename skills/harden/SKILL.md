@@ -47,9 +47,10 @@ Before any scanning, briefly confirm with the user (use `AskUserQuestion` for cl
 - Known concerns to flag early?
 - What is the project type (web app, CLI, library, backend service)?
 - **Top-tier Claude model** (ask only when the effort uses one: the Phase 3 coordinator at `high`, Phases 1–2 at `max`/`ultra`): **Opus 5.5** (`model: 'opus'`, recommended default) or **Fable 5.1** (`model: 'fable'`, opt-in: slower and more expensive). Record it as `claude_model` in the run's `raw/` notes; every slot the Effort table labels "Fable" runs on that choice.
+- **Codex model** (always: every effort has Codex legs): **GPT-6.1 Sol** (`gpt-6.1-sol`, recommended default: near-Astra quality, much faster and cheaper, which adds up across a cluster fan-out) or **GPT-6 Astra** (`gpt-6-astra`, opt-in: the strongest reviewer, slower and more expensive). Record it as `codex_model` next to `claude_model`; every slot the Effort table labels "Codex" runs on it, passed as the fifth argument of `run-codex.sh` / `resume-codex.sh` (their own default is Astra).
 - **Where may the stakeholder report live?** Decide the `report_mode` ONCE here: **Artifact** (the default when the driver is Claude Code, the `Artifact` tool is present, and the report may be published to claude.ai as a default-private page) or **file** (`report.html` next to `report.md`: Codex or any other driver, no Artifact tool, or the report must stay on this machine). A security audit is a vulnerability inventory — if the user hesitates, choose file.
 
-**Unattended fallback** (CI, scheduled runs, AFK mode, or any non-interactive context): if no answer arrives within a reasonable wait, default to Opus 5.5 for the top-tier slot, the whole repo minus generated/vendor/`node_modules`/`dist`/`build` directories at origin's default branch, and to **file** mode (never publish findings nobody approved). State the assumptions explicitly in the report's Methodology section so the user knows what was scanned.
+**Unattended fallback** (CI, scheduled runs, AFK mode, or any non-interactive context): if no answer arrives within a reasonable wait, default to Opus 5.5 for the top-tier slot, GPT-6.1 Sol for the Codex legs (GPT-6 Astra when the Codex CLI is older than 0.159.1, Sol's floor), the whole repo minus generated/vendor/`node_modules`/`dist`/`build` directories at origin's default branch, and to **file** mode (never publish findings nobody approved). State the assumptions explicitly in the report's Methodology section so the user knows what was scanned.
 
 ### Phase 0.5: Workspace homing
 
@@ -90,7 +91,7 @@ This prevents one bad map from poisoning all downstream phases on large repos.
 
 Save to `audit/<focus>/<run-id>/raw/repo-map.md` (flat) or `audit/<focus>/<run-id>/raw/repo-map/<package>.md` (hierarchical, per package).
 
-Effort scales which model is used (Haiku at `low`, Sonnet at `medium`+, the Phase 0 top-tier model at `max`+) — see the Model note under Effort knob. The Codex legs run on GPT-6 Astra (the codex skill's default).
+Effort scales which model is used (Haiku at `low`, Sonnet at `medium`+, the Phase 0 top-tier model at `max`+) — see the Model note under Effort knob. The Codex legs run on the Phase 0 `codex_model`.
 
 ### Phase 2: Map (parallel agents per cluster)
 
@@ -489,7 +490,7 @@ DO NOT FLAG:
 
 The effort knob scales agent intelligence and depth, NOT phase composition. All phases run at every level (Codex is never skipped, even at `low`).
 
-**Model note — the top-tier slot (current 2026-09-28).** Where this ladder says **Fable** (Phase 1 map and Phase 2 cluster agents at `max`/`ultra`; the Phase 3 coordinator at `high`), run the model chosen at Phase 0 (`claude_model`): **Opus 5.5** (`Agent` tool: `model: 'opus'`; the default) or **Fable 5.1** (`model: 'fable'`; opt-in, slower and more expensive). Unattended runs use Opus 5.5, and a Fable run falls back to Opus 5.5 when Fable is unavailable. "Sonnet" and "Haiku" are the `sonnet` / `haiku` aliases, which always resolve to the newest of each (Sonnet 5 and Haiku 4.5 today), so they need no pin. The choice swaps only the concrete model; the map-reduce shape, per-cluster agent counts, and the cross-family Codex coordination (footnote ¹) are unchanged. The Codex legs run on **GPT-6 Astra** (the codex skill's default) at the effort the table states.
+**Model note — the top-tier slot and the Codex legs (current 2026-10-02).** Where this ladder says **Fable** (Phase 1 map and Phase 2 cluster agents at `max`/`ultra`; the Phase 3 coordinator at `high`), run the model chosen at Phase 0 (`claude_model`): **Opus 5.5** (`Agent` tool: `model: 'opus'`; the default) or **Fable 5.1** (`model: 'fable'`; opt-in, slower and more expensive). Unattended runs use Opus 5.5, and a Fable run falls back to Opus 5.5 when Fable is unavailable. "Sonnet" and "Haiku" are the `sonnet` / `haiku` aliases, which always resolve to the newest of each (Sonnet 5 and Haiku 4.5 today), so they need no pin. The choice swaps only the concrete model; the map-reduce shape, per-cluster agent counts, and the cross-family Codex coordination (footnote ¹) are unchanged. The Codex legs run on the Phase 0 `codex_model` — **GPT-6.1 Sol** (default) or **GPT-6 Astra** (opt-in) — at the effort the table states. Sol needs Codex CLI ≥ 0.159.1: on an older CLI run them on Astra and say so in the report's Methodology.
 
 | Effort | Phase 1 model | Phase 2 agents per cluster | Phase 2.5 cross-rebuttal | Phase 3 coordinator | Phase 4 verifier depth | Wall-clock (rough, 10 clusters) |
 |--------|---------------|----------------------------|--------------------------|---------------------|-------------------------|----------------------------------|

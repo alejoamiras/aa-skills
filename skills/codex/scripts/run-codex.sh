@@ -12,10 +12,12 @@
 #   model        Optional. Defaults to $CODEX_MODEL, else gpt-6-astra.
 #                (gpt-6-astra became the default 2026-09-04: OpenAI's
 #                flagship since 2026-09-03 (Codex CLI >= 0.153.1), runs on
-#                ChatGPT-account auth, verified end to end at xhigh. The
-#                GPT-5.6 family — gpt-5.6-sol / -terra / -luna — stays
-#                valid as cheaper overrides. Pass a 5th arg or set
-#                $CODEX_MODEL to override per call.)
+#                ChatGPT-account auth, verified end to end at xhigh.
+#                gpt-6.1-sol — near-Astra, faster and cheaper, Codex CLI
+#                >= 0.159.1 — is what blueprint and harden pass when the
+#                user picks it. The GPT-5.6 family — gpt-5.6-sol / -terra /
+#                -luna — stays valid as cheaper overrides. Pass a 5th arg
+#                or set $CODEX_MODEL to override per call.)
 #
 # Env: CODEX_ACCOUNT  Optional. A `codex-usage` roster account to run on, or
 #                     "best" to let it pick the one with headroom. The run then
@@ -57,6 +59,16 @@ MODEL="${5:-${CODEX_MODEL:-gpt-6-astra}}"
 DOC_MAX="${CODEX_PROJECT_DOC_MAX_BYTES:-131072}"
 MODEL_ARGS=()
 [[ -n "$MODEL" ]] && MODEL_ARGS=(-m "$MODEL")
+
+# An older CLI gets a 400 for this model that reads like an entitlement problem
+# ("not supported when using Codex with a ChatGPT account"); name the real cause.
+if [[ "$MODEL" == gpt-6.1-* ]]; then
+  CLI_VERSION=$(codex --version 2> /dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
+  if [[ -n "$CLI_VERSION" && "$(printf '%s\n' 0.159.1 "$CLI_VERSION" | sort -V | head -n 1)" != 0.159.1 ]]; then
+    echo "ERROR: $MODEL needs Codex CLI >= 0.159.1 (found $CLI_VERSION): run 'codex update', or pass gpt-6-astra" >&2
+    exit 2
+  fi
+fi
 
 # The override file may only name approve-for-me: a stray file must never be
 # able to widen a consult to danger-full-access.
