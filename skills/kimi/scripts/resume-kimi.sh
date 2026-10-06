@@ -87,10 +87,12 @@ N=1
 while [[ -e "$KIMI_DIR/response-$N.md" ]]; do
   N=$((N + 1))
 done
+# Reviewers and workers never touch the shared memory; the owner's AGENTS.md tells sessions to.
+MEMO_PREAMBLE="You are a subagent. Don't run memo."
 RESPONSE_FILE="$KIMI_DIR/response-$N.md"
 LOG_FILE="$KIMI_DIR/log-$N.txt"
 
-cp "$PROMPT_FILE" "$KIMI_DIR/followup-$N.md"
+{ echo "$MEMO_PREAMBLE"; echo; cat "$PROMPT_FILE"; } > "$KIMI_DIR/followup-$N.md"
 
 IS_GIT=""
 GIT_BEFORE=""
@@ -108,7 +110,7 @@ set +e
   KIMI_MODEL_THINKING_EFFORT="$EFFORT" kimi \
     --session "$SID" \
     "${MODEL_ARGS[@]}" \
-    --prompt="$(cat "$PROMPT_FILE")" \
+    --prompt="$(cat "$KIMI_DIR/followup-$N.md")" \
     > "$RESPONSE_FILE" 2> "$LOG_FILE"
 )
 EXIT=$?

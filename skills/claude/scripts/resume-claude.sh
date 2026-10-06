@@ -170,11 +170,13 @@ N=1
 while [[ -e "$CLAUDE_DIR/response-$N.md" ]]; do
   N=$((N + 1))
 done
+# Reviewers and workers never touch the shared memory; the owner's AGENTS.md tells sessions to.
+MEMO_PREAMBLE="You are a subagent. Don't run memo."
 RESPONSE_FILE="$CLAUDE_DIR/response-$N.md"
 LOG_FILE="$CLAUDE_DIR/log-$N.json"
 FOLLOWUP="$CLAUDE_DIR/followup-$N.md"
 
-cp "$PROMPT_FILE" "$FOLLOWUP"
+{ echo "$MEMO_PREAMBLE"; echo; cat "$PROMPT_FILE"; } > "$FOLLOWUP"
 
 echo "Resuming claude session $SID (model=$MODEL, effort=$EFFORT, cwd=$CWD, account=${ACCOUNT_KEY:-~/.claude})..." >&2
 echo "Output dir: $CLAUDE_DIR" >&2

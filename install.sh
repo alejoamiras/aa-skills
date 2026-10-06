@@ -137,6 +137,13 @@ fi
 # from the managed file keeps its last installed value until removed by hand.
 # Claude Code rewrites this file itself (/model, /config, "always allow"), so
 # run with sessions closed to avoid racing one of those writes.
+# Arrays are unions, not overlays: `*` alone would replace the machine's
+# permissions.allow and hook lists with the managed ones. A managed entry that
+# later changes leaves its old copy behind, like a dropped key.
+# shellcheck disable=SC2016 # a jq program, not shell
+MERGE_MANAGED='. as $o | $m[0] as $n | ($o * $n)
+  | if $n.permissions.allow then .permissions.allow = (($o.permissions.allow // []) as $a | $a + ($n.permissions.allow - $a)) else . end
+  | if $n.hooks then .hooks = reduce ($n.hooks | keys[]) as $k ($o.hooks // {}; .[$k] = ((.[$k] // []) as $a | $a + ($n.hooks[$k] - $a))) else . end'
 MANAGED="${REPO_DIR}/claude/settings.managed.json"
 SETTINGS="${CLAUDE_DIR}/settings.json"
 if [ ! -f "${MANAGED}" ]; then
@@ -153,7 +160,7 @@ else
       || { echo "error   ${f}: expected exactly one JSON object" >&2; exit 1; }
   done
   if [ -f "${SETTINGS}" ]; then
-    merged="$(jq --slurpfile m "${MANAGED}" '. * $m[0]' "${SETTINGS}")"
+    merged="$(jq --slurpfile m "${MANAGED}" "${MERGE_MANAGED}" "${SETTINGS}")"
     current="$(jq -S . "${SETTINGS}")"
   else
     merged="$(jq -n --slurpfile m "${MANAGED}" '$m[0]')"
@@ -179,4 +186,21 @@ fi
 git -C "${REPO_DIR}" config core.hooksPath hooks
 echo "hooks   core.hooksPath = hooks"
 
+# Shared memory (private submodule): memo/install.sh installs `memo` and prints
+# its status. It runs last and can never abort this script: a machine where it
+# fails (no bun 1.4+, no OpenSSH 8.1+) still gets everything above, and the
+# failure is the final word, with a non-zero exit.
+MEMO_FAILED=""
+if [ ! -x "${REPO_DIR}/memo/install.sh" ]; then
+  echo "skip    memo (private submodule not initialized)"
+elif "${REPO_DIR}/memo/install.sh"; then
+  echo "ok      memo"
+else
+  MEMO_FAILED=1
+fi
+
+if [ -n "${MEMO_FAILED}" ]; then
+  echo "FAILED  memo/install.sh: fix it and rerun; start no agent session here until \`memo status\` says ready" >&2
+  exit 1
+fi
 echo "done."

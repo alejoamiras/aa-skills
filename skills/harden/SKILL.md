@@ -68,6 +68,7 @@ A run writes dozens of files under `audit/` and keeps agents reading the tree fo
    - Create it: `git worktree add -b worktree-<slug> .claude/worktrees/<slug> <sha>`, then `EnterWorktree` with `path:` — this skill instruction is the standing authorization the tool requires (Codex driver: work from that path). Confirm `git rev-parse HEAD` equals the SHA, and record it in the run's `raw/` notes and the report header: that commit is what the report describes.
 4. **Set up + register**: `bun install` if a `package.json` exists (agents resolve imports and read dependency sources), then `agent-worktree register <slug> --plan audit/<focus>/<run-id> --status "phase 1: mapping"`. Keep that one-line status current at each phase; if `agent-worktree` is not on PATH, note it and continue.
 5. **Everything runs there.** Every subagent and every `/codex` call takes the worktree as its cwd (`run-codex.sh <prompt-file> <worktree path> …`); from here on nothing reads or writes the canonical clone.
+6. **Subagent preamble.** Every subagent, reviewer or worker prompt starts with the line `You are a subagent. Don't run memo.` The codex, claude and kimi spawn scripts prepend it themselves; an `Agent` tool prompt carries it by hand.
 
 ### Phase 1: Repo map (with monorepo hierarchical option)
 

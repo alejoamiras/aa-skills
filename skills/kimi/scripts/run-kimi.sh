@@ -57,10 +57,12 @@ fi
 
 KIMI_DIR=$(mktemp -d -t kimi-XXXXXXXX)
 RESPONSE_FILE="$KIMI_DIR/response.md"
+# Reviewers and workers never touch the shared memory; the owner's AGENTS.md tells sessions to.
+MEMO_PREAMBLE="You are a subagent. Don't run memo."
 LOG_FILE="$KIMI_DIR/log.txt"
 SESSION_ID_FILE="$KIMI_DIR/session_id"
 
-cp "$PROMPT_FILE" "$KIMI_DIR/prompt.md"
+{ echo "$MEMO_PREAMBLE"; echo; cat "$PROMPT_FILE"; } > "$KIMI_DIR/prompt.md"
 CWD=$(cd "$CWD" && pwd)
 printf '%s' "$CWD" > "$KIMI_DIR/cwd"
 
@@ -80,7 +82,7 @@ set +e
   cd "$CWD" &&
   KIMI_MODEL_THINKING_EFFORT="$EFFORT" kimi \
     "${MODEL_ARGS[@]}" \
-    --prompt="$(cat "$PROMPT_FILE")" \
+    --prompt="$(cat "$KIMI_DIR/prompt.md")" \
     > "$RESPONSE_FILE" 2> "$LOG_FILE"
 )
 EXIT=$?
