@@ -1,6 +1,6 @@
 ---
 name: blueprint
-description: Plan-creation protocol with FOUR tiers (lowest to highest ceremony) — `/blueprint light` (bounded feature, single codex audit) | `/blueprint mid` (contained feature, codex + fable dual audit; DEFAULT if unsure) | `/blueprint deep` (architectural / cross-cutting, three parallel plans main+codex+fable + double audit + contradiction-check) | `/blueprint mega-deep` (novel surface, planning agents spawn research subagents to map modules before drafting, plus split Round 2 audit). Every tier asks clarifying questions, runs a cheap codebase recon phase before planning (1–3 agents by default: a batched repo-wide reuse/dedup sweep whose capability list stays complete on every tier, plus subsystem mappers only where needed), keeps agent fan-out under explicit low-by-default Cost controls and runs `/code-review` ONLY when the user opts in at Phase 0 (off by default — the codex fix loop is the review), homes the session into a task-named git worktree before drafting (workspace homing via EnterWorktree + the ~/.agents/workspaces.md manifest), requires a validation gate on every implementation phase (real project commands + pass criteria), embeds a self-contained post-implementation protocol in every plan.md (an iterative codex fix loop with explicit no-over-engineering + comment-quality rules, preceded by `/code-review` only if opted in — run per arc on stacked plans before the next arc begins, plus a final cross-arc pass — then arc-stacked PR delivery via `gh stack`, PRs opened only after all loops converge, topped by a close-out that archives the plan so its merge completes it, after which the session tears down the worktree and its branches via `agent-worktree done --merged`), is driver-agnostic — runs from Claude Code or Codex, with the foreign reviewer being `/codex` or `/claude` respectively per its Harness capabilities table — and produces an ELI5 deliverable (a shareable Claude Artifact, with a standalone-HTML fallback) embedding `/goal` + `/loop` seed strings. Trigger phrases: "ultraplan", "ultrathink plan", "deep plan", "give me a plan", "blueprint this", "plan this carefully", "plan properly", "use the plan protocol", "full ceremony". Auto-fire (invoke without being asked) when the work involves cross-package BEHAVIORAL changes, infra / IaC with rollout or privilege impact, schema or protocol changes, UI-flow redesign, external-system integration, auth or permissions changes, billing logic, data migrations or backfills, concurrency or cache invalidation, or public API changes.
+description: Plan-creation protocol with FOUR tiers (lowest to highest ceremony) — `/blueprint light` (bounded feature, single codex audit) | `/blueprint mid` (contained feature, codex + fable dual audit; DEFAULT if unsure) | `/blueprint deep` (architectural / cross-cutting, three parallel plans main+codex+fable + double audit + contradiction-check) | `/blueprint mega-deep` (novel surface, planning agents spawn research subagents to map modules before drafting, plus split Round 2 audit). Every tier asks clarifying questions, runs a cheap codebase recon phase before planning (1–3 agents by default: a batched repo-wide reuse/dedup sweep whose capability list stays complete on every tier, plus subsystem mappers only where needed), keeps agent fan-out under explicit low-by-default Cost controls and runs `/code-review` ONLY when the user opts in at Phase 0 (off by default — the codex fix loop is the review), homes the session into a task-named git worktree before drafting (workspace homing via EnterWorktree + the ~/.agents/workspaces.md manifest), requires a validation gate on every implementation phase (real project commands + pass criteria), embeds a self-contained post-implementation protocol in every plan.md (an iterative codex fix loop with explicit no-over-engineering + comment-quality rules, preceded by `/code-review` only if opted in — run per arc on stacked plans before the next arc begins, plus a final cross-arc pass — then arc-stacked PR delivery via `gh stack`, PRs opened only after all loops converge, topped by a close-out that archives the plan so its merge completes it, after which the session tears down the worktree and its branches via `agent-worktree done --merged`), is driver-agnostic — runs from Claude Code or Codex, with the foreign reviewer being `/codex` or `/claude` respectively per its Harness capabilities table — and produces an ELI5 deliverable (a shareable Claude Artifact, with a standalone-HTML fallback) written 80% of the way to ASD-STE100, with diagrams where a real mechanism exists, embedding `/goal` + `/loop` seed strings. Trigger phrases: "ultraplan", "ultrathink plan", "deep plan", "give me a plan", "blueprint this", "plan this carefully", "plan properly", "use the plan protocol", "full ceremony". Auto-fire (invoke without being asked) when the work involves cross-package BEHAVIORAL changes, infra / IaC with rollout or privilege impact, schema or protocol changes, UI-flow redesign, external-system integration, auth or permissions changes, billing logic, data migrations or backfills, concurrency or cache invalidation, or public API changes.
 ---
 
 # Blueprint
@@ -319,6 +319,25 @@ Rules:
 - **A phase cannot be marked ✓ until its gate passes.** The gate definition in plan.md is THE meaning of "phase green" — the `/loop` and `/goal` templates reference it instead of guessing.
 - **Missing infrastructure is a phase, not a wish**: if the user asked for a layer the project lacks (no e2e harness, no CI), building it becomes an early plan phase, sequenced BEFORE the phases that depend on it.
 - New tests added by a phase belong INSIDE that phase's gate (test added → gate runs it), keeping tests inline with the change per the testing philosophy.
+- Phase steps and pass criteria follow the Plain-language standard below: they are procedures, and the implementing session must not be able to read a step two ways.
+
+---
+
+## Required: Plain-language standard (ALL tiers)
+
+Write human-facing prose **80% of the way to ASD-STE100** (Simplified Technical English, the controlled language of aerospace maintenance manuals). Name the spec and aim at it: models know it well, and the target sets the tone better than any paraphrase. The rules below are the checkable floor. The other 20% is room to break a rule when obeying it would make a sentence longer, vaguer or less exact. Exactness wins over compliance.
+
+**Applies to**: the ELI5 companion's prose, `plan.md` phase steps, Validation gate pass criteria, and Asks. **Does not apply to**: Architecture & Implementation, trade-offs and Assumptions reasoning (they need nuance and long "because" chains), code comments (the value-per-character rule governs those), and the pasteable seeds and commands.
+
+- **Length**: a step has at most 20 words, a descriptive sentence at most 25. A paragraph has at most 6 sentences and one topic.
+- **One thing per sentence**: one instruction per step, written in the imperative ("Add the check", not "The check should be added").
+- **Active voice, actor named**: "the worker rejects the request", not "the request is rejected".
+- **No noun stacks longer than 3 words**: "wallet session key rotation policy" becomes "the policy for rotating the wallet's session keys".
+- **Warnings before the step** they apply to, never after it.
+- **Dictionary discipline**: prefer STE's approved general words, the plainest common ones ("use", not "utilize"; "start", not "initiate"). Each word keeps one meaning, and each thing keeps one name for the whole document. Once "worker" means the Cloudflare Worker, it never means a background job, and the job is never also a "task". Project terms (technical names and technical verbs, which STE allows too) are fine. When only an unapproved word says it exactly, use that word.
+- **Terms box**: when the ELI5 uses more than two project terms, list each one with a one-line meaning. A term gets used only as the box defines it.
+
+Before publishing the ELI5, and before handing `plan.md` to an audit, reread every in-scope sentence against these rules.
 
 ---
 
@@ -391,9 +410,13 @@ Caution: sync/rebase rewrite arc-branch history. Fine while the agent owns every
 
 Either way, the CONTENTS are the same:
 
+All prose follows the **Plain-language standard** (80% of the way to ASD-STE100, see above).
+
 - **Title + one-paragraph summary** in plain language
 - **Why this tier was chosen** (Phase 0.5 rubric outcome, with the rubric scores)
 - **Who it is for and what excellent looks like** (the Outcome & Quality Bar, in plain language)
+- **Terms** (when more than two project terms appear): each with a one-line meaning
+- **Diagrams**: one to three inline SVGs, each next to the section it explains. Draw only a real mechanism: how a request or data moves through the change, the order phases and arcs depend on each other, or the system before and after. Label boxes with the same names the prose uses, and give each diagram a one-sentence caption that says what to notice. Never draw a decorative diagram. A plan with nothing to draw gets none. Artifact mode: load the `artifact-diagramming` skill first. File mode: hand-written inline SVG (no Mermaid, which needs a script).
 - **Phases**: ELI5 of each (what + why, no jargon) + its validation gate in one plain-language line ("proves itself by: unit tests for the new parser + lint")
 - **Human context**: simplified background needed to understand decisions
 - **Open questions**: with their human-context framing
@@ -429,6 +452,9 @@ UI/UX: simple, clean, uncluttered. Plain typography, generous whitespace, no fla
     .approval { background: #eef6ff; padding: 1rem 1.25rem; border-left: 3px solid #0366d6; margin: 1.5rem 0; }
     a { color: #0366d6; }
     .muted { color: #666; font-size: 0.9rem; }
+    figure { margin: 1.5rem 0; } figure svg { width: 100%; height: auto; }
+    figcaption, dd { color: #666; font-size: 0.9rem; }
+    dt { font-weight: 600; margin-top: 0.5rem; } dd { margin-left: 0; }
   </style>
 </head>
 <body>
@@ -437,6 +463,16 @@ UI/UX: simple, clean, uncluttered. Plain typography, generous whitespace, no fla
 
   <h2>Why this tier was chosen</h2>
   <p><tier picked, rubric scores, justification in 2-3 sentences></p>
+
+  <h2>Terms</h2>
+  <dl>
+    <dt><term></dt><dd><one-line meaning></dd>
+  </dl>
+
+  <figure>
+    <svg viewBox="0 0 640 200" role="img" aria-label="<what the diagram shows>"><!-- real components, prose names --></svg>
+    <figcaption><one sentence: what to notice></figcaption>
+  </figure>
 
   <h2>Phases</h2>
   <div class="phase">
