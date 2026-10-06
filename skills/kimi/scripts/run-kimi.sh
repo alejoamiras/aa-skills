@@ -52,8 +52,9 @@ fi
 # Reviewers and workers never touch the shared memory; the owner's AGENTS.md tells sessions to.
 MEMO_PREAMBLE="You are a subagent. Don't run memo."
 # The prompt travels as one argv entry (-p has no stdin mode), and Linux caps a
-# single argument at 128 KiB including its NUL.
-if [[ $(( $(wc -c < "$PROMPT_FILE") + ${#MEMO_PREAMBLE} + 2 )) -gt 131071 ]]; then
+# single argument at 128 KiB including the flag and its NUL.
+KIMI_PROMPT_FLAG="--prompt="
+if [[ $(( $(wc -c < "$PROMPT_FILE") + ${#MEMO_PREAMBLE} + 2 + ${#KIMI_PROMPT_FLAG} )) -gt 131071 ]]; then
   echo "ERROR: prompt exceeds 128KB; point kimi at files in cwd instead of inlining them" >&2
   exit 2
 fi
@@ -83,7 +84,7 @@ set +e
   cd "$CWD" &&
   KIMI_MODEL_THINKING_EFFORT="$EFFORT" kimi \
     "${MODEL_ARGS[@]}" \
-    --prompt="$(cat "$KIMI_DIR/prompt.md")" \
+    "${KIMI_PROMPT_FLAG}$(cat "$KIMI_DIR/prompt.md")" \
     > "$RESPONSE_FILE" 2> "$LOG_FILE"
 )
 EXIT=$?
