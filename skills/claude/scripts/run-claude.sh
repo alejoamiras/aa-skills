@@ -20,6 +20,13 @@
 #   model        Optional. Defaults to $CLAUDE_MODEL, else fable (Claude's
 #                top-tier alias). Pass opus while Fable is unavailable.
 #
+# Env: CLAUDE_ACCOUNT  Optional, default "best". A `claude-usage` roster account
+#                     (any unique part of its name), "best" for whichever has
+#                     headroom, or "main" for the ~/.claude login. The account
+#                     is recorded so resume-claude.sh stays on it. Without
+#                     claude-usage, or when "best" cannot be resolved, the
+#                     consult runs on the ~/.claude login instead of failing.
+#
 # Output: human-readable progress on stderr, the raw JSON result in a log file.
 # The last 4 lines of stdout are guaranteed to be:
 #
@@ -40,8 +47,9 @@
 # Claude not to retry.
 #
 # Exit codes: 0 = a well-formed successful result; 1 = Claude reported an error
-# or its output was not exactly one result object; 2 = usage error; anything
-# else is claude's own exit status.
+# or its output was not exactly one result object; 2 = usage error (bad
+# arguments, unresolvable account; no trailer); anything else is claude's own
+# exit status.
 
 set -euo pipefail
 
@@ -69,6 +77,41 @@ if ! command -v jq > /dev/null 2>&1; then
   exit 2
 fi
 
+# Account routing, the mirror of CODEX_ACCOUNT in run-codex.sh: claude-usage
+# owns the mapping and, for "best", the choice; `claude-usage run` exports the
+# account's config dir (and token) to the one claude it execs. An empty
+# ACCOUNT_KEY means a plain `claude` with the caller's environment, which only
+# happens without claude-usage.
+ACCOUNT="${CLAUDE_ACCOUNT:-best}"
+# claude-usage runs again from inside $CWD; a relative root would name another dir.
+if [[ -n "${CLAUDE_ACCOUNTS_ROOT:-}" && "$CLAUDE_ACCOUNTS_ROOT" != /* ]]; then
+  export CLAUDE_ACCOUNTS_ROOT="$PWD/$CLAUDE_ACCOUNTS_ROOT"
+fi
+ACCOUNT_KEY=""
+CLAUDE_CMD=(claude)
+if command -v claude-usage > /dev/null 2>&1; then
+  set +e
+  ACCOUNT_KEY=$(claude-usage resolve "$ACCOUNT" 2> /dev/null)
+  RC=$?
+  set -e
+  if [[ -z "$ACCOUNT_KEY" && "$ACCOUNT" != best ]]; then
+    echo "ERROR: cannot resolve CLAUDE_ACCOUNT=$ACCOUNT (try: claude-usage list)" >&2
+    exit 2
+  elif [[ -z "$ACCOUNT_KEY" ]]; then
+    # Through claude-usage, so stray credentials in this env cannot pick the account.
+    echo "NOTE: claude-usage found no best account; using the ~/.claude login" >&2
+    ACCOUNT_KEY=main
+  elif [[ $RC -ne 0 ]]; then
+    echo "WARNING: no Claude account has headroom right now; using the one that frees up first" >&2
+  fi
+  CLAUDE_CMD=(claude-usage run "$ACCOUNT_KEY")
+elif [[ "$ACCOUNT" != best ]]; then
+  echo "ERROR: CLAUDE_ACCOUNT=$ACCOUNT needs claude-usage on PATH" >&2
+  exit 2
+elif [[ -n "${CLAUDE_ACCOUNT:-}" ]]; then
+  echo "NOTE: claude-usage is not on PATH; using the ~/.claude login" >&2
+fi
+
 CLAUDE_DIR=$(mktemp -d -t claude-XXXXXXXX)
 RESPONSE_FILE="$CLAUDE_DIR/response.md"
 LOG_FILE="$CLAUDE_DIR/log.json"
@@ -79,6 +122,7 @@ cp "$PROMPT_FILE" "$CLAUDE_DIR/prompt.original.md"
 # resume-claude.sh re-applies these: none of them persist in the session itself.
 printf '%s' "$CWD" > "$CLAUDE_DIR/cwd"
 printf '%s' "$MODEL" > "$CLAUDE_DIR/model"
+printf '%s' "$ACCOUNT_KEY" > "$CLAUDE_DIR/account"
 
 # Safe mode strips the user's instructions, so the role framing has to travel
 # with the prompt.
@@ -92,12 +136,12 @@ EOF
   cat "$PROMPT_FILE"
 } > "$FULL_PROMPT"
 
-echo "Running claude (model=$MODEL, effort=$EFFORT, sandbox=$SANDBOX, cwd=$CWD)..." >&2
+echo "Running claude (model=$MODEL, effort=$EFFORT, sandbox=$SANDBOX, cwd=$CWD, account=${ACCOUNT_KEY:-~/.claude})..." >&2
 echo "Output dir: $CLAUDE_DIR" >&2
 
 set +e
 (
-  cd "$CWD" && CLAUDE_CODE_EFFORT_LEVEL="$EFFORT" claude -p \
+  cd "$CWD" && CLAUDE_CODE_EFFORT_LEVEL="$EFFORT" "${CLAUDE_CMD[@]}" -p \
     --safe-mode \
     --restricted \
     --strict-mcp-config \
