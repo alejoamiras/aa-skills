@@ -21,7 +21,7 @@
 #   claude-usage --json          machine-readable (statusline, cron)
 #   claude-usage run [name|best] [claude args…]
 #                                start claude on that account (default: best);
-#                                any unique part of a name will do. `cu` is
+#                                any unique part of a name will do. `clu` is
 #                                shorthand. Links this machine's ~/.claude stack
 #                                (CLAUDE.md, AGENTS.md, statusline.sh,
 #                                settings.json, plugins, skills) into the
@@ -193,7 +193,7 @@ token_expiry() {
 lower() { tr '[:upper:]' '[:lower:]' <<< "$1"; }
 
 # Account query -> directory key, "main" for the slot. Exact names win; any
-# other query must be part of exactly one roster name, so `cu proton` reaches
+# other query must be part of exactly one roster name, so `clu proton` reaches
 # alejo-proton without the prefix.
 resolve_key() {
   local q="$1" key lq dir name n=0 found="" all=""

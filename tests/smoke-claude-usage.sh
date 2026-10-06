@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test for bin/claude-usage, bin/cu and the claude skill's reviewer
+# Smoke test for bin/claude-usage, bin/clu and the claude skill's reviewer
 # scripts — a stub `claude` on PATH, a fake HOME and a throwaway accounts root.
 # No real login, keychain, token or ~/.claude is touched.
 # shellcheck disable=SC2016,SC2012 # literal $… in sh -c bodies; ls counts names we created
@@ -128,16 +128,16 @@ rm -rf "$HOME/.claude/skills/beta"
 "$CU" run zzz-soon -p prune 2> /dev/null
 t "stack: a skill gone from the slot is pruned" test ! -L "$Z/skills/beta"
 
-# --- name resolution and cu ---------------------------------------------------
-cu soon -p a 2> /dev/null
+# --- name resolution and clu ---------------------------------------------------
+clu soon -p a 2> /dev/null
 t "resolve: a unique part of a name" grep -q "^dir=$Z .*argv=-p a\$" <(last)
-cu tok > /dev/null 2> "$S/amb.err"; rc=$?
+clu tok > /dev/null 2> "$S/amb.err"; rc=$?
 t "resolve: ambiguous lists the candidates and fails" sh -c '[ "$1" -ne 0 ] && grep -q "tok-proton" "$2" && grep -q "tok-two" "$2"' _ "$rc" "$S/amb.err"
-tn "resolve: no match fails" cu nobody -p x
-cu -p "say ok" 2> /dev/null
-t "cu: a leading option means best + passthrough" grep -q "^dir=$Z .*argv=-p say ok\$" <(last)
-cu -- hello 2> /dev/null
-t "cu: -- means best, the rest to claude" grep -q "^dir=$Z .*argv=hello\$" <(last)
+tn "resolve: no match fails" clu nobody -p x
+clu -p "say ok" 2> /dev/null
+t "clu: a leading option means best + passthrough" grep -q "^dir=$Z .*argv=-p say ok\$" <(last)
+clu -- hello 2> /dev/null
+t "clu: -- means best, the rest to claude" grep -q "^dir=$Z .*argv=hello\$" <(last)
 
 # --- ranking, rename, expiry --------------------------------------------------
 touch "$A/spent" "$Z/spent"

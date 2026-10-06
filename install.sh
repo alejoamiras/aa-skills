@@ -88,6 +88,13 @@ if compgen -G "${REPO_DIR}/bin/*" > /dev/null; then
     chmod +x "${tool}"
     link "${tool}" "${HOME}/.local/bin/$(basename "${tool}")"
   done
+  # bin/cu was renamed clu: /usr/bin/cu (UUCP) shadows it on macOS and Debian.
+  stale="${HOME}/.local/bin/cu"
+  if [ -L "${stale}" ]; then
+    case "$(readlink "${stale}")" in
+      "${REPO_DIR}/bin/cu"|"${REPO_REAL}/bin/cu") rm "${stale}"; echo "prune   ${stale} (renamed clu)" ;;
+    esac
+  fi
   case ":${PATH}:" in
     *":${HOME}/.local/bin:"*) ;;
     *) echo "note    ~/.local/bin is not on PATH — add it to your shell profile" ;;
