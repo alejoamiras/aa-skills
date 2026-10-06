@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# cu — `claude-usage run` for the fingers.
+#
+#   cu                     claude on the best account right now
+#   cu proton              claude on the one roster account whose name has "proton"
+#   cu proton -p "…"       every argument after the account goes to claude
+#   cu -p "…"              a leading option means: best account, all args to claude
+#
+# The sibling claude-usage wins over PATH, so a checkout's cu never runs some
+# other install's claude-usage.
+unset CDPATH
+here=$(cd "$(dirname "$0")" && pwd)
+[[ -x ${here}/claude-usage ]] && exec "${here}/claude-usage" run "$@"
+exec claude-usage run "$@"

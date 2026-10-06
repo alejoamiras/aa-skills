@@ -19,14 +19,30 @@
 #
 #   claude-usage                 table for every account
 #   claude-usage --json          machine-readable (statusline, cron)
-#   claude-usage add <name>      one-time interactive login for a new account
+#   claude-usage run [name|best] [claude args…]
+#                                start claude on that account (default: best);
+#                                any unique part of a name will do. `cu` is
+#                                shorthand. Links this machine's ~/.claude stack
+#                                (CLAUDE.md, AGENTS.md, statusline.sh,
+#                                settings.json, plugins, skills) into the
+#                                account first
+#   claude-usage add <name>      store a `claude setup-token` token (pasted
+#                                hidden, or piped on stdin — never an argument)
+#   claude-usage add <name> --login [email]
+#                                one-time interactive browser login instead
 #   claude-usage show <name>     full /usage text, incl. what's burning the quota
 #   claude-usage list            configured accounts
 #   claude-usage remove <name>   forget an account (logs it out first)
 #   claude-usage rename <a> <b>  relabel a roster account, credentials untouched
 #   claude-usage best            which account to use right now, and why
+#   claude-usage resolve <q>     the account key `run` would use (for scripts;
+#                                exit 1 = "best" is only the least-bad pick)
 #   claude-usage statusline      compact cached segment for statusline.sh
 #   claude-usage refresh         re-probe every account into the snapshot cache
+#
+# Token accounts: a setup-token is inference-only, so Claude Code reports no
+# usage for it; the table shows its expiry instead and `best` picks one only
+# when no account with known headroom is usable.
 #
 # Accepted limits: the no-coreutils watchdog bounds the probe but not any
 # grandchild it leaves behind; two refreshers can overlap if one is stolen from
@@ -51,6 +67,26 @@ MAIN_DIR="${HOME}/.claude"
 # so renaming a dir silently logs that account out (verified).
 LABELS_FILE="${ACCOUNTS_ROOT}/labels.conf"
 TIMEOUT="${CLAUDE_USAGE_TIMEOUT:-45}"
+# A token account keeps its `claude setup-token` token here (0600) beside the
+# day it was added. The CLI never reports a token's expiry; the docs give it a
+# one-year life, so expiry is counted from the add date.
+TOKEN_FILE="oauth-token"
+TOKEN_DATE="oauth-token.added"
+TOKEN_TTL=$((365 * 86400))
+TOKEN_WARN_DAYS=30
+# Everything that outranks a config dir's own login in Claude Code's auth
+# precedence (cloud providers, bearer token, API key, apiKeyHelper's peers, the
+# OAuth-token variable, Anthropic profiles), plus the endpoint and extra
+# headers, which would carry the chosen account's credential to a leftover
+# gateway. A caller's stray value would otherwise silently run as someone
+# else. A settings.json `env` block or apiKeyHelper can still override; that is
+# the user's own configuration.
+AUTH_ENV=(ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
+  ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS
+  CLAUDE_CODE_OAUTH_REFRESH_TOKEN ANTHROPIC_PROFILE ANTHROPIC_FEDERATION_RULE_ID
+  CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY
+  CLAUDE_CODE_USE_ANTHROPIC_AWS CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD
+  CLAUDE_CODE_USE_MANTLE CLAUDE_CODE_USE_GATEWAY)
 NEVER=999999999999   # sorts absent or unparseable resets to the bottom
 
 # Snapshot cache. A status line renders constantly and must never pay for a
@@ -115,6 +151,8 @@ account_rows() {
   local dir key
   for dir in "${ACCOUNTS_ROOT}"/*/; do
     [[ -d ${dir} ]] || continue
+    # A symlinked home aliases another account or the slot; `run` refuses it.
+    [[ -L ${dir%/} ]] && continue
     key=$(basename "${dir}")
     valid_name "${key}" || continue
     printf '%s\t%s\n' "$(label_for "${key}")" "${dir%/}"
@@ -127,6 +165,56 @@ resolve_dir() {
   [[ ${key} == main ]] && { printf '%s' "${MAIN_DIR}"; return 0; }
   [[ -d ${ACCOUNTS_ROOT}/${key} ]] || die "unknown account: $1 (try: claude-usage list)"
   printf '%s' "${ACCOUNTS_ROOT}/${key}"
+}
+
+is_token() { [[ $1 != main && -f ${ACCOUNTS_ROOT}/$1/${TOKEN_FILE} ]]; }
+
+# Whole days until a token account's token expires: negative once it has,
+# "?" when the add date is missing or unreadable (never treated as expired).
+token_days_left() {
+  local added="" secs
+  { IFS= read -r added || [[ -n ${added} ]]; } < "${ACCOUNTS_ROOT}/$1/${TOKEN_DATE}" 2> /dev/null
+  [[ ${added} =~ ^[0-9]+$ ]] || { printf '?'; return; }
+  secs=$((added + TOKEN_TTL - $(date +%s)))
+  if ((secs > 0)); then printf '%s' "$((secs / 86400))"; else printf '%s' "$((-1 - (-secs) / 86400))"; fi
+}
+
+# Epoch -> formatted date. GNU first: GNU's -r reads a FILE's mtime, so a file
+# named like the number would answer for it.
+fmt_epoch() { date -d "@$1" "+$2" 2> /dev/null || date -r "$1" "+$2" 2> /dev/null; }
+
+token_expiry() {
+  local added=""
+  { IFS= read -r added || [[ -n ${added} ]]; } < "${ACCOUNTS_ROOT}/$1/${TOKEN_DATE}" 2> /dev/null
+  [[ ${added} =~ ^[0-9]+$ ]] || { printf 'unknown'; return; }
+  fmt_epoch "$((added + TOKEN_TTL))" "$2"
+}
+
+lower() { tr '[:upper:]' '[:lower:]' <<< "$1"; }
+
+# Account query -> directory key, "main" for the slot. Exact names win; any
+# other query must be part of exactly one roster name, so `cu proton` reaches
+# alejo-proton without the prefix.
+resolve_key() {
+  local q="$1" key lq dir name n=0 found="" all=""
+  [[ ${q} == main ]] && { printf 'main'; return 0; }
+  # A directory key beats a label spelling the same name, so a key recorded by
+  # a script can never be redirected by a later rename.
+  for key in "${q}" "$(key_for "${q}")"; do
+    if valid_name "${key}" && [[ -d ${ACCOUNTS_ROOT}/${key} ]]; then printf '%s' "${key}"; return 0; fi
+  done
+  lq=$(lower "${q}")
+  for dir in "${ACCOUNTS_ROOT}"/*/; do
+    [[ -d ${dir} && ! -L ${dir%/} ]] || continue
+    key=$(basename "${dir}")
+    valid_name "${key}" || continue
+    name=$(label_for "${key}")
+    [[ $(lower "${name}") == *"${lq}"* ]] || continue
+    n=$((n + 1)); found="${key}"; all="${all} ${name}"
+  done
+  ((n == 1)) && { printf '%s' "${found}"; return 0; }
+  ((n == 0)) && die "unknown account: ${q} (try: claude-usage list)"
+  die "ambiguous: ${q} matches${all} — be more specific"
 }
 
 # A usage line is "<label>: N% used · resets <when> (<tz>)", except the reset
@@ -229,7 +317,9 @@ watchdog() {
 
 run_claude() {
   local dir="$1"; shift
-  local -a runner=() envcmd=(env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN)
+  local -a runner=() envcmd=(env)
+  local v
+  for v in "${AUTH_ENV[@]}"; do envcmd+=(-u "${v}"); done
   # A stock macOS has no `timeout`; watchdog() is the fallback, because an
   # unbounded probe would hang gather forever and, since its pid stays alive,
   # make the refresh lock permanently unreclaimable.
@@ -250,9 +340,11 @@ run_claude() {
 }
 
 # Without --no-session-persistence every probe saves a transcript into the
-# account's projects/, one per account per refresh.
+# account's projects/, one per account per refresh. --safe-mode keeps auth but
+# skips hooks and plugins, which a linked settings.json would otherwise fire on
+# every probe; it also halves the probe time.
 usage_text() {
-  run_claude "$1" -p "/usage" --allowed-tools "" --no-session-persistence
+  run_claude "$1" -p "/usage" --safe-mode --allowed-tools "" --no-session-persistence
 }
 
 # One tab-separated record per account, prefixed with a sort key. Runs in a
@@ -261,9 +353,23 @@ probe() {
   local name="$1" dir="$2" auth email plan usage line
   local s_left s_reset w_left w_reset p_label p_left key
 
+  # A token cannot answer /usage (it is inference-only), and the probe strips
+  # it from the env anyway: report what is known locally, the expiry.
+  if [[ ${dir} != "${MAIN_DIR}" && -f ${dir}/${TOKEN_FILE} ]]; then
+    key=$(token_days_left "$(basename "${dir}")")
+    if [[ ${key} == -* ]]; then
+      printf '%s\t%s\t-\ttoken\t-\t-\t-\t-\t-\t-\t0\ttoken expired — run: claude-usage add %s\n' \
+        "${NEVER}" "${name}" "${name}"
+    else
+      # After every account with readable headroom, before the unusable ones.
+      printf '998%s\t%s\t-\ttoken\t-\t-\t-\t-\t-\t-\t0\t\n' "${NEVER}" "${name}"
+    fi
+    return
+  fi
+
   auth=$(run_claude "${dir}" auth status --json 2> /dev/null)
   if [[ ${auth} != *'"loggedIn": true'* ]]; then
-    printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\t-\t0\tlogged out — run: claude-usage add %s\n' \
+    printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\t-\t0\tlogged out — run: claude-usage add %s --login (or paste a setup-token)\n' \
       "${NEVER}" "${name}" "${name}"
     return
   fi
@@ -400,7 +506,7 @@ table() {
   rows=$(gather) || exit 1
 
   local -a n_c=() p_c=() s_pl=() s_pa=() w_pl=() w_pa=() x_pl=() x_pa=() notes=()
-  local plabel="PREMIUM" when
+  local plabel="PREMIUM" when days tokens=0
   local h0="ACCOUNT" h1="PLAN" h2="SESSION" h3="WEEK (all)"
   local w0=${#h0} w1=${#h1} w2=${#h2} w3=${#h3} w4
 
@@ -419,6 +525,16 @@ table() {
       [[ ${name} == main ]] && notes+=("main: this login is not in the roster yet — claude-usage add <name> gives it a name")
     else
       n_c+=("  ${name}")
+    fi
+    if [[ ${plan} == token ]]; then
+      tokens=1
+      days=$(token_days_left "$(key_for "${name}")")
+      if [[ ${days} == -* ]]; then
+        plan="token EXPIRED"
+      elif [[ ${days} =~ ^[0-9]+$ ]]; then
+        plan="token ${days}d"
+        ((days <= TOKEN_WARN_DAYS)) && notes+=("⚠ ${name} token ${days}d left — mint a new one (claude setup-token), then: claude-usage add ${name}")
+      fi
     fi
     p_c+=("${plan}")
     s_pl+=("$(pct_plain "${sl}")");  s_pa+=("$(pct_paint "${sl}")")
@@ -466,6 +582,7 @@ table() {
   else
     printf '  ▶ = active in ~/.claude · all values = %% LEFT\n'
   fi
+  ((tokens)) && notes+=("token rows: a setup-token is inference-only, so Claude Code reports no usage for it")
   local n
   ((${#notes[@]})) || return 0
   for n in "${notes[@]}"; do
@@ -479,17 +596,22 @@ jq_str() {
 }
 
 json() {
-  local rows first=1 key name email plan sl sr wl wr pl pv active note
+  local rows first=1 key name email plan sl sr wl wr pl pv active note days
   rows=$(gather) || exit 1
   printf '['
   while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
     [[ -z ${name} ]] && continue
     ((first)) || printf ','
     first=0
-    printf '\n  {"account":"%s","active":%s,"email":"%s","plan":"%s","session_left_pct":%s,"session_resets":"%s","week_left_pct":%s,"week_resets":"%s","premium_model":"%s","premium_left_pct":%s,"note":"%s"}' \
+    days=null
+    if [[ ${plan} == token ]]; then
+      days=$(token_days_left "$(key_for "${name}")")
+      [[ ${days} =~ ^-?[0-9]+$ ]] || days=null
+    fi
+    printf '\n  {"account":"%s","active":%s,"email":"%s","plan":"%s","session_left_pct":%s,"session_resets":"%s","week_left_pct":%s,"week_resets":"%s","premium_model":"%s","premium_left_pct":%s,"token_days_left":%s,"note":"%s"}' \
       "$(jq_str "${name}")" "$([[ ${active} == 1 ]] && printf true || printf false)" "$(jq_str "${email}")" "$(jq_str "${plan}")" \
       "${sl//-/null}" "$(jq_str "${sr}")" "${wl//-/null}" "$(jq_str "${wr}")" \
-      "$(jq_str "${pl}")" "${pv//-/null}" "$(jq_str "${note}")"
+      "$(jq_str "${pl}")" "${pv//-/null}" "${days}" "$(jq_str "${note}")"
   done <<< "${rows}"
   printf '\n]\n'
   return 0
@@ -610,10 +732,18 @@ best_row() {
     printf '%s\t%s\t%s\t%s\tok\n' "${name}" "${pv}" "${pl}" "${wr}"
     return 0
   done <<< "${rows}"
+  # Unknown headroom beats known exhaustion. Expiry is re-checked live: the
+  # snapshot can predate it.
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
+    [[ ${plan} == token && -z ${note} ]] || continue
+    [[ $(token_days_left "$(key_for "${name}")") == -* ]] && continue
+    printf '%s\t-\ttoken\t-\ttoken\n' "${name}"
+    return 0
+  done <<< "${rows}"
   # Everything is spent, so the useful answer is whichever returns first. The
   # sort key is <premium><epoch>, so re-sorting from char 4 orders by reset.
   while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
-    [[ -z ${name} || -n ${note} ]] && continue
+    [[ -z ${name} || -n ${note} || ${plan} == token ]] && continue
     printf '%s\t%s\t%s\t%s\tfallback\n' "${name}" "${pv}" "${pl}" "${wr}"
     return 0
   done < <(sort -k1.4 <<< "${rows}")
@@ -627,6 +757,8 @@ cmd_best() {
     die "no usable account (all logged out?) — run: claude-usage"
   if [[ ${how} == fallback ]]; then
     printf '%s (nothing usable right now; frees up first, %s)\n' "${name}" "${wr}"
+  elif [[ ${how} == token ]]; then
+    printf '%s (token account, usage unknown; the others are spent)\n' "${name}"
   elif [[ ${pv} == "-" ]]; then
     printf '%s (%s usage unknown; resets %s)\n' "${name}" "${pl}" "${wr}"
   elif [[ ${wr} == idle ]]; then
@@ -641,6 +773,23 @@ cmd_best() {
 # "Sep 28, 7:59am" or "Sep 28 at 7:59am" → "Sep 28".
 reset_day() { local d=${1/ at */}; printf '%s' "${d%%,*}"; }
 
+# " ⚠ <name> token <N>d left" for every token in its last month, live from
+# the add dates: an expiry must surface even when no refresh is running.
+token_warnings() {
+  local dir key days
+  for dir in "${ACCOUNTS_ROOT}"/*/; do
+    [[ -f ${dir}${TOKEN_FILE} ]] || continue
+    key=$(basename "${dir}")
+    valid_name "${key}" || continue
+    days=$(token_days_left "${key}")
+    if [[ ${days} == -* ]]; then
+      printf ' %s⚠ %s token expired%s' "${RED}" "$(label_for "${key}")" "${RST}"
+    elif [[ ${days} =~ ^[0-9]+$ ]] && ((days <= TOKEN_WARN_DAYS)); then
+      printf ' %s⚠ %s token %sd left%s' "${YEL}" "$(label_for "${key}")" "${days}" "${RST}"
+    fi
+  done
+}
+
 # One compact status-line segment. Reads cache only — never probes inline.
 # Deliberately omits 5h/week percentages: the status line already gets those
 # live for the current account, and the snapshot's copy would only be staler.
@@ -653,7 +802,11 @@ cmd_statusline() {
 
   # Both halves of the segment come from ONE snapshot read: two reads could
   # straddle a refresh and render a current/best pair that never coexisted.
-  IFS=$'\t' read -r best_name best_pv _ best_wr best_how < <(best_row <<< "${rows}") || return 0
+  if ! IFS=$'\t' read -r best_name best_pv _ best_wr best_how < <(best_row <<< "${rows}"); then
+    out=$(token_warnings)
+    [[ -n ${out} ]] && printf '%s\n' "${out# }"
+    return 0
+  fi
 
   while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
     [[ ${name} == "${cur}" ]] || continue
@@ -668,7 +821,9 @@ cmd_statusline() {
   fi
   if [[ ${best_name} != "${cur}" ]]; then
     out="${out} ${YEL}→${RST} ${best_name}"
-    if [[ ${best_how} == fallback ]]; then
+    if [[ ${best_how} == token ]]; then
+      out="${out} ${DIM}token${RST}"
+    elif [[ ${best_how} == fallback ]]; then
       # A fallback pick is not usable yet; quoting its premium headroom would
       # read as "switch here now".
       out="${out} ${DIM}back $(reset_day "${best_wr}")${RST}"
@@ -686,23 +841,98 @@ cmd_statusline() {
   # has been flat for an hour.
   age=$(snapshot_age)
   ((age > TTL * 6)) && out="${out} ${DIM}(stale)${RST}"
+  out="${out}$(token_warnings)"
 
   printf '%s\n' "${out}"
 }
 
+scrub_auth_env() {
+  local v
+  for v in "${AUTH_ENV[@]}"; do unset "${v}"; done
+}
+
+# Reads a setup-token from the terminal (hidden) or from stdin, and extracts it
+# from whatever surrounds it, so the whole `claude setup-token` output can be
+# pasted or piped. Builtins only: a here-string or a command argument would put
+# the token in a temp file or in ps.
+read_token() {
+  local raw=""
+  if [[ -t 0 ]]; then
+    # shellcheck disable=SC2016 # literal backticks: a command to copy
+    printf 'Run `claude setup-token` on any machine, then paste it.\n' >&2
+    printf 'token for %s (hidden): ' "$1" >&2
+    IFS= read -rs raw
+    printf '\n' >&2
+  else
+    IFS= read -r -d '' raw
+  fi
+  if [[ ${raw} =~ (sk-ant-oat[0-9]+-[A-Za-z0-9_-]+) && ${#BASH_REMATCH[1]} -ge 60 ]]; then
+    TOKEN="${BASH_REMATCH[1]}"
+    return 0
+  fi
+  [[ ${raw} == *sk-ant-api* ]] && die "that is an API key, not a setup-token — nothing saved"
+  die "no setup-token found in the input (expected sk-ant-oat…) — nothing saved"
+}
+
 cmd_add() {
-  local name="${1:-}" email="${2:-}"
-  [[ -n ${name} ]] || die "usage: claude-usage add <name> [email]"
+  local name="" extra="" mode=token arg
+  for arg in "$@"; do
+    # Checked before anything else, so no path can store or echo it.
+    if [[ ${arg} == *sk-ant-* ]]; then
+      die "refusing a token on the command line: it is now in your shell history and visible to ps — mint a new one, then pipe or paste it: claude-usage add <name>"
+    fi
+  done
+  for arg in "$@"; do
+    case ${arg} in
+      --login) mode=login ;;
+      --token) mode=token ;;
+      -*)      die "unknown option: ${arg}" ;;
+      *)       if [[ -z ${name} ]]; then name="${arg}"; elif [[ -z ${extra} ]]; then extra="${arg}"; else die "usage: claude-usage add <name> [--login [email]]"; fi ;;
+    esac
+  done
+  [[ -n ${name} ]] || die "usage: claude-usage add <name> [--login [email]]"
+  [[ -n ${extra} && ${mode} == token ]] && die "an email only goes with --login: claude-usage add ${name} --login ${extra}"
   [[ ${name} == main ]] && die "'main' is reserved for ~/.claude"
+  [[ ${name} == best ]] && die "'best' is reserved: it means \"pick for me\" in run and resolve"
   valid_name "${name}" || die "invalid name: ${name} (letters, digits, . _ - only)"
-  local dir="${ACCOUNTS_ROOT}/${name}"
+  # An existing label adds in place: a second directory under the same display
+  # name would make every lookup ambiguous.
+  local key dir
+  key=$(key_for "${name}")
+  dir="${ACCOUNTS_ROOT}/${key}"
+  [[ -e ${dir} && ! -d ${dir} ]] && die "${dir} exists and is not a directory"
+  [[ -L ${dir} ]] && die "${dir} is a symlink — refusing to write credentials through it"
+
+  if [[ ${mode} == token ]]; then
+    local TOKEN="" tmp
+    read_token "${name}"   # before mkdir: a rejected token leaves no empty account behind
+    (umask 077 && mkdir -p "${dir}") || die "cannot create ${dir}"
+    tmp=$(umask 077 && mktemp "${dir}/.${TOKEN_FILE}.XXXXXX") || die "cannot write in ${dir}"
+    if ! { printf '%s\n' "${TOKEN}" > "${tmp}" && chmod 600 "${tmp}" && mv -f "${tmp}" "${dir}/${TOKEN_FILE}"; }; then
+      rm -f "${tmp}"
+      die "could not save the token — nothing saved"
+    fi
+    TOKEN=""
+    date +%s > "${dir}/${TOKEN_DATE}"
+    rm -f "${SNAPSHOT}"
+    printf '✓ %s saved (token, expires ~%s)\n' "${name}" "$(token_expiry "${key}" '%Y-%m')"
+    return 0
+  fi
+
   mkdir -p "${dir}"
   printf 'Logging in to account %s (config dir: %s)\n' "${name}" "${dir}"
-  if [[ -n ${email} ]]; then
-    CLAUDE_CONFIG_DIR="${dir}" claude auth login --claudeai --email "${email}"
-  else
-    CLAUDE_CONFIG_DIR="${dir}" claude auth login --claudeai
+  if ! (
+    scrub_auth_env
+    if [[ -n ${extra} ]]; then
+      CLAUDE_CONFIG_DIR="${dir}" claude auth login --claudeai --email "${extra}"
+    else
+      CLAUDE_CONFIG_DIR="${dir}" claude auth login --claudeai
+    fi
+  ); then
+    die "login failed — ${name} unchanged"
   fi
+  # The token would outrank the login just made.
+  rm -f "${dir}/${TOKEN_FILE}" "${dir}/${TOKEN_DATE}"
   rm -f "${SNAPSHOT}"   # the roster changed; the next render re-matches the slot
   local added main_email
   added=$(run_claude "${dir}" auth status --json 2> /dev/null | sed -n 's/.*"email": "\([^"]*\)".*/\1/p' | head -1)
@@ -711,7 +941,6 @@ cmd_add() {
     printf 'This is also the account logged into ~/.claude — it now shows as "%s" (active).\n' "${name}"
   fi
 }
-
 # Remove one mapping by exact key match, never by pattern.
 drop_label() {
   local key="$1" line tmp
@@ -734,6 +963,7 @@ cmd_rename() {
   [[ ${key} == main ]] && die "main is the ~/.claude slot, not an account: it takes the name of the roster account logged into it (claude-usage add <name>)"
   [[ -d ${ACCOUNTS_ROOT}/${key} ]] || die "unknown account: ${old} (try: claude-usage list)"
   [[ ${new} == main ]] && die "'main' is reserved for ~/.claude"
+  [[ ${new} == best ]] && die "'best' is reserved: it means \"pick for me\" in run and resolve"
   local taken; taken=$(key_for "${new}")
   [[ ${taken} != "${key}" && -d ${ACCOUNTS_ROOT}/${taken} ]] &&
     die "name already in use: ${new}"
@@ -765,24 +995,37 @@ cmd_remove() {
     die "refusing to remove the primary account (${MAIN_DIR}) — use: claude auth logout"
   [[ ${dir} == "${ACCOUNTS_ROOT}"/* ]] ||
     die "refusing: ${dir} is outside ${ACCOUNTS_ROOT}"
-  run_claude "${dir}" auth logout > /dev/null 2>&1
+  local until=""
+  if is_token "${key}"; then
+    until=$(token_expiry "${key}" '%Y-%m-%d')
+  else
+    run_claude "${dir}" auth logout > /dev/null 2>&1
+  fi
   rm -rf "${dir}"
   drop_label "${key}"
   rm -f "${SNAPSHOT}"
-  printf 'removed %s\n' "${name}"
+  if [[ -n ${until} ]]; then
+    printf 'removed %s (token file deleted; the token itself stays valid until ~%s)\n' "${name}" "${until}"
+  else
+    printf 'removed %s\n' "${name}"
+  fi
 }
 
 cmd_list() {
   local name dir cur=""
   # No snapshot means nothing has been matched yet — claim nothing.
   [[ -f ${SNAPSHOT} ]] && cur=$(current_account)
+  local key days tag
   while IFS=$'\t' read -r name dir; do
     [[ -z ${name} ]] && continue
-    if [[ ${name} == "${cur}" ]]; then
-      printf '%-14s %s  (active in ~/.claude)\n' "${name}" "${dir}"
-    else
-      printf '%-14s %s\n' "${name}" "${dir}"
+    tag=""
+    [[ ${name} == "${cur}" ]] && tag="  (active in ~/.claude)"
+    key=$(basename "${dir}")
+    if [[ ${dir} != "${MAIN_DIR}" ]] && is_token "${key}"; then
+      days=$(token_days_left "${key}")
+      if [[ ${days} == -* ]]; then tag="${tag}  (token, EXPIRED)"; else tag="${tag}  (token, ${days}d left)"; fi
     fi
+    printf '%-14s %s%s\n' "${name}" "${dir}" "${tag}"
   done < <(account_rows)
 }
 
@@ -790,8 +1033,178 @@ cmd_show() {
   local name="${1:-}"
   [[ -n ${name} ]] || die "usage: claude-usage show <name>"
   local dir; dir=$(resolve_dir "${name}") || exit 1
+  if [[ ${dir} != "${MAIN_DIR}" ]] && is_token "$(basename "${dir}")"; then
+    printf '%s: token account, expires ~%s. A setup-token is inference-only, so Claude Code reports no usage for it.\n' \
+      "${name}" "$(token_expiry "$(basename "${dir}")" '%Y-%m-%d')"
+    return 0
+  fi
   usage_text "${dir}"
 }
+
+# Key of the account best_row picks. Exit 1: only the least-bad pick (nothing
+# usable). Exit 2: nothing to pick.
+best_key() {
+  local rows name how waited=0
+  if [[ ! -f ${SNAPSHOT} ]]; then
+    printf 'claude-usage: no snapshot yet — probing every account once…\n' >&2
+    # A child, not cmd_refresh: run execs claude next, which would keep this
+    # pid — and with it the refresh lock — alive for the whole session.
+    "$0" refresh
+    # It returns at once when another refresher holds the lock; wait for that
+    # one rather than reporting nothing to pick.
+    while [[ ! -f ${SNAPSHOT} && -d ${LOCK_DIR} ]] && ((waited < TIMEOUT + 15)); do
+      sleep 1; waited=$((waited + 1))
+    done
+  fi
+  rows=$(cached_rows) || return 2
+  IFS=$'\t' read -r name _ _ _ how < <(best_row <<< "${rows}") || return 2
+  # Rows carry display names. Exactly one account must still answer to it:
+  # none means a rename since the snapshot, two a rename racing an add.
+  case $(account_rows | cut -f1 | grep -cxF -- "${name}") in
+    1) ;;
+    0) printf 'claude-usage: %s was renamed or removed since the last probe — run: claude-usage refresh\n' "${name}" >&2; return 2 ;;
+    *) printf 'claude-usage: two accounts are named %s — rename one\n' "${name}" >&2; return 2 ;;
+  esac
+  if [[ ${name} == main ]]; then printf 'main'; else key_for "${name}"; fi
+  [[ ${how} != fallback ]]
+}
+
+cmd_resolve() {
+  local q="${1:-}" rc=0
+  [[ -n ${q} ]] || die "usage: claude-usage resolve <name|best>"
+  if [[ ${q} == best ]]; then
+    best_key || rc=$?
+    ((rc == 2)) && die "no usable account — run: claude-usage"
+  else
+    resolve_key "${q}" || exit 1
+  fi
+  printf '\n'
+  return "${rc}"
+}
+
+# Links one item of the slot's stack into a roster home. The link targets the
+# slot's path, not the repo, so it follows wherever install.sh points the slot.
+# Anything else already there is moved aside, never overwritten.
+link_one() {
+  local src="$1" dst="$2"
+  [[ -e ${src} ]] || return 0
+  [[ -L ${dst} && ${dst} -ef ${src} ]] && return 0
+  if [[ -e ${dst} || -L ${dst} ]]; then
+    [[ -n ${LINK_BACKUP} ]] || LINK_BACKUP="$(dirname "${dst}")/.claude-usage-backup/$(date +%Y%m%d-%H%M%S)-$$"
+    # A concurrent run may have moved it first; the ln below settles either way.
+    mkdir -p "${LINK_BACKUP}" && mv "${dst}" "${LINK_BACKUP}/" 2> /dev/null &&
+      printf 'claude-usage: moved %s aside to %s\n' "${dst}" "${LINK_BACKUP}" >&2
+  fi
+  # A directory recreated since the move (a session running in this home)
+  # would make ln put the link INSIDE it.
+  if [[ -d ${dst} && ! -L ${dst} ]]; then
+    printf 'claude-usage: %s is in use; not linked this time\n' "${dst}" >&2
+    return 0
+  fi
+  # -n: never descend into a link to a directory a concurrent run just made.
+  ln -sn "${src}" "${dst}" 2> /dev/null || [[ ${dst} -ef ${src} ]] ||
+    printf 'claude-usage: could not link %s\n' "${dst}" >&2
+}
+
+# A roster home starts bare. settings.json is shared, not copied: Claude Code
+# writes through the link (verified), so /model or an "always allow" from any
+# account lands in the one user settings file, as with two sessions on the
+# slot. plugins/ is shared whole: its install paths are absolute into the
+# slot, its cache sweep trusts one installed_plugins.json, and the claude.ai
+# sync keeps one bucket per account there. It holds no credentials; plugin MCP
+# logins live with each account's own credentials. .claude.json (the account
+# identity) and credentials stay per home.
+LINK_BACKUP=""
+link_stack() {
+  local dir="$1" f e name sk="$1/skills"
+  for f in CLAUDE.md AGENTS.md statusline.sh settings.json plugins; do
+    link_one "${MAIN_DIR}/${f}" "${dir}/${f}"
+  done
+  [[ -d ${MAIN_DIR}/skills && ! -L ${sk} ]] || return 0
+  mkdir -p "${sk}"
+  for e in "${MAIN_DIR}"/skills/*; do
+    [[ -e ${e} ]] || continue
+    name=${e##*/}
+    # synced/ holds claude.ai skills of whichever account synced them.
+    [[ ${name} == synced ]] && continue
+    # Present means ours already, or the account's own: leave it.
+    [[ -e ${sk}/${name} || -L ${sk}/${name} ]] && continue
+    ln -sn "${e}" "${sk}/${name}" 2> /dev/null
+  done
+  for e in "${sk}"/*; do
+    [[ -L ${e} && ! -e ${e} ]] || continue
+    [[ $(readlink "${e}") == "${MAIN_DIR}/skills/"* ]] && rm -f "${e}"
+  done
+  return 0
+}
+
+# One line on what the snapshot knows about an account's headroom.
+describe() {
+  local want="$1" key name email plan sl sr wl wr pl pv active note out=""
+  [[ -f ${SNAPSHOT} ]] || { printf 'headroom unknown (no snapshot yet)'; return; }
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
+    [[ ${name} == "${want}" ]] || continue
+    [[ -n ${note} ]] && { printf '%s' "${note}"; return; }
+    [[ ${wr} == idle ]] && { printf 'idle, everything left'; return; }
+    [[ ${sl} != "-" ]] && out="5h ${sl}%"
+    [[ ${wl} != "-" ]] && out="${out:+${out} · }week ${wl}%"
+    [[ ${pv} != "-" ]] && out="${out:+${out} · }$(lower "${pl}") ${pv}%"
+    printf '%s' "${out:+${out} left}"
+    return
+  done < "${SNAPSHOT}"
+  printf 'headroom unknown'
+}
+
+# Starts claude on one account. The choice holds for that process only: the
+# config dir, and the token for a token account, are exported to the exec'd
+# claude and to nothing else.
+cmd_run() {
+  local q=best key rc=0 dir label days tok="" what
+  if [[ ${1:-} == -- ]]; then
+    shift
+  elif [[ -n ${1:-} && ${1} != -* ]]; then
+    q="$1"; shift
+  fi
+  if [[ ${q} == best ]]; then
+    key=$(best_key) || rc=$?
+    ((rc == 2)) && die "no usable account — run: claude-usage"
+  else
+    key=$(resolve_key "${q}") || exit 1
+  fi
+
+  scrub_auth_env
+  if [[ ${key} == main ]]; then
+    # Unset, not pointed at ~/.claude: the slot's keychain entry is keyed to
+    # the variable's absence.
+    unset CLAUDE_CONFIG_DIR
+    label=main
+  else
+    dir="${ACCOUNTS_ROOT}/${key}"
+    label=$(label_for "${key}")
+    # Linking into a home that is really the slot would move the slot's own
+    # files aside and leave links pointing at themselves.
+    [[ -L ${dir} || ${dir} -ef ${MAIN_DIR} ]] && die "${dir} is a symlink — refusing to link the stack into it"
+    link_stack "${dir}"
+    export CLAUDE_CONFIG_DIR="${dir}"
+  fi
+
+  if is_token "${key}"; then
+    days=$(token_days_left "${key}")
+    [[ ${days} == -* ]] && die "${label}: token expired — mint a new one (claude setup-token), then: claude-usage add ${label}"
+    { IFS= read -r tok || [[ -n ${tok} ]]; } < "${dir}/${TOKEN_FILE}"
+    [[ -n ${tok} ]] || die "${label}: token file is empty — run: claude-usage add ${label}"
+    export CLAUDE_CODE_OAUTH_TOKEN="${tok}"
+    what="token, ${days}d left, no usage data"
+  else
+    [[ -f ${SNAPSHOT} ]] && spawn_refresh_if_stale
+    what=$(describe "${label}")
+  fi
+  ((rc == 1)) && what="${what}; nothing has headroom, this one frees up first"
+  printf 'claude-usage: %s — %s\n' "${label}" "${what}" >&2
+  exec claude "$@"
+}
+
+spawn_refresh_if_stale() { (($(snapshot_age) > TTL)) && spawn_refresh; return 0; }
 
 case "${1:-table}" in
   table|'')   table ;;
@@ -799,6 +1212,8 @@ case "${1:-table}" in
   refresh)    cmd_refresh ;;
   best)       cmd_best ;;
   statusline) cmd_statusline ;;
+  run)        shift; cmd_run "$@" ;;
+  resolve)    shift; cmd_resolve "$@" ;;
   add)        shift; cmd_add "$@" ;;
   remove|rm)  shift; cmd_remove "$@" ;;
   rename)     shift; cmd_rename "$@" ;;
