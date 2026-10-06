@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
-// Narration client for the explainer skill: the ONLY process that ever holds ELEVENLABS_API_KEY.
+// Narration client for the explainer skill: the ONLY process that ever reads the ElevenLabs key.
 // Launch narrated runs through scripts/narrate.sh, which strips the environment so no Bun preload,
-// bunfig or dotenv file runs inside this process.
+// bunfig or dotenv file runs inside this process, and points it at the key file.
 // Usage: tts.ts <narration.json> <out-dir> [--captions-only]
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 type Scene = { id: string; title: string; text: string };
@@ -23,10 +23,25 @@ const SCENE_GAP = "\n\n";
 const CHARS_PER_SECOND = 15;
 const SCENE_PAUSE = 0.8;
 
+let apiKey = "";
+
 function die(code: number, msg: string): never {
-  const key = process.env.ELEVENLABS_API_KEY;
-  console.error(`tts: ${key ? msg.split(key).join("[redacted]") : msg}`);
+  console.error(`tts: ${apiKey ? msg.split(apiKey).join("[redacted]") : msg}`);
   process.exit(code);
+}
+
+// Parsed, never sourced: only these two names are read, and a group- or world-readable file is refused.
+function readKeyFile(path: string | undefined) {
+  if (!path) die(3, "no key file; run through scripts/narrate.sh or use --captions-only");
+  if (!existsSync(path)) die(3, `${path} does not exist; see Owner setup in SKILL.md`);
+  if (statSync(path).mode & 0o077) die(3, `${path} is readable by other users; chmod 600 it`);
+  const vars: Record<string, string> = {};
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    const m = /^\s*(ELEVENLABS_API_KEY|ELEVENLABS_VOICE_ID)\s*=\s*"?([^"\s]+)"?\s*$/.exec(line);
+    if (m) vars[m[1]] = m[2];
+  }
+  if (!vars.ELEVENLABS_API_KEY) die(3, `${path} has no ELEVENLABS_API_KEY line`);
+  return { key: vars.ELEVENLABS_API_KEY, voice: vars.ELEVENLABS_VOICE_ID };
 }
 
 function load(path: string): Narration {
@@ -115,8 +130,7 @@ function atomicWrite(path: string, data: string | Buffer) {
 
 // One paid request per cache key, ever, unless the owner clears the pending marker by hand.
 async function synthesize(text: string, voice: string, model: string, cacheBase: string) {
-  const key = process.env.ELEVENLABS_API_KEY;
-  if (!key) die(3, "ELEVENLABS_API_KEY is not set; run through scripts/narrate.sh or use --captions-only");
+  const key = apiKey;
   const pending = `${cacheBase}.pending`;
   try {
     closeSync(openSync(pending, "wx"));
@@ -169,7 +183,7 @@ async function main() {
   const n = load(resolve(positional[0]));
   const { chars, text, spans } = joinScenes(n.scenes);
   if (chars.length > MAX_CHARS) die(1, `narration is ${chars.length} characters, over the ${MAX_CHARS} cap`);
-  const voice = n.voice_id ?? process.env.ELEVENLABS_VOICE_ID ?? "";
+  let voice = n.voice_id ?? "";
   const model = n.model_id ?? "eleven_multilingual_v2";
   if (!/^[a-z0-9_]{1,40}$/.test(model)) die(1, `bad model_id: ${model}`);
 
@@ -182,7 +196,10 @@ async function main() {
     alignment = syntheticAlignment(chars, spans);
     duration = alignment.character_end_times_seconds.at(-1) ?? 0;
   } else {
-    if (!/^[A-Za-z0-9]{8,40}$/.test(voice)) die(1, "set voice_id in narration.json or ELEVENLABS_VOICE_ID");
+    const file = readKeyFile(process.env.EXPLAINER_KEY_FILE);
+    apiKey = file.key;
+    voice ||= file.voice ?? "";
+    if (!/^[A-Za-z0-9]{8,40}$/.test(voice)) die(1, "set voice_id in narration.json or ELEVENLABS_VOICE_ID in the key file");
     const cacheBase = join(out, "cache", createHash("sha256").update(JSON.stringify({ text, voice, model })).digest("hex").slice(0, 32));
     if (existsSync(`${cacheBase}.mp3`) && existsSync(`${cacheBase}.json`)) console.log("tts: cache hit, no request sent");
     else await synthesize(text, voice, model, cacheBase);

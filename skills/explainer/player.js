@@ -7,7 +7,7 @@
 //   root,                       // element holding .xp-stage, .xp-controls, .xp-captions, .xp-chapters, .xp-transcript
 //   timings,                    // parsed timings.json (inline it; never fetch it — file:// blocks that)
 //   audio,                      // an <audio> element, or null for captions-only
-//   scenes: { [id]: (el, local, p) => void },  // local = seconds into the scene, p = 0..1 progress
+//   scenes: { [id]: (el, local, p, t) => void },  // local = seconds into the scene, p = 0..1, t = global seconds
 // })
 (() => {
   const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
@@ -51,7 +51,7 @@
         if (s === scene && scenes[s.id]) {
           const local = t - s.start;
           // Reduced motion: show each scene's finished state instead of tweening into it.
-          scenes[s.id](el, reduced ? end - s.start : local, reduced ? 1 : clamp(local / (end - s.start)));
+          scenes[s.id](el, reduced ? end - s.start : local, reduced ? 1 : clamp(local / (end - s.start)), reduced ? end : t);
         }
       }
       caption.textContent = timings.words
@@ -146,5 +146,12 @@
     return { seek, render, pause };
   }
 
-  window.Explainer = { mount, seg, lerp, clamp, ease, reduced };
+  // cue(timings, "pause") → global second the voice starts that word (nth occurrence), for word-synced tweens.
+  const cue = (timings, word, n = 0) => {
+    const norm = (w) => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+    const hit = timings.words.filter((w) => norm(w.w) === norm(word))[n];
+    if (!hit) throw new Error(`cue: "${word}" #${n} is not in the narration`);
+    return hit.s;
+  };
+  window.Explainer = { mount, seg, lerp, clamp, ease, cue, reduced };
 })();
