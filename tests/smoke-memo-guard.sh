@@ -21,7 +21,7 @@ for c in 'memo wake' ' memo status' $'ls\nmemo status' 'command memo status' '"m
   expect 2 "subagent blocked: $c" "$(payload "$c")"
 done
 for c in 'rg "x; memo status" AGENTS.md' 'rg memo src' 'cat memory.md remote-opt-memo/x' 'git commit -m "wire memo"' \
-  'ls | grep memo' "rg '!memo' AGENTS.md" 'echo \; memo' 'sudo -u bob ls memo'; do
+  'ls | grep memo' "rg '!memo' AGENTS.md" 'echo \; memo' 'sudo -u bob ls memo' 'rg "x; memo status $suffix" AGENTS.md'; do
   expect 0 "subagent allowed: $c" "$(payload "$c")"
 done
 expect 0 "main session runs memo" '{"tool_input":{"command":"memo wake"}}'
