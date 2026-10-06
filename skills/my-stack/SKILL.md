@@ -982,6 +982,8 @@ Preview URLs are on by default (`preview_urls` follows `workers_dev`); set `"pre
 
 Secrets (a funded deploy key, an operator key, a deployer secret) live in 1Password on the Mac and nowhere else: never in a `.env` with values, a repo, CI, or an agent's context. A command that needs them is a **keyed run**: the agent files a request on the host, the owner approves it on the Mac, and the values stream over ssh into that one process's environment. `env-exec` (host) and `op-remote` (Mac) are aa-skills `bin/` tools.
 
+**One named exception** (AGENTS.md → Defaults): the `explainer` skill's `ElevenLabs-Narration` key is injected on the Mac with `op run` into one fixed TTS client. Nothing else qualifies by analogy.
+
 **The template.** The repo commits `<env>.env.example`; a `.env` with values never exists.
 
 ```
