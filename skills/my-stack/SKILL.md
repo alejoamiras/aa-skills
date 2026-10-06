@@ -1,6 +1,6 @@
 ---
 name: my-stack
-description: "Use when scaffolding a new repository, configuring development tooling, setting up CI/CD pipelines, or when working on owned repositories. Covers the preferred stack: bun 1.4+ (native-first — Bun.cron, Bun.Image, node:sqlite, Bun.Archive, isolated linker, test --parallel/--shard/--changed — before reaching for deps), biome, husky, commitlint, lint-staged, shellcheck, actionlint, sort-package-json, playwright, vitest, monorepo structure, trusted publisher for npm, OIDC, React + Vite frontend defaults, supply-chain hardening (7-day min-age, frozen lockfile), parallel-safe E2E patterns, and tiered infrastructure (Cloudflare Workers with static assets by default — not Pages; OpenTofu only once there's real cloud infra to track), and keyed runs: a command that needs real secrets (deploy or operator keys) gets them from 1Password on the Mac via env-exec/op-remote, never from a .env with values."
+description: "Use when scaffolding a new repository, configuring development tooling, setting up CI/CD pipelines, or when working on owned repositories. Covers the preferred stack: bun 1.4+ (native-first — Bun.cron, Bun.Image, node:sqlite, Bun.Archive, isolated linker, test --parallel/--shard/--changed — before reaching for deps), biome, husky, commitlint, lint-staged, shellcheck, actionlint, sort-package-json, playwright, vitest, monorepo structure, trusted publisher for npm, OIDC, React + Vite frontend defaults, optional Effect 4 (when to suggest it: indexers, relayers, pollers, time-dependent logic), supply-chain hardening (7-day min-age, frozen lockfile), parallel-safe E2E patterns, and tiered infrastructure (Cloudflare Workers with static assets by default — not Pages; OpenTofu only once there's real cloud infra to track), and keyed runs: a command that needs real secrets (deploy or operator keys) gets them from 1Password on the Mac via env-exec/op-remote, never from a .env with values."
 ---
 
 # My Preferred Development Stack
@@ -76,6 +76,24 @@ CI pins the same floor: `oven-sh/setup-bun@v2` with `bun-version: 1.4.0` (or `la
 - **Visual catalog**: Storybook
 - **CSS / styling**: Tailwind v4 + `@tailwindcss/vite` + `tailwind-variants` + `tailwind-merge` + `clsx`; **shadcn/ui** for accessible primitives (Dialog, DropdownMenu, Command, Sonner, Form, Sheet, Popover). Panda CSS + Park UI was considered as the type-safety-purist alternative but rejected pragmatically for ecosystem reasons.
 - **Add only when needed**: wagmi v2 + viem (L1 work), Next.js (real SSR needs)
+
+## Effect 4 (optional; strong for long-running services)
+
+[Effect](https://effect.website) 4.x (`effect`, stable since 2026-10-01, bug fixes to 2029-09) gives TypeScript typed errors, retries, timeouts, structured concurrency, resource cleanup and dependency injection. It is never a default dependency. Suggest it when the work matches, and let the owner decide.
+
+**Suggest it for:**
+- A new service with several concurrent loops: an indexer, relayer, poller or queue worker. `Stream`, `Schedule` (retry, backoff), `Scope` (clean shutdown) and `Layer` (swappable dependencies) replace code that is otherwise hand-made and drifts.
+- Time-dependent logic that must be tested: `@effect/vitest` with `TestClock` runs backoff, polling and timeouts deterministically, without fake timers.
+- An existing codebase full of hand-made timeout, retry and sleep helpers, or polls with no deadline: pilot it in ONE service, measure the bundle and the test change, then decide.
+
+**Skip it for:** UI components (React, Vue), content scripts, thin hono APIs, a single cron Worker. It also adds little around promise APIs that cannot be cancelled: interrupting an Effect does not stop Aztec's `pxe.proveTx`.
+
+**When it is used:**
+- **Write v4 only.** Models default to v3 names (`Context.Tag` is now `Context.Service`, `FiberRef` is now `Context.Reference`, the `catch*` family was renamed). Read the v4 docs and migration guide first, and review agent output for v3 idioms.
+- **Pin exact versions.** In 4.0.1, `Schema` and the `effect/http`, `sql`, `rpc`, `cluster`, `workflow`, `ai` and `cli` modules carry `@stability unstable` tags and may change in minors. Core `effect` has zero runtime dependencies; the 7-day min-age applies as usual.
+- **Adopt at the edges.** `Effect.tryPromise` around promise APIs, with one mapper to tagged errors; `Effect.runPromise` at handler boundaries; core logic stays in plain functions, so backing out stays cheap.
+- **Keep one schema system per boundary.** Where a dependency ships its own schemas (Aztec ships zod 4), validate with those; use Effect `Schema` only for your own types.
+- **Platform:** `@effect/platform-bun`, `@effect/sql-sqlite-bun`, `@effect/vitest`, `@effect/opentelemetry`. On Cloudflare, `effect-cf` (third-party, young) wraps Workers, Durable Objects, D1 and Workflows; pin it. In an MV3 service worker, no fiber outlives the worker: keep state in storage and periodic work on `chrome.alarms`.
 
 ## Dependency Management
 
