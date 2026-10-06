@@ -325,19 +325,29 @@ Rules:
 
 ## Required: Plain-language standard (ALL tiers)
 
-Write human-facing prose **80% of the way to ASD-STE100** (Simplified Technical English, the controlled language of aerospace maintenance manuals). Name the spec and aim at it: models know it well, and the target sets the tone better than any paraphrase. The rules below are the checkable floor. The other 20% is room to break a rule when obeying it would make a sentence longer, vaguer or less exact. Exactness wins over compliance.
+Write human-facing prose **80% of the way to ASD-STE100** (Simplified Technical English, the controlled language of aerospace maintenance manuals). Name the spec and aim at it. Models know it well, and the name sets the tone better than a paraphrase. The rules below are the checkable floor. Break a rule only when the compliant version would lose meaning or change an exact name. First, try to split the sentence.
 
-**Applies to**: the ELI5 companion's prose, `plan.md` phase steps, Validation gate pass criteria, and Asks. **Does not apply to**: Architecture & Implementation, trade-offs and Assumptions reasoning (they need nuance and long "because" chains), code comments (the value-per-character rule governs those), and the pasteable seeds and commands.
+**Applies to**:
+- the ELI5 companion's prose
+- `plan.md` phase steps, Validation gate pass criteria, and Asks
+- harden's stakeholder report, except its technical trace
 
-- **Length**: a step has at most 20 words, a descriptive sentence at most 25. A paragraph has at most 6 sentences and one topic.
-- **One thing per sentence**: one instruction per step, written in the imperative ("Add the check", not "The check should be added").
+**Exempt**:
+- Architecture & Implementation, trade-offs, and the reasoning in Assumptions. They need nuance and long "because" chains.
+- Code comments. The value-per-character rule governs them.
+- Seeds, commands, paths and identifiers.
+
+**Rules**:
+- **Length**: a procedural sentence has at most 20 words. A descriptive sentence has at most 25. A paragraph has at most 6 sentences and one topic.
+- **One instruction per sentence**, in the imperative: "Add the check", not "The check should be added".
 - **Active voice, actor named**: "the worker rejects the request", not "the request is rejected".
-- **No noun stacks longer than 3 words**: "wallet session key rotation policy" becomes "the policy for rotating the wallet's session keys".
-- **Warnings before the step** they apply to, never after it.
-- **Dictionary discipline**: prefer STE's approved general words, the plainest common ones ("use", not "utilize"; "start", not "initiate"). Each word keeps one meaning, and each thing keeps one name for the whole document. Once "worker" means the Cloudflare Worker, it never means a background job, and the job is never also a "task". Project terms (technical names and technical verbs, which STE allows too) are fine. When only an unapproved word says it exactly, use that word.
-- **Terms box**: when the ELI5 uses more than two project terms, list each one with a one-line meaning. A term gets used only as the box defines it.
+- **Noun stacks of at most 3 words**: "the policy for rotating the wallet's session keys", not "wallet session key rotation policy". An exact project name is exempt.
+- **Warnings come before the step** they apply to.
+- **Dictionary discipline**: use STE's approved general words in their approved sense and part of speech, where they say the meaning exactly. Prefer the plainest word: "use", not "utilize"; "start", not "initiate". Project terms are allowed, as STE allows technical names and technical verbs. When only an unapproved word is exact, use it.
+- **One name per thing**: each word keeps one meaning for the whole document, and each thing keeps one name. Once "worker" means the Cloudflare Worker, it never means a background job. That job is then never also a "task".
+- **Define unfamiliar terms** where they first appear. In the ELI5, when more than two project terms appear, also list them in a terms box.
 
-Before publishing the ELI5, and before handing `plan.md` to an audit, reread every in-scope sentence against these rules.
+Reread every in-scope sentence against these rules before you publish the ELI5 or send `plan.md` to an audit. Apply the same check when you edit this section.
 
 ---
 
@@ -406,7 +416,7 @@ Caution: sync/rebase rewrite arc-branch history. Fine while the agent owns every
 
 **File mode (fallback):** the standalone `eli5.html` (scaffold below): no external deps, no build, opens in any browser. It's what the `BLUEPRINT_VIEW_CMD` remote-viewing hook serves (see the approval gate). Use it when the Artifact tool is absent or the plan must stay on your infrastructure.
 
-**Excluded from the ELI5 (both modes): the Architecture & Implementation / technical detail** — that lives in `plan.md` for the audits. (The command-heavy `/goal` + `/loop` seeds DO belong in the ELI5 — "no jargon" is about prose, not the pasteable seeds.)
+**Excluded from the ELI5 (both modes): the Architecture & Implementation detail** (interfaces, schemas, file maps, algorithms) — that lives in `plan.md` for the audits. A simplified diagram of the mechanism and defined terms are allowed. (The command-heavy `/goal` + `/loop` seeds DO belong in the ELI5 — "no jargon" is about prose, not the pasteable seeds.)
 
 Either way, the CONTENTS are the same:
 
@@ -416,15 +426,19 @@ All prose follows the **Plain-language standard** (80% of the way to ASD-STE100,
 - **Why this tier was chosen** (Phase 0.5 rubric outcome, with the rubric scores)
 - **Who it is for and what excellent looks like** (the Outcome & Quality Bar, in plain language)
 - **Terms** (when more than two project terms appear): each with a one-line meaning
-- **Diagrams**: one to three inline SVGs, each next to the section it explains. Draw only a real mechanism: how a request or data moves through the change, the order phases and arcs depend on each other, or the system before and after. Label boxes with the same names the prose uses, and give each diagram a one-sentence caption that says what to notice. Never draw a decorative diagram. A plan with nothing to draw gets none. Artifact mode: load the `artifact-diagramming` skill first. File mode: hand-written inline SVG (no Mermaid, which needs a script).
+- **Diagrams**: one to three inline SVGs, each next to the section it explains.
+  - Draw only a real mechanism: how a request or data moves, the order of phases and arcs, or the system before and after.
+  - Show the simplified mechanism. Interfaces, schemas and file paths stay in `plan.md`.
+  - Label the boxes with the prose's names. Give each diagram a one-sentence caption that says what to notice.
+  - Keep the prose complete without the diagram, and put at most three boxes in a row so labels stay readable on a phone.
+  - Draw no decorative diagrams. A plan with nothing to draw gets none.
+  - Artifact mode: load the `artifact-diagramming` skill first. File mode: write the SVG by hand, as in the scaffold. Do not use Mermaid, because it needs a script.
 - **Phases**: ELI5 of each (what + why, no jargon) + its validation gate in one plain-language line ("proves itself by: unit tests for the new parser + lint")
 - **Human context**: simplified background needed to understand decisions
 - **Open questions**: with their human-context framing
 - **Approval decision needed from you**: explicit list of what the user must approve (scope, tier, deliverables, /harden scheduling decision if relevant)
 - **Implementation seeds**: `/goal` and `/loop` shown as code blocks (DRAFT until the approval gate; finalized post-approval), with ONE marked as "Recommended for this plan" based on whether completion is transcript-observable; explicit warning "Use exactly one per session — they don't compose"
 - **(File fallback only) Footer links**: relative links to `plan.md` and `./lessons/`
-
-Explicitly EXCLUDED from the ELI5 (both forms): the Architecture & Implementation / technical detail — that lives in `plan.md` for the audits, not the human approval view.
 
 UI/UX: simple, clean, uncluttered. Plain typography, generous whitespace, no flashy CSS. Mobile-readable.
 
@@ -453,6 +467,7 @@ UI/UX: simple, clean, uncluttered. Plain typography, generous whitespace, no fla
     a { color: #0366d6; }
     .muted { color: #666; font-size: 0.9rem; }
     figure { margin: 1.5rem 0; } figure svg { width: 100%; height: auto; }
+    figure svg text { fill: currentColor; font-size: 14px; } figure svg .box { fill: none; stroke: currentColor; }
     figcaption, dd { color: #666; font-size: 0.9rem; }
     dt { font-weight: 600; margin-top: 0.5rem; } dd { margin-left: 0; }
   </style>
@@ -470,7 +485,10 @@ UI/UX: simple, clean, uncluttered. Plain typography, generous whitespace, no fla
   </dl>
 
   <figure>
-    <svg viewBox="0 0 640 200" role="img" aria-label="<what the diagram shows>"><!-- real components, prose names --></svg>
+    <svg viewBox="0 0 640 200" role="img" aria-label="<what the diagram shows>">
+      <rect class="box" x="10" y="70" width="180" height="60" rx="6"/><text x="100" y="105" text-anchor="middle"><prose name></text>
+      <!-- up to three boxes per row; arrows as <path class="box" d="…"/> -->
+    </svg>
     <figcaption><one sentence: what to notice></figcaption>
   </figure>
 

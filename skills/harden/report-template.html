@@ -43,6 +43,10 @@
   .finding-id { color: var(--muted); font-weight: 600; }
   .finding-title { font-weight: 700; }
   .meta-line { margin: 0.6rem 0 0.9rem; }
+  figure { margin: 1rem 0; } figure svg { width: 100%; height: auto; }
+  figure svg text { fill: currentColor; font-size: 14px; }
+  figure svg .box { fill: var(--surface); stroke: var(--muted); }
+  figcaption { font-size: 0.85rem; color: var(--muted); }
   details { margin-top: 0.75rem; }
   summary { cursor: pointer; color: var(--link); }
   footer { margin-top: 3rem; border-top: 1px solid var(--hairline); padding-top: 1rem;
@@ -95,6 +99,14 @@
     <p><strong>What an attacker would do.</strong> {{CONCRETE_SCENARIO — security focus. For bugs: "What a user would trigger." For quality: "What gets harder to change."}}</p>
     <p><strong>The fix.</strong> {{PLAIN_LANGUAGE_REMEDIATION — mention if the same pattern already exists elsewhere in the codebase.}}</p>
   </div>
+
+  <!-- Only when the path crosses two or more components; otherwise delete. -->
+  <figure>
+    <svg viewBox="0 0 640 140" role="img" aria-label="{{WHAT_THE_PATH_SHOWS}}">
+      <rect class="box" x="10" y="40" width="180" height="60" rx="6"/><text x="100" y="75" text-anchor="middle">{{COMPONENT}}</text>
+    </svg>
+    <figcaption>{{ONE_SENTENCE — what to notice}}</figcaption>
+  </figure>
 
   <details>
     <summary>Technical trace</summary>
