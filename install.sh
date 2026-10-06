@@ -130,6 +130,10 @@ if [ -f "${REPO_DIR}/claude/statusline.sh" ]; then
   chmod +x "${REPO_DIR}/claude/statusline.sh"
   link "${REPO_DIR}/claude/statusline.sh" "${CLAUDE_DIR}/statusline.sh"
 fi
+if [ -f "${REPO_DIR}/claude/memo-guard.sh" ]; then
+  chmod +x "${REPO_DIR}/claude/memo-guard.sh"
+  link "${REPO_DIR}/claude/memo-guard.sh" "${CLAUDE_DIR}/memo-guard.sh"
+fi
 
 # Managed settings keys (private submodule): overlay claude/settings.managed.json
 # onto ~/.claude/settings.json. Managed keys win; everything else (permission
@@ -141,9 +145,10 @@ fi
 # permissions.allow and hook lists with the managed ones. A managed entry that
 # later changes leaves its old copy behind, like a dropped key.
 # shellcheck disable=SC2016 # a jq program, not shell
-MERGE_MANAGED='. as $o | $m[0] as $n | ($o * $n)
-  | if $n.permissions.allow then .permissions.allow = (($o.permissions.allow // []) as $a | $a + ($n.permissions.allow - $a)) else . end
-  | if $n.hooks then .hooks = reduce ($n.hooks | keys[]) as $k ($o.hooks // {}; .[$k] = ((.[$k] // []) as $a | $a + ($n.hooks[$k] - $a))) else . end'
+MERGE_MANAGED='def arr: if type == "array" then . else [] end;
+  . as $o | $m[0] as $n | ($o * $n)
+  | if $n.permissions.allow then .permissions.allow = (($o.permissions.allow | arr) as $a | $a + ($n.permissions.allow - $a)) else . end
+  | if $n.hooks then .hooks = reduce ($n.hooks | keys[]) as $k (($o.hooks | if type == "object" then . else {} end); .[$k] = ((.[$k] | arr) as $a | $a + ($n.hooks[$k] - $a))) else . end'
 MANAGED="${REPO_DIR}/claude/settings.managed.json"
 SETTINGS="${CLAUDE_DIR}/settings.json"
 if [ ! -f "${MANAGED}" ]; then
@@ -186,14 +191,11 @@ fi
 git -C "${REPO_DIR}" config core.hooksPath hooks
 echo "hooks   core.hooksPath = hooks"
 
-# Shared memory (private submodule): memo/install.sh installs `memo` and prints
-# its status. It runs last and can never abort this script: a machine where it
-# fails (no bun 1.4+, no OpenSSH 8.1+) still gets everything above, and the
-# failure is the final word, with a non-zero exit.
+# Shared memory (private submodule) runs last, so its failure can't stop the rest.
 MEMO_FAILED=""
-if [ ! -x "${REPO_DIR}/memo/install.sh" ]; then
+if [ ! -f "${REPO_DIR}/memo/install.sh" ]; then
   echo "skip    memo (private submodule not initialized)"
-elif "${REPO_DIR}/memo/install.sh"; then
+elif bash "${REPO_DIR}/memo/install.sh"; then
   echo "ok      memo"
 else
   MEMO_FAILED=1

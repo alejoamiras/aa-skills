@@ -35,8 +35,10 @@ if [[ ! -f "$PROMPT_FILE" ]]; then
   echo "ERROR: prompt file not found: $PROMPT_FILE" >&2
   exit 2
 fi
-if [[ "$(wc -c < "$PROMPT_FILE")" -gt 200000 ]]; then
-  echo "ERROR: prompt file exceeds 200KB; point kimi at files in cwd instead of inlining them" >&2
+# Reviewers and workers never touch the shared memory; the owner's AGENTS.md tells sessions to.
+MEMO_PREAMBLE="You are a subagent. Don't run memo."
+if [[ $(( $(wc -c < "$PROMPT_FILE") + ${#MEMO_PREAMBLE} + 2 )) -gt 131071 ]]; then
+  echo "ERROR: prompt exceeds 128KB; point kimi at files in cwd instead of inlining them" >&2
   exit 2
 fi
 
@@ -87,11 +89,10 @@ N=1
 while [[ -e "$KIMI_DIR/response-$N.md" ]]; do
   N=$((N + 1))
 done
-# Reviewers and workers never touch the shared memory; the owner's AGENTS.md tells sessions to.
-MEMO_PREAMBLE="You are a subagent. Don't run memo."
 RESPONSE_FILE="$KIMI_DIR/response-$N.md"
 LOG_FILE="$KIMI_DIR/log-$N.txt"
 
+[[ "$PROMPT_FILE" -ef "$KIMI_DIR/followup-$N.md" ]] && { echo "ERROR: the prompt file is this run's own followup-$N.md" >&2; exit 2; }
 { echo "$MEMO_PREAMBLE"; echo; cat "$PROMPT_FILE"; } > "$KIMI_DIR/followup-$N.md"
 
 IS_GIT=""

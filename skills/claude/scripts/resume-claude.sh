@@ -176,6 +176,7 @@ RESPONSE_FILE="$CLAUDE_DIR/response-$N.md"
 LOG_FILE="$CLAUDE_DIR/log-$N.json"
 FOLLOWUP="$CLAUDE_DIR/followup-$N.md"
 
+[[ "$PROMPT_FILE" -ef "$FOLLOWUP" ]] && { echo "ERROR: the prompt file is this run's own $(basename "$FOLLOWUP")" >&2; exit 2; }
 { echo "$MEMO_PREAMBLE"; echo; cat "$PROMPT_FILE"; } > "$FOLLOWUP"
 
 echo "Resuming claude session $SID (model=$MODEL, effort=$EFFORT, cwd=$CWD, account=${ACCOUNT_KEY:-~/.claude})..." >&2

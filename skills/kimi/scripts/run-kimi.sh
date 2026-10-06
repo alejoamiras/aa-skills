@@ -49,16 +49,17 @@ if [[ ! -d "$CWD" ]]; then
   echo "ERROR: cwd is not a directory: $CWD" >&2
   exit 2
 fi
-# The prompt travels as a single argv entry (-p has no stdin mode); guard ARG_MAX.
-if [[ "$(wc -c < "$PROMPT_FILE")" -gt 200000 ]]; then
-  echo "ERROR: prompt file exceeds 200KB; point kimi at files in cwd instead of inlining them" >&2
+# Reviewers and workers never touch the shared memory; the owner's AGENTS.md tells sessions to.
+MEMO_PREAMBLE="You are a subagent. Don't run memo."
+# The prompt travels as one argv entry (-p has no stdin mode), and Linux caps a
+# single argument at 128 KiB including its NUL.
+if [[ $(( $(wc -c < "$PROMPT_FILE") + ${#MEMO_PREAMBLE} + 2 )) -gt 131071 ]]; then
+  echo "ERROR: prompt exceeds 128KB; point kimi at files in cwd instead of inlining them" >&2
   exit 2
 fi
 
 KIMI_DIR=$(mktemp -d -t kimi-XXXXXXXX)
 RESPONSE_FILE="$KIMI_DIR/response.md"
-# Reviewers and workers never touch the shared memory; the owner's AGENTS.md tells sessions to.
-MEMO_PREAMBLE="You are a subagent. Don't run memo."
 LOG_FILE="$KIMI_DIR/log.txt"
 SESSION_ID_FILE="$KIMI_DIR/session_id"
 

@@ -146,6 +146,7 @@ done
 RESPONSE_FILE="$CODEX_DIR/response-$N.md"
 LOG_FILE="$CODEX_DIR/log.jsonl"
 
+[[ "$PROMPT_FILE" -ef "$CODEX_DIR/followup-$N.md" ]] && { echo "ERROR: the prompt file is this run's own followup-$N.md" >&2; exit 2; }
 { echo "$MEMO_PREAMBLE"; echo; cat "$PROMPT_FILE"; } > "$CODEX_DIR/followup-$N.md"
 
 echo "Resuming codex session $SID (model=${MODEL:-config default}, effort=$EFFORT, home=${CODEX_HOME:-~/.codex})..." >&2
