@@ -430,7 +430,7 @@ All prose follows the **Plain-language standard** (80% of the way to ASD-STE100,
   - Draw only a real mechanism: how a request or data moves, the order of phases and arcs, or the system before and after.
   - Show the simplified mechanism. Interfaces, schemas and file paths stay in `plan.md`.
   - Label the boxes with the prose's names. Give each diagram a one-sentence caption that says what to notice.
-  - Keep the prose complete without the diagram, and put at most three boxes in a row so labels stay readable on a phone.
+  - Keep the prose complete without the diagram. Draw top to bottom in a viewBox about 320 units wide, so labels stay readable on a phone.
   - Draw no decorative diagrams. A plan with nothing to draw gets none.
   - Artifact mode: load the `artifact-diagramming` skill first. File mode: write the SVG by hand, as in the scaffold. Do not use Mermaid, because it needs a script.
 - **Phases**: ELI5 of each (what + why, no jargon) + its validation gate in one plain-language line ("proves itself by: unit tests for the new parser + lint")
@@ -466,8 +466,8 @@ UI/UX: simple, clean, uncluttered. Plain typography, generous whitespace, no fla
     .approval { background: #eef6ff; padding: 1rem 1.25rem; border-left: 3px solid #0366d6; margin: 1.5rem 0; }
     a { color: #0366d6; }
     .muted { color: #666; font-size: 0.9rem; }
-    figure { margin: 1.5rem 0; } figure svg { width: 100%; height: auto; }
-    figure svg text { fill: currentColor; font-size: 14px; } figure svg .box { fill: none; stroke: currentColor; }
+    figure { margin: 1.5rem 0; } figure svg { display: block; width: 100%; max-width: 400px; height: auto; margin: 0 auto; }
+    figure svg text { fill: currentColor; font-size: 15px; } figure svg .box { fill: none; stroke: currentColor; }
     figcaption, dd { color: #666; font-size: 0.9rem; }
     dt { font-weight: 600; margin-top: 0.5rem; } dd { margin-left: 0; }
   </style>
@@ -485,9 +485,9 @@ UI/UX: simple, clean, uncluttered. Plain typography, generous whitespace, no fla
   </dl>
 
   <figure>
-    <svg viewBox="0 0 640 200" role="img" aria-label="<what the diagram shows>">
-      <rect class="box" x="10" y="70" width="180" height="60" rx="6"/><text x="100" y="105" text-anchor="middle"><prose name></text>
-      <!-- up to three boxes per row; arrows as <path class="box" d="…"/> -->
+    <svg viewBox="0 0 320 240" role="img" aria-label="<what the diagram shows>">
+      <rect class="box" x="40" y="10" width="240" height="50" rx="6"/><text x="160" y="40" text-anchor="middle"><prose name></text>
+      <!-- next box below at y="90"; arrows as <path class="box" d="M160 60 V90"/> -->
     </svg>
     <figcaption><one sentence: what to notice></figcaption>
   </figure>
