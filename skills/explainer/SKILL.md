@@ -134,7 +134,8 @@ The owner chose a plaintext key file for this one key (AGENTS.md → Defaults): 
 
 ## Unverified until the first real run
 
-- That audio plays and seeks inside the published Artifact, on desktop and on an iPhone (Safari). Confirmed 2026-10-06: the `files` publish accepts `narration.mp3`. The AAC-in-MP4 remux is the fallback.
-- That `/with-timestamps` returns a 1:1 alignment for v3/v4. Confirmed 2026-10-06 for `eleven_multilingual_v2` (exact match, `approx: false`).
+- That `/with-timestamps` returns a 1:1 alignment for v3/v4. Confirmed 2026-10-06 for `eleven_multilingual_v2` (exact match, `approx: false`, two voices).
+
+Confirmed 2026-10-06 on desktop: a `files`-published `narration.mp3` loads, plays and seeks inside the Artifact. Mobile was not tested.
 
 Record the outcome of each in this file when confirmed, then delete the line.
