@@ -1,13 +1,13 @@
 ---
 name: claude
-description: Invokes the Claude Code CLI headlessly to get a second opinion from the Anthropic model family (Fable / Opus) on a plan, design, analysis, or piece of code. This is the foreign-reviewer leg for sessions driven by Codex (or any non-Claude harness) — the mirror of the `codex` skill. Use ONLY when the user explicitly asks to involve Claude ("ask claude", "have claude review", "get claude's take") or when a protocol you are running (blueprint, harden) calls for the foreign reviewer and the driver is not Claude Code. Does not invoke proactively. Inside Claude Code itself, use the Agent tool instead — a Claude asking Claude is not a cross-model review.
+description: Invokes the Claude Code CLI headlessly to get a second opinion from the Anthropic model family (Fable / Opus) on a plan, design, analysis, or piece of code. This is the foreign-reviewer leg for sessions driven by Codex (or any non-Claude harness) — the mirror of the `codex` skill. Use ONLY when the user explicitly asks to involve Claude ("ask claude", "have claude review", "get claude's take") or when a protocol you are running (blueprint, harden) calls for the foreign reviewer and the driver is not Claude Code. Does not invoke proactively. Inside Claude Code itself, use the Agent tool for reviews — a Claude asking Claude is not a cross-model review. The one Claude Code use is load sharing: offloading read-only or web-research worker tasks to ANOTHER `claude-usage` roster account when the user asks or this session's account is low on quota (`CLAUDE_ACCOUNT=other`, `CLAUDE_CONSULT_ROLE=worker`).
 ---
 
 # Ask Claude for Review
 
 Use the `claude` CLI to get a second opinion from a different model family. Claude runs as a separate agent that can read files in the current repo, so it's useful for sanity-checking plans, designs, risky code changes, or observations that you want challenged by a fresh perspective.
 
-**Only invoke this skill when the user explicitly asks for Claude, or when a protocol names the foreign reviewer and you are driving on Codex.** Do not reach for it on your own initiative.
+**Only invoke this skill when the user explicitly asks for Claude, when a protocol names the foreign reviewer and you are driving on Codex, or to offload work to another account (see "Offloading to another account").** Do not reach for it on your own initiative otherwise.
 
 **Claude is not an oracle.** It can be confidently wrong, miss context, hallucinate APIs, or misread the code. Treat its response as input to your own reasoning, not a verdict. Be critical: if Claude disagrees with you, weigh the argument on its merits; if Claude agrees, don't assume that confirms your position.
 
@@ -22,7 +22,7 @@ This skill ships with two helper scripts under `~/.agents/skills/claude/scripts/
 
 **Codex sandbox — the scripts must run escalated, and escalation may be refused.** `claude -p` needs the network (Anthropic API) and writes its session transcript under `~/.claude/projects/`; neither is possible inside Codex's `read-only` or `workspace-write` sandbox, where the first attempt fails with a DNS/connection error or a permission error. Don't retry inside the sandbox: rerun the script with escalated permissions (`require_escalated` + a one-line justification), which normally surfaces as one approval prompt to the user. `network_access = true` in `~/.codex/config.toml` is not sufficient on its own because of the `~/.claude` writes. **Preflight** before a protocol depends on it: the question is whether the session *has or can obtain* the access the script needs. A session already running with sufficient access (e.g. `danger-full-access`) launches it directly — use what's granted, never widen it yourself. Otherwise you need an approval, and under `approval_policy = never` or with no human present none can be granted by anything in this file — the foreign review is then **blocked**. Say so explicitly, log it (in `lessons/` when inside a plan), and let the calling protocol hold its gate; never fake the review with a same-family pass.
 
-**What the reviewer can and cannot do.** The scripts start Claude with `--safe-mode` (no user CLAUDE.md, hooks, MCP servers, skills or plugins — auth still works, unlike `--bare`, which is API-key only), `--restricted --strict-mcp-config` and `--tools Read,Grep,Glob`: it reads files under `<cwd>` and nothing else. No Bash, so it cannot run `git diff` — put the diff under review in the prompt, as the codex protocol already does. There is deliberately **no writing mode**: a reviewer with edit rights running under Codex's escalated sandbox would have the combined blast radius of both harnesses.
+**What the reviewer can and cannot do.** The scripts start Claude with `--safe-mode` (no user CLAUDE.md, hooks, MCP servers, skills or plugins — auth still works, unlike `--bare`, which is API-key only), `--restricted --strict-mcp-config` and one tool set per sandbox: `read-only` gives `Read,Grep,Glob` on files under `<cwd>` and nothing else; `web-read` gives `WebSearch,WebFetch` and no file tools, so a page that injects instructions finds no repo content to leak. Never both in one run. No Bash, so it cannot run `git diff` — put the diff under review in the prompt, as the codex protocol already does. There is deliberately **no writing mode**: a reviewer with edit rights running under Codex's escalated sandbox would have the combined blast radius of both harnesses.
 
 ## First call
 
@@ -34,7 +34,7 @@ This skill ships with two helper scripts under `~/.agents/skills/claude/scripts/
    ~/.agents/skills/claude/scripts/run-claude.sh <prompt-file> <cwd> xhigh read-only
    ```
 
-   Arguments are positional and identical to `run-codex.sh`: `<prompt-file>` (required), `<cwd>` (defaults to `$PWD`), `<effort>` (`low | medium | high | xhigh | max`, defaults to `xhigh`), `<sandbox>` (only `read-only` is accepted — kept positional for parity), `<model>` (defaults to `fable`).
+   Arguments are positional and identical to `run-codex.sh`: `<prompt-file>` (required), `<cwd>` (defaults to `$PWD`), `<effort>` (`low | medium | high | xhigh | max`, defaults to `xhigh`), `<sandbox>` (`read-only`, or `web-read` for web research with no file access), `<model>` (defaults to `fable`).
 
 3. Calls take minutes at `xhigh` on a real review. Run in the background if you have other work; otherwise accept a long foreground wait.
 
@@ -73,6 +73,20 @@ The model defaults to **`fable`** (Claude's top-tier alias — Fable 5.1 today),
 
 Consults run on whatever `CLAUDE_ACCOUNT` names, default `best`: with `claude-usage` installed (aa-skills `bin/`), `run-claude.sh` asks it for the roster account with headroom under `~/.claude-accounts/` and starts Claude through `claude-usage run`, which exports that account's config dir — and its token, for an account added from a `claude setup-token` — to the one process. Set `CLAUDE_ACCOUNT=<name>` (any unique part of a name) or `main` (the `~/.claude` login) on the call to pin one; an unknown name is exit 2. When `best` cannot be resolved, or `claude-usage` is absent, the consult runs on the `~/.claude` login with one stderr note rather than failing. The resolved account is recorded in `<claude-dir>/account`, so `resume-claude.sh` stays on it and ignores `CLAUDE_ACCOUNT`; a UUID-only resume finds it by the session's transcript. Pin a specific account only when the user asks for it; `best` already moves off a spent one. Never copy credentials between config dirs.
 
+## Offloading to another account (Claude Code driver)
+
+A Claude Code session can hand a task to a different roster account to spare its own quota. This is load sharing, never a review: a same-family worker does not count as a cross-model or independent opinion anywhere a protocol asks for one.
+
+- **When**: the user asks, or you plan a fan-out of three or more read-only tasks and this session's account is under about 25% of its 5-hour or weekly window. `claude-usage current` names this session's account; find that row in `claude-usage --json` (the `active` flag marks the `~/.claude` slot, which is not always the caller).
+- **How**: `CLAUDE_ACCOUNT=other CLAUDE_CONSULT_ROLE=worker run-claude.sh <prompt-file> <cwd> <effort> <read-only|web-read> <model>`.
+  - `other` resolves to the best roster account except the caller's own, and fails rather than fall back to it.
+  - `worker` swaps the reviewer preamble for a delegated-task one; nothing else changes.
+  - `read-only` for codebase research, with `<cwd>` set to the repo. `web-read` for web research, with `<cwd>` set to an empty `mktemp -d`: WebSearch plus WebFetch on any domain, no file tools.
+  - A session keeps its sandbox for life: run-claude.sh records it per session id, and resume-claude.sh refuses records that disagree.
+  - Pick the model the task needs (`sonnet` for a research fan-out). Run several with `run_in_background`, then read each `RESPONSE_FILE`.
+- **Limits**: each worker starts with no context, so brief it fully. It cannot write. Results come back as files, not task notifications. Setup-token accounts report no usage, so `other` may pick one blindly.
+- **Network caveat**: WebFetch reaches private addresses over HTTPS (verified 2026-10-06; plain HTTP fails because WebFetch upgrades it). A `web-read` worker holds no repo content, but a hostile page could steer it at an HTTPS service on the local network. Don't use `web-read` where such services are sensitive.
+
 ## Writing the prompt
 
 Claude starts with zero context from this conversation — and, under `--safe-mode`, none of the user's global instructions either. Brief it like a colleague who just walked in — the same template as the codex skill: the specific question; **Facts** (verified, with file:line) vs **Inferences** (unverified, to challenge) vs the thing under review; relevant paths (Claude reads files in `<cwd>` itself — prefer pointing at files over pasting blobs, but paste short critical snippets inline, and paste the diff under review in full since it cannot run `git`); an explicit instruction to be critical ("find problems with this, don't validate it; if the approach is fundamentally wrong, say so"); and the response shape you want ("under N words: one-line verdict, bulleted concerns, then what looks fine"). The script prepends a short role preamble (independent reviewer, not the driver, read-only) — don't repeat it. Anything you paste — diffs, logs — lands in the reviewer's transcript under the driver's `~/.claude/projects/`; redact secrets before sending, exactly as you would for codex.
@@ -91,4 +105,4 @@ Claude starts with zero context from this conversation — and, under `--safe-mo
 2. **Never use `claude --continue` (or `-c`).** It resumes the most recent session for the cwd — across every session on the machine, not just yours. Resume only by the explicit `SESSION_ID` (or `""` + `CLAUDE_DIR`). Have neither? Tell the user and start fresh.
 3. **Never invoke `claude -p` directly.** Use the helper scripts.
 4. **Don't override the model unless the user explicitly asks** — override via the positional argument or `CLAUDE_MODEL`, never by editing the scripts.
-5. **Never widen the reviewer** — no `--dangerously-skip-permissions`, no `bypassPermissions`, no extra `--tools`, no writing mode. If a task needs Claude to *change* code, that is a driver's job in a Claude Code session, not a consult.
+5. **Never widen the reviewer or worker** — no `--dangerously-skip-permissions`, no `bypassPermissions`, no extra `--tools`, no writing mode, no sandbox mixing file and web tools. If a task needs Claude to *change* code, that is a driver's job in a Claude Code session, not a consult.

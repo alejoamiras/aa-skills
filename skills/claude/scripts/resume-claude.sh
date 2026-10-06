@@ -19,8 +19,12 @@
 #                <claude-dir>/model, else fable — so a session that fell back to
 #                opus stays on opus unless you say otherwise.
 #
-# The isolation flags (--safe-mode --restricted --strict-mcp-config, read-only
-# tools) do not persist in a session and are re-applied on every resume.
+# The isolation flags (--safe-mode --restricted --strict-mcp-config, and the
+# tool set of the session's sandbox) do not persist in a session and are
+# re-applied on every resume. The sandbox comes from <claude-dir>/sandbox and
+# from the per-session record run-claude.sh keeps under
+# ${XDG_STATE_HOME:-~/.local/state}/claude-consult/sessions; the two must agree,
+# and a session with neither predates web-read, so it was read-only.
 #
 # The session is resumed on the account recorded by run-claude.sh
 # (<claude-dir>/account): a session lives in the projects/ of the config dir
@@ -82,6 +86,7 @@ if [[ -n "${CLAUDE_ACCOUNTS_ROOT:-}" && "$CLAUDE_ACCOUNTS_ROOT" != /* ]]; then
   export CLAUDE_ACCOUNTS_ROOT="$PWD/$CLAUDE_ACCOUNTS_ROOT"
 fi
 MODEL="fable"
+SANDBOX=""  # only ever read back from the records, never inherited
 if [[ -z "$CLAUDE_DIR" ]]; then
   CLAUDE_DIR=$(mktemp -d -t claude-XXXXXXXX)
   printf '%s' "$SID" > "$CLAUDE_DIR/session_id"
@@ -92,7 +97,28 @@ else
   CLAUDE_DIR="$(cd "$CLAUDE_DIR" && pwd -P)"
   [[ -f "$CLAUDE_DIR/cwd" ]] && CWD="$(cat "$CLAUDE_DIR/cwd")"
   [[ -f "$CLAUDE_DIR/model" ]] && MODEL="$(cat "$CLAUDE_DIR/model")"
+  if [[ -f "$CLAUDE_DIR/sandbox" ]]; then
+    SANDBOX="$(cat "$CLAUDE_DIR/sandbox")"
+    [[ -n "$SANDBOX" ]] || { echo "ERROR: empty sandbox record: $CLAUDE_DIR/sandbox" >&2; exit 2; }
+  fi
 fi
+REGISTERED=""
+REGISTRY_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/claude-consult/sessions/$SID"
+if [[ -f "$REGISTRY_FILE" ]]; then
+  REGISTERED="$(cat "$REGISTRY_FILE")"
+  [[ -n "$REGISTERED" ]] || { echo "ERROR: empty sandbox record: $REGISTRY_FILE" >&2; exit 2; }
+fi
+if [[ -n "$SANDBOX" && -n "$REGISTERED" && "$SANDBOX" != "$REGISTERED" ]]; then
+  echo "ERROR: sandbox records disagree for $SID: $CLAUDE_DIR/sandbox=$SANDBOX, $REGISTRY_FILE=$REGISTERED" >&2
+  exit 2
+fi
+SANDBOX="${SANDBOX:-${REGISTERED:-read-only}}"
+case "$SANDBOX" in
+  read-only) ALLOW=(); TOOLS="Read,Grep,Glob" ;;
+  web-read) ALLOW=(--allowedTools WebFetch); TOOLS="WebSearch,WebFetch" ;;
+  *) echo "ERROR: unrecognised sandbox record for $SID: $SANDBOX" >&2; exit 2 ;;
+esac
+printf '%s' "$SANDBOX" > "$CLAUDE_DIR/sandbox"
 MODEL="${MODEL_ARG:-${CLAUDE_MODEL:-$MODEL}}"
 if [[ ! -d "$CWD" ]]; then
   echo "ERROR: recorded cwd no longer exists: $CWD" >&2
@@ -128,11 +154,11 @@ CLAUDE_CMD=(claude)
 if [[ -n "$ACCOUNT_KEY" ]]; then
   if command -v claude-usage > /dev/null 2>&1; then
     # Exact, or the account is gone: a near-miss name would resume elsewhere.
-    if [[ "$(claude-usage resolve "$ACCOUNT_KEY" 2> /dev/null)" != "$ACCOUNT_KEY" ]]; then
+    if [[ "$(claude-usage resolve "=$ACCOUNT_KEY" 2> /dev/null)" != "$ACCOUNT_KEY" ]]; then
       echo "ERROR: recorded account no longer exists: $ACCOUNT_KEY (see: claude-usage list)" >&2
       exit 2
     fi
-    CLAUDE_CMD=(claude-usage run "$ACCOUNT_KEY")
+    CLAUDE_CMD=(claude-usage run "=$ACCOUNT_KEY")
   elif [[ "$ACCOUNT_KEY" != main ]]; then
     echo "ERROR: this session runs on account $ACCOUNT_KEY, which needs claude-usage on PATH" >&2
     exit 2
@@ -160,7 +186,8 @@ set +e
     --safe-mode \
     --restricted \
     --strict-mcp-config \
-    --tools "Read,Grep,Glob" \
+    --tools "$TOOLS" \
+    ${ALLOW[@]+"${ALLOW[@]}"} \
     --permission-prompts none \
     --output-format json \
     --model "$MODEL" \

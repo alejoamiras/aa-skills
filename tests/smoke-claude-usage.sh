@@ -12,7 +12,7 @@ RESC="$ROOT/skills/claude/scripts/resume-claude.sh"
 # Physical path: claude-usage canonicalises the accounts root (/var → /private/var).
 S="$(cd "$(mktemp -d)" && pwd -P)"
 trap '[ -n "${KEEP:-}" ] && echo "kept $S" || rm -rf "$S"' EXIT
-export HOME="$S/home" CLAUDE_ACCOUNTS_ROOT="$S/accounts" XDG_CACHE_HOME="$S/cache" CLAUDE_USAGE_SKIP_MAIN=1
+export HOME="$S/home" CLAUDE_ACCOUNTS_ROOT="$S/accounts" XDG_CACHE_HOME="$S/cache" XDG_STATE_HOME="$S/state" CLAUDE_USAGE_SKIP_MAIN=1
 export TMPDIR="$S/tmp" CALLS="$S/calls"
 export PATH="$S/bin:$ROOT/bin:$PATH"
 unset CLAUDE_CONFIG_DIR CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_ACCOUNT
@@ -50,7 +50,7 @@ printf 'dir=%s token=%s apikey=%s bedrock=%s argv=%s\n' "${CLAUDE_CONFIG_DIR-uns
   "${CLAUDE_CODE_OAUTH_TOKEN-unset}" "${ANTHROPIC_API_KEY-unset}" "${CLAUDE_CODE_USE_BEDROCK-unset}" "$*" >> "$CALLS"
 if [[ " $* " == *" --output-format json "* ]]; then
   sid=11111111-2222-3333-4444-555555555555
-  prev=""; for a in "$@"; do [[ $prev == --resume ]] && sid=$a; prev=$a; done
+  prev=""; for a in "$@"; do [[ $prev == --resume || $prev == --session-id ]] && sid=$a; prev=$a; done
   printf '{"type":"result","session_id":"%s","result":"ok","is_error":false}\n' "$sid"
 fi
 STUB
@@ -77,6 +77,13 @@ t "flaky: one windowless reply is re-probed, not read as idle" grep -q '"account
 
 "$CU" refresh
 t "best: idle account wins" grep -q '^fresh (idle' <("$CU" best)
+t "other: skips the caller's own account" test "$(CLAUDE_CONFIG_DIR="$CLAUDE_ACCOUNTS_ROOT/fresh" "$CU" resolve other)" = zzz-soon
+t "other: another caller still gets the overall best" test "$(CLAUDE_CONFIG_DIR="$CLAUDE_ACCOUNTS_ROOT/zzz-soon" "$CU" resolve other)" = fresh
+tn "add: 'other' is reserved" "$CU" add other
+t "current: names the caller's roster account" test "$(CLAUDE_CONFIG_DIR="$CLAUDE_ACCOUNTS_ROOT/fresh" "$CU" current)" = fresh
+tn "other: an unknown caller is refused" env CLAUDE_CONFIG_DIR="$S" "$CU" resolve other
+mkdir -p "$S/cold-root/a" "$S/cold-root/b"
+t "other: with no snapshot yet, still skips the caller" test "$(CLAUDE_ACCOUNTS_ROOT="$S/cold-root" CLAUDE_CONFIG_DIR="$S/cold-root/a" "$CU" resolve other 2>/dev/null)" = b
 rm -rf "$CLAUDE_ACCOUNTS_ROOT/fresh"
 "$CU" refresh
 t "best: no premium anywhere picks the soonest reset" grep -q '^zzz-soon (no Fable left' <("$CU" best)
@@ -143,6 +150,16 @@ t "clu: -- means best, the rest to claude" grep -q "^dir=$Z .*argv=hello\$" <(la
 touch "$A/spent" "$Z/spent"
 "$CU" refresh
 t "best: a token wins once every known account is spent" grep -q '^tok-proton (token account' <("$CU" best)
+mkdir -p "$S/other-root/only" "$S/other-root/spent-one"; ahead 2 > "$S/other-root/spent-one/reset"; touch "$S/other-root/spent-one/spent"
+CLAUDE_ACCOUNTS_ROOT="$S/other-root" "$CU" refresh
+tn "other: a spent alternative is refused, not used as a fallback" env CLAUDE_ACCOUNTS_ROOT="$S/other-root" CLAUDE_CONFIG_DIR="$S/other-root/only" "$CU" resolve other
+mkdir -p "$S/other-root/other"
+tn "other: a legacy account named other is refused" env CLAUDE_ACCOUNTS_ROOT="$S/other-root" CLAUDE_CONFIG_DIR="$S/other-root/only" "$CU" resolve other
+CLAUDE_ACCOUNTS_ROOT="$S/other-root" "$CU" rename other spare > /dev/null 2>&1
+CLAUDE_ACCOUNTS_ROOT="$S/other-root" "$CU" refresh
+t "other: after the rename the selector works again" env CLAUDE_ACCOUNTS_ROOT="$S/other-root" CLAUDE_CONFIG_DIR="$S/other-root/only" "$CU" resolve other
+t "literal: =<key> reaches a renamed account by its key" test "$(CLAUDE_ACCOUNTS_ROOT="$S/other-root" "$CU" resolve =other)" = other
+tn "literal: =<key> refuses an unknown key" "$CU" resolve =nobody
 "$CU" rename tok-proton tp > /dev/null
 "$CU" run tp -p r 2> /dev/null
 t "rename: the token stays with the account" grep -q "^dir=$TA token=$TOK .*argv=-p r\$" <(last)
@@ -177,7 +194,17 @@ CD=$(sed -n 's/^CLAUDE_DIR=//p' "$S/rv.out")
 t "reviewer: CLAUDE_ACCOUNT reaches the token account" grep -q "^dir=$TA token=$TOK .*--safe-mode" <(last)
 t "reviewer: the account is recorded for resume" test "$(cat "$CD/account")" = tok-proton
 CLAUDE_ACCOUNT=soon "$RESC" "" "$S/prompt" "$CD" low > /dev/null 2>&1
-t "reviewer: resume stays on the recorded account" grep -q "^dir=$TA token=$TOK .*--resume 11111111-2222-3333-4444-555555555555" <(last)
+t "reviewer: resume stays on the recorded account" grep -q "^dir=$TA token=$TOK .*--resume $(cat "$CD/session_id")" <(last)
+mkdir -p "$S/nouuid"; printf '#!/bin/sh\nexit 127\n' > "$S/nouuid/uuidgen"; chmod +x "$S/nouuid/uuidgen"
+PATH="$S/nouuid:$PATH" CLAUDE_ACCOUNT=tp2 "$RUNC" "$S/prompt" "$S/repo" low read-only haiku > "$S/nu.out" 2> /dev/null
+t "reviewer: a missing uuidgen falls back to another id source" grep -qE '^SESSION_ID=[0-9a-f-]{36}$' "$S/nu.out"
+t "reviewer: the sandbox is recorded per session before launch" test "$(cat "$XDG_STATE_HOME/claude-consult/sessions/$(cat "$CD/session_id")")" = read-only
+CLAUDE_ACCOUNT=tp2 "$RUNC" "$S/prompt" "$S/repo" low web-read haiku > "$S/wr.out" 2> /dev/null
+WSID=$(sed -n 's/^SESSION_ID=//p' "$S/wr.out")
+"$RESC" "$WSID" "$S/prompt" > /dev/null 2>&1
+t "reviewer: a bare-UUID resume of a web session keeps web tools only" grep -q -- "--resume $WSID .*--tools WebSearch,WebFetch" <(last)
+: > "$XDG_STATE_HOME/claude-consult/sessions/$WSID"
+tn "reviewer: an empty sandbox record is refused, not read as legacy" "$RESC" "$WSID" "$S/prompt"
 mkdir -p "$Z/projects/p"; touch "$Z/projects/p/99999999-2222-3333-4444-555555555555.jsonl"
 "$RESC" 99999999-2222-3333-4444-555555555555 "$S/prompt" > /dev/null 2>&1
 t "reviewer: a UUID-only resume finds the account by its transcript" grep -q "^dir=$Z .*--resume 99999999" <(last)

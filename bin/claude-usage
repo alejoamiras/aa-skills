@@ -37,6 +37,14 @@
 #   claude-usage best            which account to use right now, and why
 #   claude-usage resolve <q>     the account key `run` would use (for scripts;
 #                                exit 1 = "best" is only the least-bad pick)
+#   other                        in run and resolve: the best account EXCEPT
+#                                the one this shell is on — for offloading
+#                                work; fails instead of falling back to it
+#   =<key>                       in run and resolve: that exact account key,
+#                                no name matching and no selector words (for
+#                                scripts that recorded a key)
+#   claude-usage current         the account this shell is on (its row in the
+#                                table; exit 1 when it cannot be told)
 #   claude-usage statusline      compact cached segment for statusline.sh
 #   claude-usage refresh         re-probe every account into the snapshot cache
 #
@@ -893,7 +901,7 @@ cmd_add() {
   [[ -n ${name} ]] || die "usage: claude-usage add <name> [--login [email]]"
   [[ -n ${extra} && ${mode} == token ]] && die "an email only goes with --login: claude-usage add ${name} --login ${extra}"
   [[ ${name} == main ]] && die "'main' is reserved for ~/.claude"
-  [[ ${name} == best ]] && die "'best' is reserved: it means \"pick for me\" in run and resolve"
+  [[ ${name} == best || ${name} == other ]] && die "'${name}' is reserved: it means \"pick for me\" in run and resolve"
   valid_name "${name}" || die "invalid name: ${name} (letters, digits, . _ - only)"
   # An existing label adds in place: a second directory under the same display
   # name would make every lookup ambiguous.
@@ -963,7 +971,7 @@ cmd_rename() {
   [[ ${key} == main ]] && die "main is the ~/.claude slot, not an account: it takes the name of the roster account logged into it (claude-usage add <name>)"
   [[ -d ${ACCOUNTS_ROOT}/${key} ]] || die "unknown account: ${old} (try: claude-usage list)"
   [[ ${new} == main ]] && die "'main' is reserved for ~/.claude"
-  [[ ${new} == best ]] && die "'best' is reserved: it means \"pick for me\" in run and resolve"
+  [[ ${new} == best || ${new} == other ]] && die "'${new}' is reserved: it means \"pick for me\" in run and resolve"
   local taken; taken=$(key_for "${new}")
   [[ ${taken} != "${key}" && -d ${ACCOUNTS_ROOT}/${taken} ]] &&
     die "name already in use: ${new}"
@@ -1043,8 +1051,8 @@ cmd_show() {
 
 # Key of the account best_row picks. Exit 1: only the least-bad pick (nothing
 # usable). Exit 2: nothing to pick.
-best_key() {
-  local rows name how waited=0
+ensure_snapshot() {
+  local waited=0
   if [[ ! -f ${SNAPSHOT} ]]; then
     printf 'claude-usage: no snapshot yet — probing every account once…\n' >&2
     # A child, not cmd_refresh: run execs claude next, which would keep this
@@ -1056,7 +1064,14 @@ best_key() {
       sleep 1; waited=$((waited + 1))
     done
   fi
+}
+
+# $1, when given, is a display name to leave out (the caller's own account).
+best_key() {
+  local exclude="${1:-}" rows name how
+  ensure_snapshot
   rows=$(cached_rows) || return 2
+  [[ -n ${exclude} ]] && rows=$(awk -F'\t' -v x="${exclude}" '$2 != x' <<< "${rows}")
   IFS=$'\t' read -r name _ _ _ how < <(best_row <<< "${rows}") || return 2
   # Rows carry display names. Exactly one account must still answer to it:
   # none means a rename since the snapshot, two a rename racing an add.
@@ -1069,12 +1084,42 @@ best_key() {
   [[ ${how} != fallback ]]
 }
 
+# The best account other than the caller's. Identity is read only once a
+# snapshot exists (the slot's name comes from it), and anything short of a
+# usable, known, distinct account is an error: falling back would land the work
+# on the very account it was meant to spare.
+other_key() {
+  local me key rc=0
+  if account_rows | cut -f1 | grep -qxF other; then
+    die "an account is named 'other', which is now a selector — rename it: claude-usage rename other <new-name>"
+  fi
+  ensure_snapshot
+  me=$(current_account)
+  [[ ${me} == "${UNKNOWN}" ]] && die "cannot tell which account this shell is on (CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-unset})"
+  key=$(best_key "${me}") || rc=$?
+  ((rc == 0)) || die "no account besides ${me} has headroom right now — run: claude-usage"
+  printf '%s' "${key}"
+}
+
+literal_key() {
+  local k="$1"
+  if [[ ${k} == main ]] || { valid_name "${k}" && [[ -d ${ACCOUNTS_ROOT}/${k} ]]; }; then
+    printf '%s' "${k}"
+  else
+    die "no account with key: ${k}"
+  fi
+}
+
 cmd_resolve() {
   local q="${1:-}" rc=0
-  [[ -n ${q} ]] || die "usage: claude-usage resolve <name|best>"
+  [[ -n ${q} ]] || die "usage: claude-usage resolve <name|best|other>"
   if [[ ${q} == best ]]; then
     best_key || rc=$?
     ((rc == 2)) && die "no usable account — run: claude-usage"
+  elif [[ ${q} == other ]]; then
+    other_key || exit 1
+  elif [[ ${q} == =* ]]; then
+    literal_key "${q#=}" || exit 1
   else
     resolve_key "${q}" || exit 1
   fi
@@ -1168,6 +1213,10 @@ cmd_run() {
   if [[ ${q} == best ]]; then
     key=$(best_key) || rc=$?
     ((rc == 2)) && die "no usable account — run: claude-usage"
+  elif [[ ${q} == other ]]; then
+    key=$(other_key) || exit 1
+  elif [[ ${q} == =* ]]; then
+    key=$(literal_key "${q#=}") || exit 1
   else
     key=$(resolve_key "${q}") || exit 1
   fi
@@ -1214,6 +1263,7 @@ case "${1:-table}" in
   statusline) cmd_statusline ;;
   run)        shift; cmd_run "$@" ;;
   resolve)    shift; cmd_resolve "$@" ;;
+  current)    ensure_snapshot; me=$(current_account); printf '%s\n' "${me}"; [[ ${me} != "${UNKNOWN}" ]] ;;
   add)        shift; cmd_add "$@" ;;
   remove|rm)  shift; cmd_remove "$@" ;;
   rename)     shift; cmd_rename "$@" ;;
