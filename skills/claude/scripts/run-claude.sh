@@ -103,7 +103,8 @@ ACCOUNT_KEY=""
 CLAUDE_CMD=(claude)
 if command -v claude-usage > /dev/null 2>&1; then
   set +e
-  ACCOUNT_KEY=$(claude-usage resolve "$ACCOUNT" 2> /dev/null)
+  # The model decides which bucket binds: Fable work needs Fable headroom.
+  ACCOUNT_KEY=$(CLAUDE_USAGE_MODEL="$MODEL" claude-usage resolve "$ACCOUNT" 2> /dev/null)
   RC=$?
   set -e
   if [[ -z "$ACCOUNT_KEY" && "$ACCOUNT" != best ]]; then

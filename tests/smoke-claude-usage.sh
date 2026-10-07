@@ -32,7 +32,9 @@ mkdir -p "$S/bin"
 cat > "$S/bin/claude" <<'STUB'
 #!/usr/bin/env bash
 acct=$(basename "${CLAUDE_CONFIG_DIR:-main}")
-[[ $1 == auth ]] && { printf '{\n  "loggedIn": true,\n  "email": "%s@x",\n  "subscriptionType": "max"\n}\n' "$acct"; exit 0; }
+plan=$(cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plan" 2>/dev/null || echo max)
+org=$(cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/org" 2>/dev/null || echo "org-$acct")
+[[ $1 == auth ]] && { printf '{\n  "loggedIn": true,\n  "email": "%s@x",\n  "orgId": "%s",\n  "subscriptionType": "%s"\n}\n' "$acct" "$org" "$plan"; exit 0; }
 if [[ " $* " == *" /usage "* ]]; then
   echo "You are currently using your subscription to power your Claude Code usage"
   [[ -f $CLAUDE_CONFIG_DIR/reset ]] || exit 0   # idle: no window open anywhere
@@ -56,6 +58,21 @@ fi
 STUB
 chmod +x "$S/bin/claude"
 last() { tail -1 "$CALLS"; }
+# The API: replies come from $NET/<cksum of the bearer token> ("<code>" then
+# header lines); no file means unreachable, as real curl reports it.
+export NET="$S/net"; mkdir -p "$NET"
+cat > "$S/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+printf '%s keylog=%s\n' "$*" "${SSLKEYLOGFILE-unset}" >> "$NET/argv"
+[[ -f $NET/slow ]] && sleep 1
+tok=$(sed -n 's/^header = "Authorization: Bearer \(.*\)"$/\1/p')
+f="$NET/$(printf '%s' "$tok" | cksum | cut -d' ' -f1)"
+[[ -n $tok && -f $f ]] || { printf '\n000\n'; exit 7; }
+code=$(head -1 "$f")
+printf 'HTTP/2 %s\r\n' "$code"; tail -n +2 "$f" | sed 's/$/\r/'; printf '\r\n\n%s\n' "$code"
+exit "$(cat "$f.exit" 2>/dev/null || echo 0)"   # e.g. 28: timed out after the headers
+STUB
+chmod +x "$S/bin/curl"
 
 # The slot's stack, as install.sh would leave it.
 mkdir -p "$HOME/.claude/skills/alpha" "$HOME/.claude/skills/beta" "$HOME/.claude/skills/synced"
@@ -77,7 +94,8 @@ t "flaky: one windowless reply is re-probed, not read as idle" grep -q '"account
 
 "$CU" refresh
 t "best: idle account wins" grep -q '^fresh (idle' <("$CU" best)
-t "other: skips the caller's own account" test "$(CLAUDE_CONFIG_DIR="$CLAUDE_ACCOUNTS_ROOT/fresh" "$CU" resolve other)" = zzz-soon
+t "other: skips the caller's own account" test "$(CLAUDE_USAGE_MODEL=sonnet CLAUDE_CONFIG_DIR="$CLAUDE_ACCOUNTS_ROOT/fresh" "$CU" resolve other)" = zzz-soon
+tn "other: Fable work refuses accounts with no Fable left" env CLAUDE_CONFIG_DIR="$CLAUDE_ACCOUNTS_ROOT/fresh" "$CU" resolve other
 t "other: another caller still gets the overall best" test "$(CLAUDE_CONFIG_DIR="$CLAUDE_ACCOUNTS_ROOT/zzz-soon" "$CU" resolve other)" = fresh
 tn "add: 'other' is reserved" "$CU" add other
 t "current: names the caller's roster account" test "$(CLAUDE_CONFIG_DIR="$CLAUDE_ACCOUNTS_ROOT/fresh" "$CU" current)" = fresh
@@ -141,9 +159,9 @@ t "resolve: a unique part of a name" grep -q "^dir=$Z .*argv=-p a\$" <(last)
 clu tok > /dev/null 2> "$S/amb.err"; rc=$?
 t "resolve: ambiguous lists the candidates and fails" sh -c '[ "$1" -ne 0 ] && grep -q "tok-proton" "$2" && grep -q "tok-two" "$2"' _ "$rc" "$S/amb.err"
 tn "resolve: no match fails" clu nobody -p x
-clu -p "say ok" 2> /dev/null
+CLAUDE_USAGE_MODEL=sonnet clu -p "say ok" 2> /dev/null
 t "clu: a leading option means best + passthrough" grep -q "^dir=$Z .*argv=-p say ok\$" <(last)
-clu -- hello 2> /dev/null
+CLAUDE_USAGE_MODEL=sonnet clu -- hello 2> /dev/null
 t "clu: -- means best, the rest to claude" grep -q "^dir=$Z .*argv=hello\$" <(last)
 
 # --- ranking, rename, expiry --------------------------------------------------
@@ -185,6 +203,158 @@ rm "$CLAUDE_ACCOUNTS_ROOT/alias"
 
 "$CU" remove tok-two > "$S/rm.out" 2>&1
 t "remove: deletes the token with the account" sh -c '[ ! -e "$1" ] && grep -q "token file deleted" "$2"' _ "$T2" "$S/rm.out"
+
+# --- token usage probe and slot pairing --------------------------------------
+mktok() { printf 'sk-ant-oat01-%s-%s' "$1" "$(printf 'q%.0s' $(seq 60))"; }
+reply() { local f; f="$NET/$(printf '%s' "$1" | cksum | cut -d' ' -f1)"; shift; printf '%s\n' "$@" > "$f"; }
+H=anthropic-ratelimit-unified
+TK_FREE=$(mktok free) TK_PAIR=$(mktok pair) TK_DEAD=$(mktok dead)
+reply "$TK_FREE" 200 "anthropic-organization-id: org-free" "$H-5h-utilization: 0.08" "$H-5h-reset: $(( $(date +%s) + 3600 ))" \
+  "$H-7d-utilization: 0.61" "$H-7d-reset: $(( $(date +%s) + 86400 ))" "$H-7d_oi-utilization: 0.34" "$H-7d_oi-reset: $(( $(date +%s) + 86400 ))"
+reply "$TK_PAIR" 200 "anthropic-organization-id: org-main" "$H-5h-utilization: 0.5" "$H-7d-utilization: 0.5"
+reply "$TK_DEAD" 401 "request-id: req_x"
+NR="$S/net-root"
+for a in free pair dead; do v="TK_$(tr '[:lower:]' '[:upper:]' <<< "$a")"; printf '%s' "${!v}" | CLAUDE_ACCOUNTS_ROOT="$NR" "$CU" add "tk-$a" > /dev/null 2>&1; done
+: > "$NET/argv"
+nr() { env -u CLAUDE_USAGE_SKIP_MAIN CLAUDE_ACCOUNTS_ROOT="$NR" XDG_CACHE_HOME="$S/cache-net" "$CU" "$@"; }
+nr --json > "$S/net.json"
+t "probe: headers become session, week and premium headroom" grep -q '"account":"tk-free".*"plan":"token","session_left_pct":92,.*"week_left_pct":39,.*"premium_model":"Fable","premium_left_pct":66' "$S/net.json"
+t "probe: the token goes to curl on stdin, never in argv" sh -c 'test -s "$1" && ! grep -q sk-ant "$1"' _ "$NET/argv"
+t "probe: a rejected token is marked unusable" grep -q '"account":"tk-dead".*"note":"token rejected (HTTP 401)' "$S/net.json"
+t "pairing: a token sharing the slot's personal org is the active row" sh -c 'grep -q "\"account\":\"tk-pair\",\"active\":true" "$1" && ! grep -q "\"account\":\"main\"" "$1"' _ "$S/net.json"
+f=$(ls "$S"/cache-net/claude-usage/*/token-tk-pair.tsv); awk -F'\t' -v OFS='\t' -v o=$(( $(date +%s) - 3600 )) '{ $3 = o; print }' "$f" > "$f.n" && mv "$f.n" "$f"
+t "pairing: a newer slot reading supplies the numbers" grep -q '"account":"tk-pair".*"week_resets":"idle"' <(CLAUDE_USAGE_TTL=99999 nr --json)
+nr refresh
+t "pairing: current names it from the slot" test "$(nr current)" = tk-pair
+calls=$(wc -l < "$NET/argv")
+nr --json > /dev/null
+t "probe: a reading is reused within the TTL" test "$(wc -l < "$NET/argv")" -eq "$calls"
+echo team > "$HOME/.claude/plan"
+t "pairing: never by org on a team plan" grep -q '"account":"main","active":true' <(nr --json)
+rm -f "$HOME/.claude/plan"
+t "probe: no proxy, and no TLS key log reaches curl" sh -c 'grep -q -- "--noproxy \*" "$1" && ! grep -q "keylog=/" "$1"' _ "$NET/argv"
+{ SSLKEYLOGFILE=/k XDG_CACHE_HOME="$S/cache-x" bash -x "$CU" --json; printf '%s' "$TK_FREE" | XDG_CACHE_HOME="$S/cache-x" bash -x "$CU" add tk-free;
+  XDG_CACHE_HOME="$S/cache-x" bash -x "$CU" show tk-free; XDG_CACHE_HOME="$S/cache-x" bash -x "$CU" run tk-free -p x; } > "$S/xt.out" 2>&1 \
+  < /dev/null
+t "xtrace: a traced probe, add, show and run never print the token" sh -c 'grep -q "token_fetch" "$1" && ! grep -q "oat01-free" "$1"' _ "$S/xt.out"
+calls=$(wc -l < "$NET/argv")
+nr --json > /dev/null; nr --json > /dev/null
+t "probe: a failed probe backs off for one TTL" test "$(wc -l < "$NET/argv")" -eq "$calls"
+printf '%s' "$TK_FREE" | CLAUDE_ACCOUNTS_ROOT="$NR" "$CU" add tk-free > /dev/null 2>&1
+nr --json > /dev/null
+t "probe: a re-added token is a new credential, probed afresh" test "$(wc -l < "$NET/argv")" -eq $((calls + 1))
+f=$(ls "$S"/cache-net/claude-usage/*/token-tk-free.tsv); old=$(( $(date +%s) - 7200 ))
+awk -F'\t' -v OFS='\t' -v o="$old" '{ $3 = o; print }' "$f" > "$f.n" && mv "$f.n" "$f"
+calls=$(wc -l < "$NET/argv")
+_CLAUDE_USAGE_PASSIVE=1 nr refresh
+CLAUDE_USAGE_TTL=99999 nr --json > "$S/pass.json"
+t "passive refresh: never probes, rows keep the reading's own age" sh -c 'test "$(wc -l < "$1")" -eq "$2" && grep -q "\"account\":\"tk-free\".*\"observed_at\":$3" "$4"' \
+  _ "$NET/argv" "$calls" "$old" "$S/pass.json"
+t "statusline: an old token reading is marked stale" grep -q stale <(CLAUDE_CONFIG_DIR="$NR/tk-free" nr statusline)
+
+# Ranking and exhaustion, on tokens alone: <name> <session used> <week used> <fable used> [status].
+RK="$S/rank-root"
+rk() { env CLAUDE_ACCOUNTS_ROOT="$RK" XDG_CACHE_HOME="$S/cache-rk" "$CU" "$@"; }
+tokacct() {
+  local tk; tk=$(mktok "$1")
+  reply "$tk" "${6:-200}" "anthropic-organization-id: org-$5" "$H-5h-utilization: $2" "$H-7d-utilization: $3" \
+    "$H-7d-reset: $(( $(date +%s) + 86400 ))" "$H-7d_oi-utilization: $4" "$H-7d_oi-status: ${7:-allowed}"
+  printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add "$1" > /dev/null 2>&1
+}
+tokacct lopsided 0.02 0.98 0.0 a
+tokacct even 0.0 0.0 0.0 b
+t "rank: the tightest bucket binds, 98/2/100 below 100/100/100" test "$(rk resolve best 2>/dev/null)" = even
+rm -rf "${RK:?}"/*
+tokacct weekzero 0.0 1.0 0.0 c
+mkdir -p "$RK/unmeasured" && printf '%s' "$(mktok nowhere)" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add unmeasured > /dev/null 2>&1
+t "exhausted: an unmeasured token beats a known-spent one" test "$(rk resolve best 2>/dev/null)" = unmeasured
+tn "exhausted: other never offers a known-spent token" env CLAUDE_CONFIG_DIR="$RK/unmeasured" CLAUDE_ACCOUNTS_ROOT="$RK" XDG_CACHE_HOME="$S/cache-rk" "$CU" resolve other
+rm -rf "${RK:?}"/*
+tk=$(mktok limited)
+reply "$tk" 429 "$H-7d-utilization: 0.0" "HTTP/2 429" "anthropic-organization-id: org-d" "$H-5h-utilization: 0.1" "$H-7d-utilization: 0.2" \
+  "$H-7d_sonnet-utilization: 0.0" "$H-7d_oi-utilization:  0.3 " "$H-7d_oi-status: rejected"
+printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add limited > /dev/null 2>&1
+t "headers: final block, exact Fable bucket, a rejected status spends it" grep -q '"account":"limited".*"week_left_pct":80,.*"premium_left_pct":0' <(rk --json)
+tk=$(mktok down); reply "$tk" 503 "$H-5h-utilization: 0.1" "$H-7d-utilization: 0.2"
+printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add down > /dev/null 2>&1
+t "headers: a 5xx is a failed observation, no numbers" grep -q '"account":"down".*"session_left_pct":null' <(rk --json)
+rm -rf "${RK:?}"/*
+touch "$NET/slow"; tokacct solo 0.1 0.1 0.1 e; rm -rf "$S/cache-rk"; : > "$NET/argv"
+for _ in 1 2 3; do rk --json > /dev/null & done; wait; rm -f "$NET/slow"
+t "lock: concurrent tables probe an account once" test "$(wc -l < "$NET/argv")" -eq 1
+
+# Aliases: the caller's own quota under another credential is not "other".
+AL="$S/alias-root"; mkdir -p "$AL/lg"; ahead 2 > "$AL/lg/reset"
+al() { env CLAUDE_ACCOUNTS_ROOT="$AL" XDG_CACHE_HOME="$S/cache-al" "$CU" "$@"; }
+RK="$AL"; tokacct tk-lg 0.0 0.0 0.0 lg; tokacct tk-other 0.5 0.5 0.5 zz
+t "alias: other skips a token in the caller's organization" test "$(CLAUDE_USAGE_MODEL=sonnet CLAUDE_CONFIG_DIR="$AL/lg" al resolve other 2>/dev/null)" = tk-other
+
+pv() { env CLAUDE_ACCOUNTS_ROOT="$AL" XDG_CACHE_HOME="$S/cache-pv" "$CU" "$@"; }
+_CLAUDE_USAGE_PASSIVE=1 pv refresh; pv --json > /dev/null
+t "snapshot: a table's fresh readings replace a passive snapshot's blanks" grep -q '^tk-lg (' <(CLAUDE_USAGE_MODEL=sonnet pv best)
+
+
+# Round two: required buckets, refusal and transfer classification, snapshot
+# consistency, a dead alias of the slot, lock bounds, team organizations.
+RK="$S/r2-root"; mkdir -p "$RK"
+rk() { env CLAUDE_ACCOUNTS_ROOT="$RK" XDG_CACHE_HOME="$S/cache-r2" "$CU" "$@"; }
+tokacct ninety 0.1 0.1 0.1 n1
+tk=$(mktok nofable); reply "$tk" 200 "$H-5h-utilization: 0.0" "$H-7d-utilization: 0.0"
+printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add nofable > /dev/null 2>&1
+t "required: Fable work ranks 100/100/unknown below 90/90/90" test "$(rk resolve best 2>/dev/null)" = ninety
+rm -rf "${RK:?}"/* "$S/cache-r2"
+tk=$(mktok bare429); reply "$tk" 429 "request-id: r"
+printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add bare429 > /dev/null 2>&1
+printf '%s' "$(mktok offline)" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add offline > /dev/null 2>&1
+t "classify: a 429 without headers is spent, not unknown" test "$(rk resolve best 2>/dev/null)" = offline
+tk=$(mktok cut); reply "$tk" 200 "$H-5h-utilization: 0.0" "$H-7d-utilization: 0.0" "$H-7d_oi-utilization: 0.0"
+echo 28 > "$NET/$(printf '%s' "$tk" | cksum | cut -d' ' -f1).exit"
+printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add cut > /dev/null 2>&1
+t "classify: curl timing out after 200 headers is a failed observation" grep -q '"account":"cut".*"session_left_pct":null' <(rk --json)
+rm -rf "${RK:?}"/* "$S/cache-r2"
+tk=$(mktok fading); tokacct fading 0.0 0.0 0.0 f1; tokacct spare 0.5 0.5 0.5 f2
+rk refresh
+t "consistency: setup, the fresh account is best" test "$(rk resolve best)" = fading
+reply "$tk" 401 "request-id: r"
+f=$(ls "$S"/cache-r2/claude-usage/*/token-fading.tsv)
+awk -F'\t' -v OFS='\t' '{ $3 = 1; print }' "$f" > "$f.n" && mv "$f.n" "$f"
+rk show fading > /dev/null; _CLAUDE_USAGE_PASSIVE=1 rk refresh
+t "consistency: a token show found revoked is never picked after" test "$(rk resolve best)" = spare
+rm -rf "${RK:?}"/* "$S/cache-r2"
+tk=$(mktok mine); reply "$tk" 200 "anthropic-organization-id: org-main" "$H-5h-utilization: 0.0" "$H-7d-utilization: 0.0" "$H-7d_oi-utilization: 0.0"
+printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add mine > /dev/null 2>&1
+rkm() { env -u CLAUDE_USAGE_SKIP_MAIN CLAUDE_ACCOUNTS_ROOT="$RK" XDG_CACHE_HOME="$S/cache-r2" "$CU" "$@"; }
+rkm --json > /dev/null
+reply "$tk" 401 "request-id: r"
+f=$(ls "$S"/cache-r2/claude-usage/*/token-mine.tsv); awk -F'\t' -v OFS='\t' '{ $3 = 1; print }' "$f" > "$f.n" && mv "$f.n" "$f"
+rkm --json > "$S/dead.json"
+t "dead alias: main stays the active, usable row" sh -c 'grep -q "\"account\":\"main\",\"active\":true" "$1" && grep -q "\"account\":\"mine\",\"active\":false" "$1"' _ "$S/dead.json"
+t "dead alias: best launches main" test "$(rkm resolve best 2>/dev/null)" = main
+rm -rf "${RK:?}"/*; tokacct locked 0.1 0.1 0.1 l1
+: > "$S/notadir"
+t "lock: an unwritable cache dir fails fast with a reason" grep -q 'cache dir not writable' <(env CLAUDE_ACCOUNTS_ROOT="$RK" XDG_CACHE_HOME="$S/notadir" "$CU" show locked)
+d=$(rk refresh > /dev/null 2>&1; ls -d "$S"/cache-r2/claude-usage/*/)
+rm -f "$d"token-locked.tsv; mkdir -p "$d"token-locked.tsv.lock; echo 999999 > "$d"token-locked.tsv.lock/pid
+: > "$NET/argv"
+rk show locked > /dev/null
+t "lock: a dead holder's lock is reclaimed, then released" sh -c 'test "$(wc -l < "$1")" -eq 1 && [ ! -e "$2" ]' _ "$NET/argv" "$d"token-locked.tsv.lock
+TM="$S/team-root"; mkdir -p "$TM/t1" "$TM/t2"
+for a in t1 t2; do echo team > "$TM/$a/plan"; echo org-team > "$TM/$a/org"; ahead 2 > "$TM/$a/reset"; done
+t "team: the same team organization with another email is still other" test "$(CLAUDE_USAGE_MODEL=sonnet CLAUDE_CONFIG_DIR="$TM/t1" CLAUDE_ACCOUNTS_ROOT="$TM" XDG_CACHE_HOME="$S/cache-tm" "$CU" resolve other 2>/dev/null)" = t2
+
+
+# Round three: an older slot reading never undoes a newer refusal; show copes with a bare 429.
+rm -rf "${RK:?}"/* "$S/cache-r2"
+tokacct spare2 0.5 0.5 0.5 s2
+tk=$(mktok spentmine); reply "$tk" 200 "anthropic-organization-id: org-main" "$H-5h-utilization: 1.0" "$H-7d-utilization: 1.0" "$H-7d_oi-utilization: 1.0"
+printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add spentmine > /dev/null 2>&1
+rkm refresh
+f=$(ls "$S"/cache-r2/claude-usage/*/snapshot.v3.tsv)
+awk -F'\t' -v OFS='\t' '$2 == "main" { $13 = 1 } { print }' "$f" > "$f.n" && mv "$f.n" "$f"
+t "pairing: an older slot reading never revives a newer spent token" test "$(rkm resolve best 2>/dev/null)" = spare2
+tk=$(mktok bareshow); reply "$tk" 429 "request-id: r"
+printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add bareshow > /dev/null 2>&1
+t "show: a bare 429 prints as refused, unknown numbers, no crash" sh -c '"$@" > "$0" 2>&1 && grep -q "^refused" "$0" && grep -q "Current session: unknown" "$0"' "$S/show.out" env CLAUDE_ACCOUNTS_ROOT="$RK" XDG_CACHE_HOME="$S/cache-r2" "$CU" show bareshow
 
 # --- reviewer scripts ---------------------------------------------------------
 echo "review this" > "$S/prompt"; mkdir -p "$S/repo"

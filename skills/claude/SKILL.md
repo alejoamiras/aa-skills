@@ -84,7 +84,7 @@ A Claude Code session can hand a task to a different roster account to spare its
   - `read-only` for codebase research, with `<cwd>` set to the repo. `web-read` for web research, with `<cwd>` set to an empty `mktemp -d`: WebSearch plus WebFetch on any domain, no file tools.
   - A session keeps its sandbox for life: run-claude.sh records it per session id, and resume-claude.sh refuses records that disagree.
   - Pick the model the task needs (`sonnet` for a research fan-out). Run several with `run_in_background`, then read each `RESPONSE_FILE`.
-- **Limits**: each worker starts with no context, so brief it fully. It cannot write. Results come back as files, not task notifications. Setup-token accounts report no usage, so `other` may pick one blindly.
+- **Limits**: each worker starts with no context, so brief it fully. It cannot write. Results come back as files, not task notifications. Accounts are ranked for the model you pass (run-claude.sh hands it to `claude-usage` as `CLAUDE_USAGE_MODEL`): Fable work skips an account with no Fable left. Setup-token accounts cannot read `/usage`, so `claude-usage` reads their headroom from the rate-limit headers of one 1-token Fable request, at most once per TTL. `other` skips every alias of the caller's account (same email or organization). A token that was never measured is picked only after every account with measured headroom.
 - **Network caveat**: WebFetch reaches private addresses over HTTPS (verified 2026-10-06; plain HTTP fails because WebFetch upgrades it). A `web-read` worker holds no repo content, but a hostile page could steer it at an HTTPS service on the local network. Don't use `web-read` where such services are sensitive.
 
 ## Writing the prompt

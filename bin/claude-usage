@@ -3,19 +3,25 @@
 # you own, without logging in and out.
 #
 # Each account gets its own CLAUDE_CONFIG_DIR, which is what isolates the
-# credential (Claude Code namespaces its keychain entry per config dir). Usage
-# comes from `claude -p "/usage"`, which the CLI answers locally — no API call,
-# no token ever leaves the keychain, $0.00 per check.
+# credential (Claude Code namespaces its keychain entry per config dir). A
+# login's usage comes from `claude -p "/usage"`: no model turn, no quota spent,
+# and its credential never leaves Claude Code. Token accounts differ; see below.
 #
-# Everything reads as headroom LEFT, and rows sort best-account-first: most
-# premium-model headroom, ties broken by whichever window frees up soonest.
+# Everything reads as headroom LEFT, and rows sort best-account-first for the
+# model CLAUDE_USAGE_MODEL names (default fable): an account with any bucket
+# that model draws on at 0 is unusable; the rest rank by their tightest bucket
+# (session, week, and the model's own weekly bucket when it has one), then by
+# weekly headroom. Accounts with missing measurements follow the measured
+# ones; spent accounts come last, soonest weekly reset first.
 #
 # ~/.claude ("main") is a SLOT, not an account: whatever is logged into it is
 # what a plain `claude` uses, and that changes whenever you log out and back in
 # as someone else. Named accounts under the accounts root are the roster —
 # each keeps its own login, so its identity never drifts. The table matches
-# the slot to the roster by email and marks that account ACTIVE; a slot login
-# nobody in the roster matches is listed as "main" until you `add` it.
+# the slot to the roster by email, else (personal max/pro plans only, where an
+# organization is one person) by organization id, and marks that account
+# ACTIVE; a slot login nobody in the roster matches is listed as "main" until
+# you `add` it.
 #
 #   claude-usage                 table for every account
 #   claude-usage --json          machine-readable (statusline, cron)
@@ -48,9 +54,15 @@
 #   claude-usage statusline      compact cached segment for statusline.sh
 #   claude-usage refresh         re-probe every account into the snapshot cache
 #
-# Token accounts: a setup-token is inference-only, so Claude Code reports no
-# usage for it; the table shows its expiry instead and `best` picks one only
-# when no account with known headroom is usable.
+# Token accounts: a setup-token is inference-only (no user:profile scope), so
+# /usage cannot read it. Instead ONE 1-token Fable request to api.anthropic.com
+# returns the unified rate-limit headers (5h, 7d, and 7d_oi, the Fable week)
+# plus the organization id. Each attempt, failed ones included, is reused for
+# CLAUDE_USAGE_TTL. It spends a sliver of real quota and, on an idle account,
+# opens its 5h window, so only explicit commands probe: the table, --json,
+# show, best, and resolve/run when a reading is stale; the status line's
+# background refresh reuses cached readings. CLAUDE_USAGE_PROBE_MODEL overrides
+# the model; CLAUDE_USAGE_TOKEN_PROBE=0 turns the probe off.
 #
 # Accepted limits: the no-coreutils watchdog bounds the probe but not any
 # grandchild it leaves behind; two refreshers can overlap if one is stolen from
@@ -82,6 +94,12 @@ TOKEN_FILE="oauth-token"
 TOKEN_DATE="oauth-token.added"
 TOKEN_TTL=$((365 * 86400))
 TOKEN_WARN_DAYS=30
+# Fixed host on purpose: ANTHROPIC_BASE_URL could carry a token to a gateway.
+PROBE_URL="https://api.anthropic.com/v1/messages"
+# The Fable bucket header appears only for a request ON a Fable model.
+PROBE_MODEL="${CLAUDE_USAGE_PROBE_MODEL:-claude-fable-5-1}"
+PREMIUM_BUCKET="7d_oi" PREMIUM_LABEL="Fable"
+TARGET_MODEL="${CLAUDE_USAGE_MODEL:-fable}"
 # Everything that outranks a config dir's own login in Claude Code's auth
 # precedence (cloud providers, bearer token, API key, apiKeyHelper's peers, the
 # OAuth-token variable, Anthropic profiles), plus the endpoint and extra
@@ -104,7 +122,8 @@ CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/claude-usage"
 # snapshot between roots would serve each the other's numbers.
 [[ ${ACCOUNTS_ROOT} != "${HOME}/.claude-accounts" ]] &&
   CACHE_DIR="${CACHE_DIR}/$(printf '%s' "${ACCOUNTS_ROOT}" | cksum | cut -d' ' -f1)"
-SNAPSHOT="${CACHE_DIR}/snapshot.tsv"
+# v3 holds login rows only, with org id and observation time.
+SNAPSHOT="${CACHE_DIR}/snapshot.v3.tsv"
 LOCK_DIR="${CACHE_DIR}/refresh.lock"
 TTL="${CLAUDE_USAGE_TTL:-600}"
 
@@ -355,37 +374,317 @@ usage_text() {
   run_claude "$1" -p "/usage" --safe-mode --allowed-tools "" --no-session-persistence
 }
 
-# One tab-separated record per account, prefixed with a sort key. Runs in a
-# subshell per account so the whole table fans out in parallel.
-probe() {
-  local name="$1" dir="$2" auth email plan usage line
-  local s_left s_reset w_left w_reset p_label p_left key
+token_cache() { printf '%s/token-%s.tsv' "${CACHE_DIR}" "$1"; }
+# The organization a token answered for, as "<gen>\t<org>": identity, kept
+# apart from readings so a failed probe never forgets it.
+token_org_file() { printf '%s/token-%s.org' "${CACHE_DIR}" "$1"; }
 
-  # A token cannot answer /usage (it is inference-only), and the probe strips
-  # it from the env anyway: report what is known locally, the expiry.
-  if [[ ${dir} != "${MAIN_DIR}" && -f ${dir}/${TOKEN_FILE} ]]; then
-    key=$(token_days_left "$(basename "${dir}")")
-    if [[ ${key} == -* ]]; then
-      printf '%s\t%s\t-\ttoken\t-\t-\t-\t-\t-\t-\t0\ttoken expired — run: claude-usage add %s\n' \
-        "${NEVER}" "${name}" "${name}"
-    else
-      # After every account with readable headroom, before the unusable ones.
-      printf '998%s\t%s\t-\ttoken\t-\t-\t-\t-\t-\t-\t0\t\n' "${NEVER}" "${name}"
-    fi
+# Shell tracing would print a token verbatim, so every line holding one runs
+# between these; the depth count keeps a nested pair from re-enabling early.
+XT_DEPTH=0 XT_WAS=0
+xtrace_off() { [[ $- == *x* ]] && XT_WAS=1; { set +x; } 2> /dev/null; XT_DEPTH=$((XT_DEPTH + 1)); }
+xtrace_restore() {
+  XT_DEPTH=$((XT_DEPTH - 1))
+  ((XT_DEPTH == 0 && XT_WAS)) && { XT_WAS=0; set -x; }
+  return 0
+}
+
+# Which credential a reading belongs to, without reading the credential: a
+# re-added token is a new file (new inode and mtime), so its old readings and
+# organization stop applying.
+token_gen() {
+  local f="${ACCOUNTS_ROOT}/$1/${TOKEN_FILE}" g
+  g=$(stat -c '%i:%Y:%s' "${f}" 2> /dev/null)
+  [[ ${g} =~ ^[0-9]+:[0-9]+:[0-9]+$ ]] || g=$(stat -f '%i:%m:%z' "${f}" 2> /dev/null)
+  [[ ${g} =~ ^[0-9]+:[0-9]+:[0-9]+$ ]] || { printf -- '-'; return; }
+  printf '%s' "${g}" | cksum | cut -d' ' -f1
+}
+
+token_org() {
+  local g="" o="" f
+  f=$(token_org_file "$1")
+  [[ -f ${f} ]] && IFS=$'\t' read -r g o < "${f}"
+  if [[ ${g} == "$(token_gen "$1")" && ${o} =~ ^[A-Za-z0-9_-]+$ ]]; then printf '%s' "${o}"; else printf -- '-'; fi
+}
+
+# Epoch -> the CLI's own reset spelling ("Oct 12 at 5am"), which to_epoch and
+# reset_day already read.
+fmt_reset() {
+  [[ $1 =~ ^[0-9]+$ ]] || { printf -- '-'; return; }
+  fmt_epoch "$1" '%b %-d at %-I:%M%p' | sed -E -e 's/AM$/am/' -e 's/PM$/pm/' -e 's/:00(am|pm)$/\1/'
+}
+
+# Utilization fraction ("0.34") -> whole percent LEFT, "-" when unparseable.
+frac_left() {
+  [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]] || { printf -- '-'; return; }
+  awk -v u="$1" 'BEGIN { l = 100 - int(u * 100 + 0.5); if (l < 0) l = 0; printf "%d", l }'
+}
+
+# A token reading, one line: "gen model obs result org s_left s_reset s_status
+# w_left w_reset w_status p_left p_reset p_status reason", every empty field
+# "-" (read collapses adjacent tabs). result: ok, rejected (429: numbers kept),
+# dead (credential refused), failed (no numbers), none (never probed). Prints
+# nothing when the cached line belongs to another credential or model.
+token_read() {
+  local f g m
+  f=$(token_cache "$1")
+  [[ -f ${f} ]] || return 1
+  IFS=$'\t' read -r g m _ < "${f}"
+  [[ ${g} == "$(token_gen "$1")" && ${m} == "${PROBE_MODEL}" ]] || return 1
+  cat "${f}"
+}
+
+token_none() {
+  printf '%s\t%s\t0\tnone\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t%s\n' "$(token_gen "$1")" "${PROBE_MODEL}" "$2"
+}
+
+reading_fresh() {
+  local obs
+  IFS=$'\t' read -r _ _ obs _ <<< "$1"
+  [[ ${obs} =~ ^[0-9]+$ ]] && (($(date +%s) - obs <= TTL))
+}
+
+# The reading for a token account: cached when younger than TTL (a failed
+# attempt included, so failures back off for one TTL), else one probe, one
+# prober per account at a time. $2=cached never probes.
+token_probe() {
+  local key="$1" mode="${2:-live}" rec lock me holder deadline
+  rec=$(token_read "${key}")
+  if [[ -n ${rec} ]] && { [[ ${mode} == cached ]] || reading_fresh "${rec}"; }; then
+    printf '%s\n' "${rec}"; return
+  fi
+  [[ ${mode} == cached ]] && { token_none "${key}" "not probed yet — run: claude-usage"; return; }
+  if [[ ${CLAUDE_USAGE_TOKEN_PROBE:-1} == 0 ]]; then
+    if [[ -n ${rec} ]]; then printf '%s\n' "${rec}"; else token_none "${key}" "usage probe off (CLAUDE_USAGE_TOKEN_PROBE=0)"; fi
     return
   fi
+  if ! mkdir -p "${CACHE_DIR}" 2> /dev/null || [[ ! -w ${CACHE_DIR} ]]; then
+    token_none "${key}" "cache dir not writable: ${CACHE_DIR}"; return
+  fi
+  lock="$(token_cache "${key}").lock"
+  # $$ is the top-level shell even in a subshell; this is the process itself.
+  me=$(exec sh -c 'echo "$PPID"')
+  deadline=$(($(date +%s) + TIMEOUT + 15))
+  until mkdir "${lock}" 2> /dev/null; do
+    if (($(date +%s) >= deadline)); then
+      if [[ -n ${rec} ]]; then printf '%s\n' "${rec}"; else token_none "${key}" "another probe is still running"; fi
+      return
+    fi
+    if [[ -d ${lock} ]]; then
+      holder=$(cat "${lock}/pid" 2> /dev/null)
+      # A prober killed mid-request leaves its lock; curl is bounded by TIMEOUT.
+      if { [[ ${holder} =~ ^[0-9]+$ ]] && ! kill -0 "${holder}" 2> /dev/null; } ||
+        (($(file_age "${lock}") > TIMEOUT + 15)); then
+        lock_reclaim "${lock}" "${holder}" "${me}"
+        continue
+      fi
+    fi
+    sleep 1
+  done
+  printf '%s' "${me}" > "${lock}/pid"
+  rec=$(token_read "${key}")
+  if [[ -n ${rec} ]] && reading_fresh "${rec}"; then
+    printf '%s\n' "${rec}"
+  else
+    token_fetch "${key}"
+  fi
+  lock_release "${lock}" "${me}"
+}
 
+# Take a stale lock only if it is still the one judged stale: mv is atomic,
+# and the grave's pid says whose it was. Someone else's fresh lock goes back.
+# Accepted race: two reclaimers judging the same stale owner can displace each
+# other's fresh lock, bounded to one duplicate 1-token probe; readings are
+# per-account files swapped atomically, so nothing is corrupted or exposed.
+lock_reclaim() {
+  local lock="$1" holder="$2" me="$3" grave="$1.dead.$3"
+  mv "${lock}" "${grave}" 2> /dev/null || return 0
+  if [[ $(cat "${grave}/pid" 2> /dev/null) != "${holder}" && ! -e ${lock} ]]; then
+    mv "${grave}" "${lock}" 2> /dev/null
+  fi
+  rm -rf "${grave}"
+}
+
+lock_release() { [[ $(cat "$1/pid" 2> /dev/null) == "$2" ]] && rm -rf "$1"; return 0; }
+
+# One 1-token Fable request: /api/oauth/usage refuses a setup-token (needs
+# user:profile), but a subscription token's /v1/messages replies carry the
+# unified rate-limit headers. Writes and prints the reading.
+token_fetch() {
+  local key="$1" tok="" out line n v code="" cexit="" body gen tmp f
+  local org="-" s="" sr="" ss="" w="" wr="" ws="" p="" pr="" ps="" us="" result=failed reason=""
+  gen=$(token_gen "${key}")
+  if ! command -v curl > /dev/null; then
+    token_none "${key}" "curl not on PATH"; return
+  elif [[ ! ${PROBE_MODEL} =~ ^[A-Za-z0-9._-]+$ ]]; then
+    token_none "${key}" "invalid CLAUDE_USAGE_PROBE_MODEL"; return
+  fi
+  # Subscription OAuth on /v1 wants the Claude Code identity prompt.
+  body=$(printf '{"model":"%s","max_tokens":1,"system":"You are Claude Code, Anthropic%ss official CLI for Claude.","messages":[{"role":"user","content":"."}]}' "${PROBE_MODEL}" "'")
+  xtrace_off
+  { IFS= read -r tok || [[ -n ${tok} ]]; } < "${ACCOUNTS_ROOT}/${key}/${TOKEN_FILE}"
+  if [[ ${tok} =~ ^sk-ant-oat[0-9]+-[A-Za-z0-9_-]+$ ]]; then
+    # The token reaches curl as a config on stdin (printf is a builtin), never
+    # argv. -q skips ~/.curlrc (a -v or trace there would log the header); no
+    # proxy, CA override or TLS key log may see or weaken the request.
+    out=$(printf 'header = "Authorization: Bearer %s"\n' "${tok}" |
+      env -u SSLKEYLOGFILE -u CURL_CA_BUNDLE -u SSL_CERT_FILE -u SSL_CERT_DIR -u CURL_HOME \
+        curl -q -sS --noproxy '*' --proto =https --max-time "${TIMEOUT}" -K - \
+        -H 'anthropic-version: 2023-06-01' -H 'anthropic-beta: oauth-2025-04-20' \
+        -H 'content-type: application/json' --data "${body}" \
+        -o /dev/null -D - -w '\n%{http_code}\n' "${PROBE_URL}" 2> /dev/null
+      printf 'curl-exit %s\n' "${PIPESTATUS[1]}")
+    tok=""
+    xtrace_restore
+  else
+    tok=""
+    xtrace_restore
+    result=dead reason="token file unreadable — run: claude-usage add $(label_for "${key}")"
+  fi
+
+  shopt -s nocasematch
+  while IFS= read -r line; do
+    line=${line%$'\r'}
+    # Each status line starts a block; only the final reply's headers count.
+    if [[ ${line} == HTTP/* ]]; then
+      org="-" s="" sr="" ss="" w="" wr="" ws="" p="" pr="" ps="" us=""
+      continue
+    fi
+    [[ ${line} =~ ^[0-9]{3}$ ]] && { code=${line}; continue; }
+    [[ ${line} =~ ^curl-exit\ ([0-9]+)$ ]] && { cexit=${BASH_REMATCH[1]}; continue; }
+    [[ ${line} == *:* ]] || continue
+    n=${line%%:*}; v=${line#*:}
+    v=${v#"${v%%[![:space:]]*}"}; v=${v%"${v##*[![:space:]]}"}
+    case ${n} in
+      anthropic-organization-id)                     org=${v} ;;
+      anthropic-ratelimit-unified-status)            us=${v} ;;
+      anthropic-ratelimit-unified-5h-utilization)    s=${v} ;;
+      anthropic-ratelimit-unified-5h-reset)          sr=${v} ;;
+      anthropic-ratelimit-unified-5h-status)         ss=${v} ;;
+      anthropic-ratelimit-unified-7d-utilization)    w=${v} ;;
+      anthropic-ratelimit-unified-7d-reset)          wr=${v} ;;
+      anthropic-ratelimit-unified-7d-status)         ws=${v} ;;
+      "anthropic-ratelimit-unified-${PREMIUM_BUCKET}-utilization") p=${v} ;;
+      "anthropic-ratelimit-unified-${PREMIUM_BUCKET}-reset")       pr=${v} ;;
+      "anthropic-ratelimit-unified-${PREMIUM_BUCKET}-status")      ps=${v} ;;
+    esac
+  done <<< "${out:-}"
+  shopt -u nocasematch
+
+  # A refusal counts whatever else the reply lacks; anything else is ok only
+  # from a transfer curl completed, with a 2xx and both core buckets.
+  if [[ ${result} != dead ]]; then
+    if [[ ${code} == 401 ]]; then
+      result=dead reason="token rejected (HTTP 401) — mint a new one (claude setup-token), then: claude-usage add $(label_for "${key}")"
+    elif [[ ${code} == 429 || ${us} == rejected || ${ss} == rejected || ${ws} == rejected || ${ps} == rejected ]]; then
+      result=rejected
+    elif [[ -z ${code} || ${code} == 000 ]]; then
+      reason="api.anthropic.com unreachable (curl exit ${cexit:-?})"
+    elif [[ ${cexit} != 0 ]]; then
+      reason="transfer failed after HTTP ${code} (curl exit ${cexit:-?})"
+    elif [[ ${code} != 2?? ]]; then
+      reason="HTTP ${code} from the API"
+    elif [[ $(frac_left "${s}") != "-" && $(frac_left "${w}") != "-" ]]; then
+      result=ok
+    else
+      reason="HTTP ${code} without rate-limit headers"
+    fi
+  fi
+  [[ ${org} =~ ^[A-Za-z0-9_-]+$ ]] || org="-"
+  for v in ss ws ps; do [[ ${!v} =~ ^[a-z_]+$ ]] || printf -v "${v}" '%s' "-"; done
+  for v in sr wr pr; do [[ ${!v} =~ ^[0-9]+$ ]] || printf -v "${v}" '%s' "-"; done
+  if [[ ${result} == ok || ${result} == rejected ]]; then
+    s=$(frac_left "${s}"); w=$(frac_left "${w}"); p=$(frac_left "${p}")
+    if [[ ${org} != "-" ]]; then
+      f=$(token_org_file "${key}")
+      printf '%s\t%s\n' "${gen}" "${org}" > "${f}.$$" && mv -f "${f}.$$" "${f}"
+    fi
+  else
+    s="-" sr="-" ss="-" w="-" wr="-" ws="-" p="-" pr="-" ps="-"
+  fi
+  line=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "${gen}" "${PROBE_MODEL}" \
+    "$(date +%s)" "${result}" "${org}" "${s}" "${sr}" "${ss}" "${w}" "${wr}" "${ws}" "${p}" "${pr}" "${ps}" "${reason:--}")
+  tmp="$(token_cache "${key}").$$"
+  printf '%s\n' "${line}" > "${tmp}" && mv -f "${tmp}" "$(token_cache "${key}")"
+  printf '%s\n' "${line}"
+}
+
+# Rows from TOKEN_MODE=cached (the status line's background refresh) reuse
+# readings only; any other refresh may probe.
+TOKEN_MODE=live
+[[ ${_CLAUDE_USAGE_PASSIVE:-} == 1 ]] && TOKEN_MODE=cached
+
+# A row per account, led by a sort key: "key name email plan s_left s_reset
+# w_left w_reset p_label p_left active org observed note", note last because
+# only it may be empty.
+# A reading's headroom LEFT as "session \t week \t premium", "-" unmeasured. A
+# refused bucket is spent whatever its utilization says, measured or not; a
+# refusal that names none is the whole account refusing. Args: result, then
+# value and status for session, week, premium.
+token_norm() {
+  local r="$1" s="$2" ss="$3" w="$4" ws="$5" p="$6" ps="$7" named=0
+  [[ ${ss} == rejected ]] && { s=0; named=1; }
+  [[ ${ws} == rejected ]] && { w=0; named=1; }
+  [[ ${ps} == rejected ]] && { p=0; named=1; }
+  [[ ${r} == rejected ]] && ((!named)) && { s=0; w=0; p=0; }
+  printf '%s\t%s\t%s\n' "${s}" "${w}" "${p}"
+}
+
+# "N% used" from headroom left, or "unknown".
+pct_used() { if [[ $1 =~ ^[0-9]+$ ]]; then printf '%s%% used' "$((100 - $1))"; else printf 'unknown'; fi; }
+
+# One row for a token account from its reading; $3=cached never probes. /usage
+# cannot read a token (inference-only): token_probe reads the rate-limit
+# headers instead.
+token_row() {
+  local name="$1" k="$2" mode="$3" obs result org key note
+  local s_left s_reset s_st w_left w_reset w_st p_label p_left p_st
+  if [[ $(token_days_left "${k}") == -* ]]; then
+    printf '%s\t%s\t-\ttoken\t-\t-\t-\t-\t-\t-\t0\t-\t0\ttoken expired — run: claude-usage add %s\n' \
+      "${NEVER}" "${name}" "${name}"
+    return
+  fi
+  IFS=$'\t' read -r _ _ obs result _ s_left s_reset s_st w_left w_reset w_st p_left _ p_st note \
+    < <(token_probe "${k}" "${mode}")
+  org=$(token_org "${k}")
+  case ${result} in
+    dead)
+      printf '%s\t%s\t-\ttoken\t-\t-\t-\t-\t-\t-\t0\t%s\t%s\t%s\n' "${NEVER}" "${name}" "${org}" "${obs}" "${note}"
+      ;;
+    ok | rejected)
+      IFS=$'\t' read -r s_left w_left p_left \
+        < <(token_norm "${result}" "${s_left}" "${s_st}" "${w_left}" "${w_st}" "${p_left}" "${p_st}")
+      p_label="-"; [[ ${p_left} != "-" ]] && p_label=${PREMIUM_LABEL}
+      key=$(printf '%03d%012d' "$((100 - ${p_left//-/0}))" "${w_reset//-/${NEVER}}")
+      printf '%s\t%s\t-\ttoken\t%s\t%s\t%s\t%s\t%s\t%s\t0\t%s\t%s\t\n' "${key}" "${name}" \
+        "${s_left}" "$(fmt_reset "${s_reset}")" "${w_left}" "$(fmt_reset "${w_reset}")" \
+        "${p_label}" "${p_left}" "${org}" "${obs}"
+      ;;
+    *)
+      # After every account with readable headroom, before the unusable ones.
+      printf '998%s\t%s\t-\ttoken\t-\t-\t-\t-\t-\t-\t0\t%s\t%s\t\n' "${NEVER}" "${name}" "${org}" "${obs}"
+      ;;
+  esac
+}
+
+probe() {
+  local name="$1" dir="$2" auth email plan usage line org obs
+  local s_left s_reset w_left w_reset p_label p_left key
+
+  obs=$(date +%s)
   auth=$(run_claude "${dir}" auth status --json 2> /dev/null)
   if [[ ${auth} != *'"loggedIn": true'* ]]; then
-    printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\t-\t0\tlogged out — run: claude-usage add %s --login (or paste a setup-token)\n' \
-      "${NEVER}" "${name}" "${name}"
+    printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\t-\t0\t-\t%s\tlogged out — run: claude-usage add %s --login (or paste a setup-token)\n' \
+      "${NEVER}" "${name}" "${obs}" "${name}"
     return
   fi
 
   email=$(sed -n 's/.*"email": "\([^"]*\)".*/\1/p' <<< "${auth}" | head -1)
   plan=$(sed -n 's/.*"subscriptionType": "\([^"]*\)".*/\1/p' <<< "${auth}" | head -1)
+  org=$(sed -n 's/.*"orgId": "\([A-Za-z0-9_-]*\)".*/\1/p' <<< "${auth}" | head -1)
 
   usage=$(usage_text "${dir}" 2> /dev/null)
+  obs=$(date +%s)   # when /usage answered: pairing compares it with token readings
   # A subscription login that lists no windows has none open: nothing spent
   # this week, so every bucket is full. The premium bucket's name is unknown.
   # A busy account occasionally gets one windowless reply too, so an idle
@@ -393,13 +692,13 @@ probe() {
   [[ ${usage} == *"using your subscription"* && ${usage} != *"Current "* ]] &&
     usage=$(usage_text "${dir}" 2> /dev/null)
   if [[ ${usage} == *"using your subscription"* && ${usage} != *"Current "* ]]; then
-    printf '000%s\t%s\t%s\t%s\t100\tidle\t100\tidle\t-\t100\t0\t\n' \
-      "${NEVER}" "${name}" "${email:--}" "${plan:--}"
+    printf '000%s\t%s\t%s\t%s\t100\tidle\t100\tidle\t-\t100\t0\t%s\t%s\t\n' \
+      "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${org:--}" "${obs}"
     return
   fi
   if [[ -z ${usage} || ${usage} != *"Current session:"* ]]; then
-    printf '%s\t%s\t%s\t%s\t-\t-\t-\t-\t-\t-\t0\tno usage data (API-key auth or CLI error)\n' \
-      "${NEVER}" "${name}" "${email:--}" "${plan:--}"
+    printf '%s\t%s\t%s\t%s\t-\t-\t-\t-\t-\t-\t0\t%s\t%s\tno usage data (API-key auth or CLI error)\n' \
+      "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${org:--}" "${obs}"
     return
   fi
 
@@ -421,59 +720,148 @@ probe() {
 
   key=$(printf '%03d%s' "$((100 - ${p_left//-/0}))" "$(to_epoch "${w_reset}")")
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t%s\t%s\t\n' \
     "${key}" "${name}" "${email:--}" "${plan:--}" \
     "${s_left:--}" "${s_reset:--}" "${w_left:--}" "${w_reset:--}" \
-    "${p_label:--}" "${p_left:--}"
+    "${p_label:--}" "${p_left:--}" "${org:--}" "${obs}"
 }
 
 # Resolve the slot against the roster. The "main" row and a roster row sharing
 # an email are the same account seen through two logins: keep the roster row
-# (that is the name the user chose) and mark it active. No match → the slot
-# stays as "main", active, so the numbers are still shown.
+# (that is the name the user chose), mark it active, and give it the slot's
+# live /usage numbers. A token carries no email, so on a personal plan (max or
+# pro: the organization is one person) a single roster row whose organization
+# id equals the slot's matches too; on team or enterprise plans many people
+# share one, so it never does. No match → the slot stays as "main", active, so
+# the numbers are still shown.
 mark_active() {
-  local rows line key name email plan sl sr wl wr pl pv active note
-  local main_email="" matched=""
+  local rows line key name email plan sl sr wl wr pl pv active org obs note o so
+  local main_email="-" main_org="-" main_plan="" matched="" hits=0 slot=""
   rows=$(cat)
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
-    [[ ${name} == main ]] && { main_email="${email}"; break; }
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
+    [[ ${name} == main ]] && { main_email="${email}"; main_org="${org}"; main_plan="${plan}"; break; }
   done <<< "${rows}"
   if [[ -n ${main_email} && ${main_email} != "-" ]]; then
-    while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
+    while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
       [[ ${name} != main && ${email} == "${main_email}" ]] && { matched="${name}"; break; }
     done <<< "${rows}"
   fi
+  if [[ -z ${matched} && -n ${main_org} && ${main_org} != "-" ]] && [[ ${main_plan} == max || ${main_plan} == pro ]]; then
+    while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
+      [[ ${name} != main && ${org} == "${main_org}" ]] && { matched="${name}"; hits=$((hits + 1)); }
+    done <<< "${rows}"
+    ((hits == 1)) || matched=""
+  fi
+  # A revoked or expired roster credential must not hide the slot's working
+  # login: the slot stays the launch target.
+  if [[ -n ${matched} ]] && awk -F'\t' -v m="${matched}" '$2 == m && $14 != ""' <<< "${rows}" | grep -q .; then
+    matched=""
+  fi
+  [[ -n ${matched} ]] && slot=$(awk -F'\t' '$2 == "main" && $14 == "" && $7 != "-"' <<< "${rows}" | head -1)
   while IFS= read -r line; do
     [[ -z ${line} ]] && continue
-    IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note <<< "${line}"
+    IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note <<< "${line}"
     if [[ ${name} == main ]]; then
       [[ -n ${matched} ]] && continue
       active=1
     elif [[ ${name} == "${matched}" ]]; then
       active=1
+      # The slot's numbers replace the row's only when they are the newer
+      # observation: an older login reading must not undo a newer refusal.
+      if [[ -n ${slot} && -z ${note} ]]; then
+        IFS=$'\t' read -r _ _ _ _ _ _ _ _ _ _ _ o so _ <<< "${slot}"
+        [[ ${org} == "-" ]] && org="${o}"
+        if [[ ${so} =~ ^[0-9]+$ ]] && { [[ ! ${obs} =~ ^[0-9]+$ ]] || ((so > obs)); }; then
+          IFS=$'\t' read -r key _ email _ sl sr wl wr pl pv _ _ obs _ <<< "${slot}"
+        fi
+      fi
     else
       active=0
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "${key}" "${name}" "${email}" "${plan}" "${sl}" "${sr}" "${wl}" "${wr}" "${pl}" "${pv}" "${active}" "${note}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${key}" "${name}" "${email}" "${plan}" \
+      "${sl}" "${sr}" "${wl}" "${wr}" "${pl}" "${pv}" "${active}" "${org}" "${obs}" "${note}"
   done <<< "${rows}"
 }
 
-gather() {
+# Rows -> "tier \t row", best first, for the model TARGET_MODEL names. Tier 0:
+# every applicable bucket measured and none spent, ranked by the tightest one,
+# then weekly headroom, then sort key. Tier 1: nothing known spent, something
+# unmeasured. Tier 2: a known spent bucket, soonest weekly reset first. Tier
+# 3: a note (logged out, refused, expired). The target decides which buckets
+# are required, not what a reading happened to return: a Fable target needs
+# the Fable week, so a row without it is unknown, never fully measured.
+rank_rows() {
+  awk -F'\t' -v OFS='\t' -v t="$(lower "${TARGET_MODEL}")" -v pf="$(lower "${PREMIUM_LABEL}")" '
+    function num(x) { return x ~ /^[0-9]+$/ }
+    NF {
+      sl = $5; wl = $7; pl = tolower($9); pv = $10
+      req = ""
+      if (index(t, pf)) req = pf
+      else if (pl != "-" && pl != "" && index(t, pl)) req = pl
+      # An idle login has no window open anywhere: every bucket is full.
+      have = (req != "" && num(pv) && (pl == req || $8 == "idle"))
+      a = 0; b = 0; c = $1
+      if ($14 != "") tier = 3
+      else if ((num(sl) && sl == 0) || (num(wl) && wl == 0) || (have && pv == 0)) { tier = 2; c = substr($1, 4) }
+      else if (num(sl) && num(wl) && (req == "" || have)) {
+        tier = 0; m = sl + 0; if (wl + 0 < m) m = wl + 0; if (have && pv + 0 < m) m = pv + 0
+        a = 100 - m; b = 100 - wl
+      } else tier = 1
+      printf "%d\t%03d\t%03d\t%s\t%d\t%s\n", tier, a, b, c, tier, $0
+    }' | sort -t $'\t' -k1,1n -k2,2n -k3,3n -k4,4 | cut -f5-
+}
+
+is_token_dir() { [[ $1 != "${MAIN_DIR}" && -f $1/${TOKEN_FILE} ]]; }
+
+# Rows for every login account (the slot included), probed in parallel. This
+# is all the snapshot holds: token rows are rendered from their own readings
+# whenever rows are read, so no snapshot can carry an older token observation
+# than its reading.
+gather_logins() {
   local tmp name dir i=0
   tmp=$(mktemp -d)
-  trap 'rm -rf "${tmp}"' RETURN
-  mkdir -p "${CACHE_DIR}"
   while IFS=$'\t' read -r name dir; do
-    [[ -z ${name} ]] && continue
+    [[ -z ${name} ]] || is_token_dir "${dir}" && continue
     # A neutral cwd: from inside a repo, every probe would load that repo's
     # project settings under each roster login.
     (cd "${CACHE_DIR}" && probe "${name}" "${dir}") > "${tmp}/$(printf '%03d' "${i}")" &
-    ((i++))
+    i=$((i + 1))
   done < <(account_rows)
-  [[ ${i} -eq 0 ]] && die "no accounts found. Add one: claude-usage add <name>"
   wait
-  cat "${tmp}"/* | sort | mark_active
+  ((i)) && cat "${tmp}"/*
+  rm -rf "${tmp}"
+  return 0
+}
+
+# Rows for every token account; $1=live may probe a stale reading.
+token_rows() {
+  local mode="$1" tmp name dir i=0
+  tmp=$(mktemp -d)
+  while IFS=$'\t' read -r name dir; do
+    if [[ -z ${name} ]] || ! is_token_dir "${dir}"; then continue; fi
+    token_row "${name}" "$(basename "${dir}")" "${mode}" > "${tmp}/$(printf '%03d' "${i}")" &
+    i=$((i + 1))
+  done < <(account_rows)
+  wait
+  ((i)) && cat "${tmp}"/*
+  rm -rf "${tmp}"
+  return 0
+}
+
+finalize() { mark_active | rank_rows | cut -f2-; }
+
+# Every account, probed now (tokens per TOKEN_MODE), finalized.
+gather() {
+  local rows lt tt
+  mkdir -p "${CACHE_DIR}"
+  lt=$(mktemp); tt=$(mktemp)
+  gather_logins > "${lt}" &
+  token_rows "${TOKEN_MODE}" > "${tt}" &
+  wait
+  rows=$(cat "${lt}" "${tt}")
+  rm -f "${lt}" "${tt}"
+  [[ -n ${rows//$'\n'/} ]] || die "no accounts found. Add one: claude-usage add <name>"
+  finalize <<< "${rows}"
 }
 
 # Pad a cell to a visible width: printf's %-Ns counts ANSI escapes as
@@ -510,15 +898,20 @@ pct_paint() {
 }
 
 table() {
-  local rows key name email plan sl sr wl wr pl pv active note
+  local rows key name email plan sl sr wl wr pl pv active org obs note
   rows=$(gather) || exit 1
 
   local -a n_c=() p_c=() s_pl=() s_pa=() w_pl=() w_pa=() x_pl=() x_pa=() notes=()
-  local plabel="PREMIUM" when days tokens=0
+  local plabel="PREMIUM" when days why tokens=0 dead_alias
+  # The roster row the slot would have been, had its credential worked.
+  dead_alias=$(awk -F'\t' '
+    $2 == "main" { me = $3; mo = $12; personal = ($4 == "max" || $4 == "pro") }
+    $2 != "main" && $14 != "" { n[++k] = $2; e[k] = $3; o[k] = $12 }
+    END { for (i = 1; i <= k; i++) if ((me != "" && me != "-" && e[i] == me) || (personal && mo != "-" && o[i] == mo)) { print n[i]; exit } }' <<< "${rows}")
   local h0="ACCOUNT" h1="PLAN" h2="SESSION" h3="WEEK (all)"
   local w0=${#h0} w1=${#h1} w2=${#h2} w3=${#h3} w4
 
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
     [[ -z ${name} ]] && continue
     [[ -n ${note} ]] && notes+=("${name}: ${note}")
     if [[ ${pl} != "-" && -n ${pl} ]]; then
@@ -530,12 +923,25 @@ table() {
     when=${wr/ at / }
     if [[ ${active} == 1 ]]; then
       n_c+=("▶ ${name}")
-      [[ ${name} == main ]] && notes+=("main: this login is not in the roster yet — claude-usage add <name> gives it a name")
+      if [[ ${name} == main ]]; then
+        if [[ -n ${dead_alias} ]]; then
+          notes+=("main: same account as ${dead_alias}, whose credential is unusable — main is used instead")
+        else
+          notes+=("main: this login is not in the roster yet — claude-usage add <name> gives it a name")
+        fi
+      fi
     else
       n_c+=("  ${name}")
     fi
     if [[ ${plan} == token ]]; then
       tokens=1
+      if [[ ${wl} == "-" && -z ${note} ]]; then
+        why=$(token_read "$(key_for "${name}")" | cut -f15)
+        [[ ${why} == "-" ]] && why=""
+        notes+=("${name}: usage unknown — ${why:-not probed yet}")
+      elif [[ ${obs} =~ ^[0-9]+$ ]] && (($(date +%s) - obs > TTL)); then
+        notes+=("${name}: reading is $((($(date +%s) - obs) / 60))m old")
+      fi
       days=$(token_days_left "$(key_for "${name}")")
       if [[ ${days} == -* ]]; then
         plan="token EXPIRED"
@@ -590,7 +996,7 @@ table() {
   else
     printf '  ▶ = active in ~/.claude · all values = %% LEFT\n'
   fi
-  ((tokens)) && notes+=("token rows: a setup-token is inference-only, so Claude Code reports no usage for it")
+  ((tokens)) && notes+=("token rows: a setup-token cannot read /usage; numbers come from the rate-limit headers of a 1-token Fable request, at most once per ${TTL}s")
   local n
   ((${#notes[@]})) || return 0
   for n in "${notes[@]}"; do
@@ -604,10 +1010,10 @@ jq_str() {
 }
 
 json() {
-  local rows first=1 key name email plan sl sr wl wr pl pv active note days
+  local rows first=1 key name email plan sl sr wl wr pl pv active org obs note days
   rows=$(gather) || exit 1
   printf '['
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
     [[ -z ${name} ]] && continue
     ((first)) || printf ','
     first=0
@@ -616,27 +1022,29 @@ json() {
       days=$(token_days_left "$(key_for "${name}")")
       [[ ${days} =~ ^-?[0-9]+$ ]] || days=null
     fi
-    printf '\n  {"account":"%s","active":%s,"email":"%s","plan":"%s","session_left_pct":%s,"session_resets":"%s","week_left_pct":%s,"week_resets":"%s","premium_model":"%s","premium_left_pct":%s,"token_days_left":%s,"note":"%s"}' \
+    printf '\n  {"account":"%s","active":%s,"email":"%s","plan":"%s","session_left_pct":%s,"session_resets":"%s","week_left_pct":%s,"week_resets":"%s","premium_model":"%s","premium_left_pct":%s,"token_days_left":%s,"observed_at":%s,"note":"%s"}' \
       "$(jq_str "${name}")" "$([[ ${active} == 1 ]] && printf true || printf false)" "$(jq_str "${email}")" "$(jq_str "${plan}")" \
       "${sl//-/null}" "$(jq_str "${sr}")" "${wl//-/null}" "$(jq_str "${wr}")" \
-      "$(jq_str "${pl}")" "${pv//-/null}" "${days}" "$(jq_str "${note}")"
+      "$(jq_str "${pl}")" "${pv//-/null}" "${days}" "$([[ ${obs} =~ ^[1-9][0-9]*$ ]] && printf '%s' "${obs}" || printf null)" "$(jq_str "${note}")"
   done <<< "${rows}"
   printf '\n]\n'
   return 0
 }
 
-# Seconds since the snapshot was written, or NEVER when there is none.
-snapshot_age() {
+# Seconds since a file or dir was written, or NEVER when there is none.
+file_age() {
   local mt now
-  [[ -f ${SNAPSHOT} ]] || { printf '%s' "${NEVER}"; return; }
+  [[ -e $1 ]] || { printf '%s' "${NEVER}"; return; }
   # `stat -f` means "format" to BSD stat and "filesystem" to GNU stat, so the
   # wrong one returns junk instead of failing. Validate rather than trust.
-  mt=$(stat -c %Y "${SNAPSHOT}" 2> /dev/null)
-  [[ ${mt} =~ ^[0-9]+$ ]] || mt=$(stat -f %m "${SNAPSHOT}" 2> /dev/null)
+  mt=$(stat -c %Y "$1" 2> /dev/null)
+  [[ ${mt} =~ ^[0-9]+$ ]] || mt=$(stat -f %m "$1" 2> /dev/null)
   [[ ${mt} =~ ^[0-9]+$ ]] || { printf '%s' "${NEVER}"; return; }
   now=$(date +%s)
   printf '%s' "$((now - mt))"
 }
+
+snapshot_age() { file_age "${SNAPSHOT}"; }
 
 # Drop the lock only while we still hold it: one stolen after a stall belongs
 # to another process now.
@@ -676,38 +1084,44 @@ cmd_refresh() {
   rm -rf "${LOCK_DIR:?}".dead.* 2> /dev/null   # graves from refreshers that died mid-steal
 
   local tmp="${SNAPSHOT}.$$"
-  if gather > "${tmp}" 2> /dev/null && [[ -s ${tmp} ]]; then
-    mv -f "${tmp}" "${SNAPSHOT}"   # atomic swap: readers never see a half-written file
-  else
-    rm -f "${tmp}"
-  fi
+  [[ ${TOKEN_MODE} == live ]] && token_rows live > /dev/null 2>&1 &
+  gather_logins > "${tmp}" 2> /dev/null &
+  wait
+  mv -f "${tmp}" "${SNAPSHOT}"   # atomic swap: readers never see a half-written file
   return 0
 }
 
+# Passive: the status line and other background triggers never spend
+# inference, so token rows keep their cached readings.
 spawn_refresh() {
-  ( "$0" refresh > /dev/null 2>&1 & ) 2> /dev/null
+  ( _CLAUDE_USAGE_PASSIVE=1 "$0" refresh > /dev/null 2>&1 & ) 2> /dev/null
 }
 
 # Rows from cache, refreshing in the background when stale. Returns non-zero
 # only when there is nothing cached at all — the first run after install.
 cached_rows() {
-  local age; age=$(snapshot_age)
-  ((age > TTL)) && spawn_refresh
+  (($(snapshot_age) > TTL)) && spawn_refresh
+  snapshot_rows
+}
+
+# Finalized rows from the snapshot plus every token's latest reading. Never
+# probes or spawns anything.
+snapshot_rows() {
   [[ -f ${SNAPSHOT} ]] || return 1
-  cat "${SNAPSHOT}"
+  { cat "${SNAPSHOT}"; token_rows cached; } | finalize
 }
 
 # Which account this shell is pointed at. Claude Code's status-line payload
 # carries no account identity, so the config dir is the only signal. An unset
 # variable means the slot, whose name is whatever the snapshot matched it to.
+# $1: finalized rows already read, else the snapshot's.
 current_account() {
-  local d="${CLAUDE_CONFIG_DIR:-}" key name email plan sl sr wl wr pl pv active note
+  local d="${CLAUDE_CONFIG_DIR:-}" rows="${1:-}" key name email plan sl sr wl wr pl pv active org obs note
   if [[ -z ${d} ]]; then
-    if [[ -f ${SNAPSHOT} ]]; then
-      while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
-        [[ ${active} == 1 ]] && { printf '%s' "${name}"; return; }
-      done < "${SNAPSHOT}"
-    fi
+    [[ -n ${rows} ]] || rows=$(snapshot_rows 2> /dev/null)
+    while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
+      [[ ${active} == 1 ]] && { printf '%s' "${name}"; return; }
+    done <<< "${rows}"
     printf 'main'; return
   fi
   d=$(cd "${d}" 2> /dev/null && pwd -P) || { printf '%s' "${UNKNOWN}"; return; }
@@ -721,58 +1135,47 @@ current_account() {
   fi
 }
 
-# gather() already sorts best-first: most premium headroom, ties broken by the
-# window that frees up soonest. So the recommendation is just the first usable
-# row, and "no premium anywhere" falls out of the same ordering.
 spent() { [[ $1 =~ ^[0-9]+$ ]] && (($1 == 0)); }
 
+# The pick for TARGET_MODEL, as "name \t p_left \t p_label \t w_reset \t how":
+# how is ok (measured headroom), unknown (nothing measured has any; this one
+# has missing measurements and no known spent bucket; p_label is "token" for
+# a token account) or fallback (everything is spent; this one frees up first).
 best_row() {
-  local key name email plan sl sr wl wr pl pv active note rows
+  local tier key name email plan sl sr wl wr pl pv active org obs note rows
   rows=$(cat)
-  # Rows arrive sorted premium-desc then reset-asc, so the first usable one
-  # wins. "Usable" requires weekly headroom: an account with Fable left but a
-  # spent weekly budget cannot actually be used.
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
-    [[ -z ${name} || -n ${note} ]] && continue
-    [[ ${wl} =~ ^[0-9]+$ ]] || continue
-    ((wl > 0)) || continue
-    spent "${sl}" && continue
-    printf '%s\t%s\t%s\t%s\tok\n' "${name}" "${pv}" "${pl}" "${wr}"
-    return 0
-  done <<< "${rows}"
-  # Unknown headroom beats known exhaustion. Expiry is re-checked live: the
-  # snapshot can predate it.
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
-    [[ ${plan} == token && -z ${note} ]] || continue
-    [[ $(token_days_left "$(key_for "${name}")") == -* ]] && continue
-    printf '%s\t-\ttoken\t-\ttoken\n' "${name}"
-    return 0
-  done <<< "${rows}"
-  # Everything is spent, so the useful answer is whichever returns first. The
-  # sort key is <premium><epoch>, so re-sorting from char 4 orders by reset.
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
-    [[ -z ${name} || -n ${note} || ${plan} == token ]] && continue
-    printf '%s\t%s\t%s\t%s\tfallback\n' "${name}" "${pv}" "${pl}" "${wr}"
-    return 0
-  done < <(sort -k1.4 <<< "${rows}")
+  while IFS=$'\t' read -r tier key name email plan sl sr wl wr pl pv active org obs note; do
+    [[ -z ${name} ]] && continue
+    # Expiry is re-checked live: the snapshot can predate it.
+    [[ ${plan} == token && $(token_days_left "$(key_for "${name}")") == -* ]] && continue
+    case ${tier} in
+      0) printf '%s\t%s\t%s\t%s\tok\n' "${name}" "${pv}" "${pl}" "${wr}"; return 0 ;;
+      1) [[ ${plan} == token ]] && pl=token
+         printf '%s\t%s\t%s\t%s\tunknown\n' "${name}" "${pv}" "${pl}" "${wr}"; return 0 ;;
+      2) printf '%s\t%s\t%s\t%s\tfallback\n' "${name}" "${pv}" "${pl}" "${wr}"; return 0 ;;
+    esac
+  done < <(rank_rows <<< "${rows}")
   return 1
 }
 
 cmd_best() {
   local name pv pl wr how rows
+  ensure_snapshot live
   rows=$(cached_rows) || die "no snapshot yet — run: claude-usage refresh"
   IFS=$'\t' read -r name pv pl wr how < <(best_row <<< "${rows}") ||
     die "no usable account (all logged out?) — run: claude-usage"
-  if [[ ${how} == fallback ]]; then
+  if [[ ${how} == fallback && ${pv} == 0 ]]; then
+    printf '%s (no %s left on any usable account; frees up first, resets %s)\n' "${name}" "${pl}" "${wr}"
+  elif [[ ${how} == fallback ]]; then
     printf '%s (nothing usable right now; frees up first, %s)\n' "${name}" "${wr}"
-  elif [[ ${how} == token ]]; then
-    printf '%s (token account, usage unknown; the others are spent)\n' "${name}"
-  elif [[ ${pv} == "-" ]]; then
-    printf '%s (%s usage unknown; resets %s)\n' "${name}" "${pl}" "${wr}"
+  elif [[ ${how} == unknown && ${pl} == token ]]; then
+    printf '%s (token account, usage unknown; nothing measured has headroom)\n' "${name}"
+  elif [[ ${how} == unknown ]]; then
+    printf '%s (usage unknown; nothing measured has headroom)\n' "${name}"
   elif [[ ${wr} == idle ]]; then
     printf '%s (idle: no window open, everything left)\n' "${name}"
-  elif ((pv == 0)); then
-    printf '%s (no %s left on any usable account; resets %s)\n' "${name}" "${pl}" "${wr}"
+  elif [[ ${pv} == "-" ]]; then
+    printf '%s (headroom left; week resets %s)\n' "${name}" "${wr}"
   else
     printf '%s (%s%% %s left)\n' "${name}" "${pv}" "${pl}"
   fi
@@ -802,11 +1205,11 @@ token_warnings() {
 # Deliberately omits 5h/week percentages: the status line already gets those
 # live for the current account, and the snapshot's copy would only be staler.
 cmd_statusline() {
-  local rows cur best_name best_pv best_wr best_how cur_pv cur_pl found=0 age
-  local key name email plan sl sr wl wr pl pv active note out
+  local rows cur best_name best_pv best_wr best_how cur_pv cur_pl found=0 age oldest
+  local key name email plan sl sr wl wr pl pv active org obs note out now
 
   rows=$(cached_rows) || return 0
-  cur=$(current_account)
+  cur=$(current_account "${rows}")
 
   # Both halves of the segment come from ONE snapshot read: two reads could
   # straddle a refresh and render a current/best pair that never coexisted.
@@ -816,9 +1219,14 @@ cmd_statusline() {
     return 0
   fi
 
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
+  # Token readings are not refreshed by the status line's own trigger, so the
+  # age that matters is the oldest reading shown, not the snapshot's.
+  oldest=$(date +%s)
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
+    [[ ${name} == "${cur}" || ${name} == "${best_name}" ]] || continue
+    [[ ${obs} =~ ^[0-9]+$ ]] && ((obs < oldest)) && oldest=${obs}
     [[ ${name} == "${cur}" ]] || continue
-    cur_pv="${pv}"; cur_pl="${pl}"; [[ ${wr} == idle ]] && cur_pl=idle; found=1; break
+    cur_pv="${pv}"; cur_pl="${pl}"; [[ ${wr} == idle ]] && cur_pl=idle; found=1
   done <<< "${rows}"
 
   # The sentinel is unspellable as an account name on purpose; spell it out
@@ -829,8 +1237,8 @@ cmd_statusline() {
   fi
   if [[ ${best_name} != "${cur}" ]]; then
     out="${out} ${YEL}→${RST} ${best_name}"
-    if [[ ${best_how} == token ]]; then
-      out="${out} ${DIM}token${RST}"
+    if [[ ${best_how} == unknown ]]; then
+      out="${out} ${DIM}usage ?${RST}"
     elif [[ ${best_how} == fallback ]]; then
       # A fallback pick is not usable yet; quoting its premium headroom would
       # read as "switch here now".
@@ -847,8 +1255,8 @@ cmd_statusline() {
   fi
   # A snapshot this old means background refreshes are failing, not that usage
   # has been flat for an hour.
-  age=$(snapshot_age)
-  ((age > TTL * 6)) && out="${out} ${DIM}(stale)${RST}"
+  age=$(snapshot_age); now=$(date +%s)
+  ((age > TTL * 6 || now - oldest > TTL * 6)) && out="${out} ${DIM}(stale)${RST}"
   out="${out}$(token_warnings)"
 
   printf '%s\n' "${out}"
@@ -865,6 +1273,7 @@ scrub_auth_env() {
 # the token in a temp file or in ps.
 read_token() {
   local raw=""
+  xtrace_off
   if [[ -t 0 ]]; then
     # shellcheck disable=SC2016 # literal backticks: a command to copy
     printf 'Run `claude setup-token` on any machine, then paste it.\n' >&2
@@ -876,6 +1285,8 @@ read_token() {
   fi
   if [[ ${raw} =~ (sk-ant-oat[0-9]+-[A-Za-z0-9_-]+) && ${#BASH_REMATCH[1]} -ge 60 ]]; then
     TOKEN="${BASH_REMATCH[1]}"
+    raw=""; [[ ${raw} =~ ^$ ]]   # drop the match: BASH_REMATCH outlives this function
+    xtrace_restore
     return 0
   fi
   [[ ${raw} == *sk-ant-api* ]] && die "that is an API key, not a setup-token — nothing saved"
@@ -916,13 +1327,15 @@ cmd_add() {
     read_token "${name}"   # before mkdir: a rejected token leaves no empty account behind
     (umask 077 && mkdir -p "${dir}") || die "cannot create ${dir}"
     tmp=$(umask 077 && mktemp "${dir}/.${TOKEN_FILE}.XXXXXX") || die "cannot write in ${dir}"
+    xtrace_off
     if ! { printf '%s\n' "${TOKEN}" > "${tmp}" && chmod 600 "${tmp}" && mv -f "${tmp}" "${dir}/${TOKEN_FILE}"; }; then
       rm -f "${tmp}"
       die "could not save the token — nothing saved"
     fi
     TOKEN=""
+    xtrace_restore
     date +%s > "${dir}/${TOKEN_DATE}"
-    rm -f "${SNAPSHOT}"
+    rm -f "${SNAPSHOT}" "$(token_cache "${key}")" "$(token_org_file "${key}")"
     printf '✓ %s saved (token, expires ~%s)\n' "${name}" "$(token_expiry "${key}" '%Y-%m')"
     return 0
   fi
@@ -940,7 +1353,7 @@ cmd_add() {
     die "login failed — ${name} unchanged"
   fi
   # The token would outrank the login just made.
-  rm -f "${dir}/${TOKEN_FILE}" "${dir}/${TOKEN_DATE}"
+  rm -f "${dir}/${TOKEN_FILE}" "${dir}/${TOKEN_DATE}" "$(token_cache "${key}")" "$(token_org_file "${key}")"
   rm -f "${SNAPSHOT}"   # the roster changed; the next render re-matches the slot
   local added main_email
   added=$(run_claude "${dir}" auth status --json 2> /dev/null | sed -n 's/.*"email": "\([^"]*\)".*/\1/p' | head -1)
@@ -1011,7 +1424,7 @@ cmd_remove() {
   fi
   rm -rf "${dir}"
   drop_label "${key}"
-  rm -f "${SNAPSHOT}"
+  rm -f "${SNAPSHOT}" "$(token_cache "${key}")" "$(token_org_file "${key}")"
   if [[ -n ${until} ]]; then
     printf 'removed %s (token file deleted; the token itself stays valid until ~%s)\n' "${name}" "${until}"
   else
@@ -1042,8 +1455,23 @@ cmd_show() {
   [[ -n ${name} ]] || die "usage: claude-usage show <name>"
   local dir; dir=$(resolve_dir "${name}") || exit 1
   if [[ ${dir} != "${MAIN_DIR}" ]] && is_token "$(basename "${dir}")"; then
-    printf '%s: token account, expires ~%s. A setup-token is inference-only, so Claude Code reports no usage for it.\n' \
-      "${name}" "$(token_expiry "$(basename "${dir}")" '%Y-%m-%d')"
+    local k obs result org sl sr ss wl wr ws pv pr ps why
+    k=$(basename "${dir}")
+    printf '%s: token account, expires ~%s.\n' "${name}" "$(token_expiry "${k}" '%Y-%m-%d')"
+    [[ $(token_days_left "${k}") == -* ]] && return 0
+    IFS=$'\t' read -r _ _ obs result org sl sr ss wl wr ws pv pr ps why < <(token_probe "${k}")
+    if [[ ${result} != ok && ${result} != rejected ]]; then
+      printf 'usage unknown: %s\n' "${why}"; return 0
+    fi
+    # Measurements as reported; the verdict uses the same reading of refusals
+    # as the ranking does.
+    local ns nw np
+    IFS=$'\t' read -r ns nw np < <(token_norm "${result}" "${sl}" "${ss}" "${wl}" "${ws}" "${pv}" "${ps}")
+    [[ ${ns} == 0 || ${nw} == 0 || ${np} == 0 ]] && printf 'refused or spent: not usable until a bucket resets\n'
+    printf 'Current session: %s · resets %s (%s)\n' "$(pct_used "${sl}")" "$(fmt_reset "${sr}")" "${ss}"
+    printf 'Current week (all models): %s · resets %s (%s)\n' "$(pct_used "${wl}")" "$(fmt_reset "${wr}")" "${ws}"
+    printf 'Current week (%s): %s · resets %s (%s)\n' "${PREMIUM_LABEL}" "$(pct_used "${pv}")" "$(fmt_reset "${pr}")" "${ps}"
+    printf '(rate-limit headers of a 1-token request, %ss ago; organization %s)\n' "$(($(date +%s) - obs))" "$(token_org "${k}")"
     return 0
   fi
   usage_text "${dir}"
@@ -1051,27 +1479,70 @@ cmd_show() {
 
 # Key of the account best_row picks. Exit 1: only the least-bad pick (nothing
 # usable). Exit 2: nothing to pick.
-ensure_snapshot() {
-  local waited=0
-  if [[ ! -f ${SNAPSHOT} ]]; then
-    printf 'claude-usage: no snapshot yet — probing every account once…\n' >&2
-    # A child, not cmd_refresh: run execs claude next, which would keep this
-    # pid — and with it the refresh lock — alive for the whole session.
-    "$0" refresh
-    # It returns at once when another refresher holds the lock; wait for that
-    # one rather than reporting nothing to pick.
-    while [[ ! -f ${SNAPSHOT} && -d ${LOCK_DIR} ]] && ((waited < TIMEOUT + 15)); do
-      sleep 1; waited=$((waited + 1))
-    done
-  fi
+# Any token reading older than TTL (an expired token never counts).
+tokens_stale() {
+  local dir key rec
+  [[ ${CLAUDE_USAGE_TOKEN_PROBE:-1} == 0 ]] && return 1
+  for dir in "${ACCOUNTS_ROOT}"/*/; do
+    [[ -f ${dir}${TOKEN_FILE} && ! -L ${dir%/} ]] || continue
+    key=$(basename "${dir}")
+    valid_name "${key}" || continue
+    [[ $(token_days_left "${key}") == -* ]] && continue
+    rec=$(token_read "${key}") || return 0
+    reading_fresh "${rec}" || return 0
+  done
+  return 1
 }
 
-# $1, when given, is a display name to leave out (the caller's own account).
+# A snapshot to choose from. Plain: fill a missing one without spending
+# inference. live (best, resolve, run): also re-probe while any token reading
+# is stale, waiting out a concurrent refresher, at most twice.
+ensure_snapshot() {
+  local mode="${1:-}" waited tries=0
+  while ((tries < 2)); do
+    if [[ -f ${SNAPSHOT} ]]; then
+      [[ ${mode} == live ]] && tokens_stale || return 0
+    else
+      printf 'claude-usage: no snapshot yet — probing every account once…\n' >&2
+    fi
+    # A child, not cmd_refresh: run execs claude next, which would keep this
+    # pid — and with it the refresh lock — alive for the whole session.
+    if [[ ${mode} == live ]]; then
+      env -u _CLAUDE_USAGE_PASSIVE "$0" refresh
+    else
+      _CLAUDE_USAGE_PASSIVE=1 "$0" refresh
+    fi
+    # It returns at once when another refresher holds the lock; wait for that one.
+    waited=0
+    while [[ -d ${LOCK_DIR} ]] && ((waited < TIMEOUT + 15)); do
+      sleep 1; waited=$((waited + 1))
+    done
+    tries=$((tries + 1))
+  done
+}
+
+# $1, when given, is a display name to leave out (the caller's own account)
+# with every verified alias of it: a row sharing its email, or its personal
+# organization, is the same quota under another credential, whichever row the
+# table displays.
 best_key() {
-  local exclude="${1:-}" rows name how
-  ensure_snapshot
+  local exclude="${1:-}" rows name how porgs
+  ensure_snapshot live
   rows=$(cached_rows) || return 2
-  [[ -n ${exclude} ]] && rows=$(awk -F'\t' -v x="${exclude}" '$2 != x' <<< "${rows}")
+  # An organization is one person only on a verified personal plan (a login
+  # reporting max or pro); a team shares one across many people.
+  porgs=$(awk -F'\t' '$4 == "max" || $4 == "pro" { printf " %s", $12 }' "${SNAPSHOT}" 2> /dev/null)
+  [[ -n ${exclude} ]] && rows=$(awk -F'\t' -v x="${exclude}" -v po="${porgs} " '
+    { line[NR] = $0; n[NR] = $2; e[NR] = $3; o[NR] = $12; if ($2 == x) { me = $3; mo = $12 } }
+    END {
+      personal = (mo != "" && mo != "-" && index(po, " " mo " ") > 0)
+      for (i = 1; i <= NR; i++) {
+        if (n[i] == x) continue
+        if (me != "" && me != "-" && e[i] == me) continue
+        if (personal && o[i] == mo) continue
+        print line[i]
+      }
+    }' <<< "${rows}")
   IFS=$'\t' read -r name _ _ _ how < <(best_row <<< "${rows}") || return 2
   # Rows carry display names. Exactly one account must still answer to it:
   # none means a rename since the snapshot, two a rename racing an add.
@@ -1093,7 +1564,7 @@ other_key() {
   if account_rows | cut -f1 | grep -qxF other; then
     die "an account is named 'other', which is now a selector — rename it: claude-usage rename other <new-name>"
   fi
-  ensure_snapshot
+  ensure_snapshot live
   me=$(current_account)
   [[ ${me} == "${UNKNOWN}" ]] && die "cannot tell which account this shell is on (CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-unset})"
   key=$(best_key "${me}") || rc=$?
@@ -1185,9 +1656,9 @@ link_stack() {
 
 # One line on what the snapshot knows about an account's headroom.
 describe() {
-  local want="$1" key name email plan sl sr wl wr pl pv active note out=""
-  [[ -f ${SNAPSHOT} ]] || { printf 'headroom unknown (no snapshot yet)'; return; }
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active note; do
+  local want="$1" key name email plan sl sr wl wr pl pv active org obs note out="" rows
+  rows=$(snapshot_rows) || { printf 'headroom unknown (no snapshot yet)'; return; }
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
     [[ ${name} == "${want}" ]] || continue
     [[ -n ${note} ]] && { printf '%s' "${note}"; return; }
     [[ ${wr} == idle ]] && { printf 'idle, everything left'; return; }
@@ -1196,7 +1667,7 @@ describe() {
     [[ ${pv} != "-" ]] && out="${out:+${out} · }$(lower "${pl}") ${pv}%"
     printf '%s' "${out:+${out} left}"
     return
-  done < "${SNAPSHOT}"
+  done <<< "${rows}"
   printf 'headroom unknown'
 }
 
@@ -1237,15 +1708,21 @@ cmd_run() {
     export CLAUDE_CONFIG_DIR="${dir}"
   fi
 
+  # Before any token is exported: the refresher must not inherit it.
+  [[ -f ${SNAPSHOT} ]] && spawn_refresh_if_stale
   if is_token "${key}"; then
     days=$(token_days_left "${key}")
     [[ ${days} == -* ]] && die "${label}: token expired — mint a new one (claude setup-token), then: claude-usage add ${label}"
+    xtrace_off
     { IFS= read -r tok || [[ -n ${tok} ]]; } < "${dir}/${TOKEN_FILE}"
     [[ -n ${tok} ]] || die "${label}: token file is empty — run: claude-usage add ${label}"
     export CLAUDE_CODE_OAUTH_TOKEN="${tok}"
-    what="token, ${days}d left, no usage data"
+    tok=""
+    xtrace_restore
+    what=$(describe "${label}")
+    [[ ${what} == "headroom unknown"* ]] && what="no usage data"
+    what="token, ${days}d left, ${what}"
   else
-    [[ -f ${SNAPSHOT} ]] && spawn_refresh_if_stale
     what=$(describe "${label}")
   fi
   ((rc == 1)) && what="${what}; nothing has headroom, this one frees up first"
