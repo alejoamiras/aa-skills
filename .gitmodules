@@ -5,4 +5,4 @@
 [submodule "memo"]
 	path = memo
 	url = git@github.com:alejoamiras/remote-opt-memo.git
-	ignore = all
+	ignore = dirty

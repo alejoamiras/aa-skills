@@ -192,9 +192,22 @@ git -C "${REPO_DIR}" config core.hooksPath hooks
 echo "hooks   core.hooksPath = hooks"
 
 # Shared memory (private submodule) runs last, so its failure can't stop the rest.
+# `git pull --recurse-submodules` never initializes a submodule added upstream.
 MEMO_FAILED=""
 if [ ! -f "${REPO_DIR}/memo/install.sh" ]; then
-  echo "skip    memo (private submodule not initialized)"
+  GIT_TERMINAL_PROMPT=0 git -C "${REPO_DIR}" submodule update --init memo >/dev/null 2>&1 || true
+fi
+# Shells that skip the login profile (`ssh host cmd`) often lack bun's default install dir.
+if ! command -v bun >/dev/null && [ -x "${HOME}/.bun/bin/bun" ]; then
+  PATH="${HOME}/.bun/bin:${PATH}"
+fi
+if [ ! -f "${REPO_DIR}/memo/install.sh" ]; then
+  if [ -f "${REPO_DIR}/claude/AGENTS.md" ]; then
+    echo "error   memo submodule unavailable, yet claude/AGENTS.md tells every session to use memo" >&2
+    MEMO_FAILED=1
+  else
+    echo "skip    memo (private submodule not initialized)"
+  fi
 elif bash "${REPO_DIR}/memo/install.sh"; then
   echo "ok      memo"
 else
@@ -202,7 +215,7 @@ else
 fi
 
 if [ -n "${MEMO_FAILED}" ]; then
-  echo "FAILED  memo/install.sh: fix it and rerun; start no agent session here until \`memo status\` says ready" >&2
+  echo "FAILED  memo: fix it and rerun; start no agent session here until \`memo status\` says ready" >&2
   exit 1
 fi
 echo "done."
