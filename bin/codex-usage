@@ -607,7 +607,8 @@ cmd_refresh() {
   # An account removed or renamed while the probe ran must not be republished
   # from the rows captured before it went; the roster as it is NOW decides.
   names=$(account_rows | cut -f1)
-  fresh=$(awk -F '\t' -v names="${names}" 'BEGIN { n = split(names, a, "\n"); for (i = 1; i <= n; i++) keep[a[i]] = 1 } keep[$2] { print }' <<< "${fresh}")
+  # Through ENVIRON, not -v: macOS awk rejects a newline inside a -v value.
+  fresh=$(NAMES="${names}" awk -F '\t' 'BEGIN { n = split(ENVIRON["NAMES"], a, "\n"); for (i = 1; i <= n; i++) keep[a[i]] = 1 } keep[$2] { print }' <<< "${fresh}")
   [[ -n ${fresh} ]] || return 0
   retain_cached <<< "${fresh}" | mark_active > "${tmp}" && [[ -s ${tmp} ]] || { rm -f "${tmp}"; return 0; }
   # When nothing answered the merge still records identities, but the file
