@@ -20,7 +20,8 @@ for c in 'memo wake' ' memo status' $'ls\nmemo status' 'command memo status' '"m
   'memo>/dev/null' 'env -u FOO memo status' 'nice -n 5 memo status' 'if memo status; then :; fi' 'ls | xargs memo note' \
   'timeout 10 memo wake' 'timeout -k 5 10s memo status' '>out memo wake' $'cat <<EOF\nx\nEOF\nmemo wake' \
   $'printf "%s\\n" \'<<EOF\'\nmemo wake' $'echo $((1 << bits))\nmemo wake' $'cat <<EOF\n$(memo wake)\nEOF' \
-  $'cat <<\'END-JSON\'\n{}\nEND-JSON\nmemo wake' $'cat <<\'A\' <<\'B\'\nx\nA\ny\nB\nmemo wake'; do
+  $'cat <<\'END-JSON\'\n{}\nEND-JSON\nmemo wake' $'cat <<\'A\' <<\'B\'\nx\nA\ny\nB\nmemo wake' \
+  $'cat <<<\'hello\'\nmemo wake' $'cat <<"END\'JSON"\nx\nEND\'JSON\nmemo wake' $'cat <<A <<\'B\'\n$(memo wake)\nA\ninert\nB'; do
   expect 2 "subagent blocked: $c" "$(payload "$c")"
 done
 for c in 'rg "x; memo status" AGENTS.md' 'rg memo src' 'cat memory.md remote-opt-memo/x' 'git commit -m "wire memo"' \

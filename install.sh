@@ -195,10 +195,12 @@ echo "hooks   core.hooksPath = hooks"
 # `git pull --recurse-submodules` never initializes a submodule added upstream.
 MEMO_FAILED=""
 # Batch-mode SSH so an unknown host or a locked key fails instead of waiting for a person, unless the
-# machine already routes git's SSH somewhere (an agent, a wrapper) that we must not override.
+# machine already routes git's SSH (GIT_SSH_COMMAND, GIT_SSH, core.sshCommand), which must win.
 if [ ! -f "${REPO_DIR}/memo/install.sh" ]; then
-  ssh_cmd="${GIT_SSH_COMMAND:-$(git -C "${REPO_DIR}" config core.sshCommand || echo "ssh -o BatchMode=yes -o ConnectTimeout=15")}"
-  if ! init_err="$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${ssh_cmd}" git -C "${REPO_DIR}" submodule update --init memo 2>&1)"; then
+  if [ -z "${GIT_SSH_COMMAND:-}${GIT_SSH:-}" ] && ! git -C "${REPO_DIR}" config core.sshCommand >/dev/null; then
+    export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15"
+  fi
+  if ! init_err="$(GIT_TERMINAL_PROMPT=0 git -C "${REPO_DIR}" submodule update --init memo 2>&1)"; then
     echo "warn    memo submodule init failed: ${init_err##*$'\n'}" >&2
   fi
 fi
