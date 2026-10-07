@@ -194,8 +194,13 @@ echo "hooks   core.hooksPath = hooks"
 # Shared memory (private submodule) runs last, so its failure can't stop the rest.
 # `git pull --recurse-submodules` never initializes a submodule added upstream.
 MEMO_FAILED=""
+# Batch-mode SSH so an unknown host or a locked key fails instead of waiting for a person, unless the
+# machine already routes git's SSH somewhere (an agent, a wrapper) that we must not override.
 if [ ! -f "${REPO_DIR}/memo/install.sh" ]; then
-  GIT_TERMINAL_PROMPT=0 git -C "${REPO_DIR}" submodule update --init memo >/dev/null 2>&1 || true
+  ssh_cmd="${GIT_SSH_COMMAND:-$(git -C "${REPO_DIR}" config core.sshCommand || echo "ssh -o BatchMode=yes -o ConnectTimeout=15")}"
+  if ! init_err="$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${ssh_cmd}" git -C "${REPO_DIR}" submodule update --init memo 2>&1)"; then
+    echo "warn    memo submodule init failed: ${init_err##*$'\n'}" >&2
+  fi
 fi
 # Shells that skip the login profile (`ssh host cmd`) often lack bun's default install dir.
 if ! command -v bun >/dev/null && [ -x "${HOME}/.bun/bin/bun" ]; then

@@ -18,12 +18,14 @@ expect() { # expect <exit> <label> <input>
 for c in 'memo wake' ' memo status' $'ls\nmemo status' 'command memo status' '"memo" status' 'memo; echo hi' \
   'FOO=1 env -i memo note x' 'ls && ~/.local/bin/memo status' 'echo $(memo recall x)' 'printf "%s" "$(memo wake)"' \
   'memo>/dev/null' 'env -u FOO memo status' 'nice -n 5 memo status' 'if memo status; then :; fi' 'ls | xargs memo note' \
-  'timeout 10 memo wake' 'timeout -k 5 10s memo status' '>out memo wake' $'cat <<EOF\nx\nEOF\nmemo wake'; do
+  'timeout 10 memo wake' 'timeout -k 5 10s memo status' '>out memo wake' $'cat <<EOF\nx\nEOF\nmemo wake' \
+  $'printf "%s\\n" \'<<EOF\'\nmemo wake' $'echo $((1 << bits))\nmemo wake' $'cat <<EOF\n$(memo wake)\nEOF' \
+  $'cat <<\'END-JSON\'\n{}\nEND-JSON\nmemo wake' $'cat <<\'A\' <<\'B\'\nx\nA\ny\nB\nmemo wake'; do
   expect 2 "subagent blocked: $c" "$(payload "$c")"
 done
 for c in 'rg "x; memo status" AGENTS.md' 'rg memo src' 'cat memory.md remote-opt-memo/x' 'git commit -m "wire memo"' \
   'ls | grep memo' "rg '!memo' AGENTS.md" 'echo \; memo' 'sudo -u bob ls memo' 'rg "x; memo status $suffix" AGENTS.md' \
-  $'cat <<\'EOF\' > notes.md\nmemo wake\nEOF' $'cat <<-EOF\n\tmemo wake\n\tEOF' 'rg "@; memo status" README.md' 'cat <<<"memo wake"'; do
+  $'cat <<\'EOF\' > notes.md\nmemo wake\nEOF' $'cat <<-\'EOF\'\n\tmemo wake\n\tEOF' $'cat <<\'A\' <<\'B\'\nx\nA\nmemo wake\nB' 'rg "@; memo status" README.md' 'cat <<<"memo wake"'; do
   expect 0 "subagent allowed: $c" "$(payload "$c")"
 done
 expect 0 "main session runs memo" '{"tool_input":{"command":"memo wake"}}'
