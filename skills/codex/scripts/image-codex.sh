@@ -53,6 +53,8 @@ done
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd -P)"
 
+# Reviewers and workers never touch the shared memory; the owner's AGENTS.md tells sessions to.
+MEMO_PREAMBLE="You are a subagent. Don't run memo."
 CODEX_DIR=$(mktemp -d -t codex-img-XXXXXXXX)
 RESPONSE_FILE="$CODEX_DIR/response.md"
 LOG_FILE="$CODEX_DIR/log.jsonl"
@@ -62,6 +64,7 @@ FULL_PROMPT="$CODEX_DIR/prompt.md"
 # The preamble pins codex to the built-in tool and to the sandboxed cwd, and
 # fixes the reply format the trailer is parsed from.
 {
+  echo "$MEMO_PREAMBLE"
   cat <<'EOF'
 You are producing raster image assets. Use ONLY your built-in image generation tool (the `image_gen` capability, i.e. the $imagegen skill's default built-in mode). Never draw with code (no SVG, HTML/CSS, canvas, PIL, ImageMagick), never call an external API, and never use the CLI fallback script.
 

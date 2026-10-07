@@ -49,9 +49,13 @@ if [[ ! -d "$CWD" ]]; then
   echo "ERROR: cwd is not a directory: $CWD" >&2
   exit 2
 fi
-# The prompt travels as a single argv entry (-p has no stdin mode); guard ARG_MAX.
-if [[ "$(wc -c < "$PROMPT_FILE")" -gt 200000 ]]; then
-  echo "ERROR: prompt file exceeds 200KB; point kimi at files in cwd instead of inlining them" >&2
+# Reviewers and workers never touch the shared memory; the owner's AGENTS.md tells sessions to.
+MEMO_PREAMBLE="You are a subagent. Don't run memo."
+# The prompt travels as one argv entry (-p has no stdin mode), and Linux caps a
+# single argument at 128 KiB including the flag and its NUL.
+KIMI_PROMPT_FLAG="--prompt="
+if [[ $(( $(wc -c < "$PROMPT_FILE") + ${#MEMO_PREAMBLE} + 2 + ${#KIMI_PROMPT_FLAG} )) -gt 131071 ]]; then
+  echo "ERROR: prompt exceeds 128KB; point kimi at files in cwd instead of inlining them" >&2
   exit 2
 fi
 
@@ -60,7 +64,7 @@ RESPONSE_FILE="$KIMI_DIR/response.md"
 LOG_FILE="$KIMI_DIR/log.txt"
 SESSION_ID_FILE="$KIMI_DIR/session_id"
 
-cp "$PROMPT_FILE" "$KIMI_DIR/prompt.md"
+{ echo "$MEMO_PREAMBLE"; echo; cat "$PROMPT_FILE"; } > "$KIMI_DIR/prompt.md"
 CWD=$(cd "$CWD" && pwd)
 printf '%s' "$CWD" > "$KIMI_DIR/cwd"
 
@@ -80,7 +84,7 @@ set +e
   cd "$CWD" &&
   KIMI_MODEL_THINKING_EFFORT="$EFFORT" kimi \
     "${MODEL_ARGS[@]}" \
-    --prompt="$(cat "$PROMPT_FILE")" \
+    "${KIMI_PROMPT_FLAG}$(cat "$KIMI_DIR/prompt.md")" \
     > "$RESPONSE_FILE" 2> "$LOG_FILE"
 )
 EXIT=$?

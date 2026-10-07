@@ -123,6 +123,8 @@ if [[ -n "${CODEX_ACCOUNT:-}" ]]; then
   export CODEX_HOME="$ACCOUNT_HOME"
 fi
 
+# Reviewers and workers never touch the shared memory; the owner's AGENTS.md tells sessions to.
+MEMO_PREAMBLE="You are a subagent. Don't run memo."
 CODEX_DIR=$(mktemp -d -t codex-XXXXXXXX)
 RESPONSE_FILE="$CODEX_DIR/response.md"
 LOG_FILE="$CODEX_DIR/log.jsonl"
@@ -132,12 +134,13 @@ SESSION_ID_FILE="$CODEX_DIR/session_id"
 # asking the auto-reviewer for an unsandboxed rerun.
 if [[ "$SANDBOX" == approve-for-me ]]; then
   {
+    echo "$MEMO_PREAMBLE"
     echo "[Host note: the command sandbox cannot start here (bwrap fails). When a command fails with a bwrap/sandbox error, rerun it requesting escalated permissions with a one-line justification. This is a review: read and inspect only, do not modify files.]"
     echo
     cat "$PROMPT_FILE"
   } > "$CODEX_DIR/prompt.md"
 else
-  cp "$PROMPT_FILE" "$CODEX_DIR/prompt.md"
+  { echo "$MEMO_PREAMBLE"; echo; cat "$PROMPT_FILE"; } > "$CODEX_DIR/prompt.md"
 fi
 # Sessions live under the home that created them, so a resume must reuse it.
 # Recorded canonical: a relative or symlinked home would mean something else

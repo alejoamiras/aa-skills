@@ -46,6 +46,8 @@ cd ~/Projects/aa-skills && ./install.sh
 
 > **Note:** `claude/` is a **private submodule** (the owner's harness-neutral `AGENTS.md`, the thin `CLAUDE.md` that imports it, personal `statusline.sh`, managed `settings.json` keys). Cloning it will fail for everyone else — that's expected, and `install.sh` skips it gracefully. Everything under `skills/` works standalone.
 
+> **Note:** `memo/` is a second **private submodule**, [remote-opt-memo](https://github.com/alejoamiras/remote-opt-memo): the `memo` CLI that gives every session on every machine one shared long-term memory. `install.sh` initializes it when missing (a pull never initializes a newly added submodule) and runs `memo/install.sh` last (it needs bun 1.4+, found on PATH or in `~/.bun/bin`, and OpenSSH 8.1+); when that fails, everything else is still installed, the failure is the last line and the exit is non-zero. Managed settings merge arrays (`permissions.allow`, hook lists) as unions, so the machine's own rules survive. Reviewer and worker spawn scripts start every prompt with `You are a subagent. Don't run memo.`, and a managed PreToolUse hook refuses `memo` inside Claude Code subagents.
+
 ### Instructions file: one `AGENTS.md`, two readers
 
 Codex reads `~/.codex/AGENTS.md`; Claude Code reads only `~/.claude/CLAUDE.md` but supports `@path` imports. So the generic instructions live once in `AGENTS.md`, `CLAUDE.md` is `@AGENTS.md` plus a short Claude Code-only tail, and `install.sh` links `AGENTS.md` into both `~/.claude/` (so the relative import resolves next to the link) and `~/.codex/`. Codex caps combined instructions at 32 KiB by default (`project_doc_max_bytes` in `~/.codex/config.toml`) — raise it if a large global file leaves no room for project-level `AGENTS.md`.

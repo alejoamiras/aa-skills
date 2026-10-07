@@ -2,3 +2,7 @@
 	path = claude
 	url = git@github.com:alejoamiras/aa-claude.git
 	ignore = all
+[submodule "memo"]
+	path = memo
+	url = git@github.com:alejoamiras/remote-opt-memo.git
+	ignore = dirty

@@ -127,6 +127,8 @@ elif [[ -n "${CLAUDE_ACCOUNT:-}" ]]; then
 fi
 
 CLAUDE_DIR=$(mktemp -d -t claude-XXXXXXXX)
+# Reviewers and workers never touch the shared memory; the owner's AGENTS.md tells sessions to.
+MEMO_PREAMBLE="You are a subagent. Don't run memo."
 RESPONSE_FILE="$CLAUDE_DIR/response.md"
 LOG_FILE="$CLAUDE_DIR/log.json"
 SESSION_ID_FILE="$CLAUDE_DIR/session_id"
@@ -143,6 +145,7 @@ printf '%s' "$ROLE" > "$CLAUDE_DIR/role"
 # Safe mode strips the user's instructions, so the role framing has to travel
 # with the prompt.
 {
+  echo "$MEMO_PREAMBLE"
   if [[ "$ROLE" == worker ]]; then
     cat <<EOF
 You are a worker for another Claude Code session, running on a separate account to share its load. You are not driving: do only the task below, do not ask the user questions, and do not start other work. $REACH; if the task needs more, say so instead of guessing. Report in markdown, citing file:line or URLs for every claim; no narration of tool calls.

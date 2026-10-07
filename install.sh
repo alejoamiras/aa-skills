@@ -130,6 +130,10 @@ if [ -f "${REPO_DIR}/claude/statusline.sh" ]; then
   chmod +x "${REPO_DIR}/claude/statusline.sh"
   link "${REPO_DIR}/claude/statusline.sh" "${CLAUDE_DIR}/statusline.sh"
 fi
+if [ -f "${REPO_DIR}/claude/memo-guard.sh" ]; then
+  chmod +x "${REPO_DIR}/claude/memo-guard.sh"
+  link "${REPO_DIR}/claude/memo-guard.sh" "${CLAUDE_DIR}/memo-guard.sh"
+fi
 
 # Managed settings keys (private submodule): overlay claude/settings.managed.json
 # onto ~/.claude/settings.json. Managed keys win; everything else (permission
@@ -137,6 +141,14 @@ fi
 # from the managed file keeps its last installed value until removed by hand.
 # Claude Code rewrites this file itself (/model, /config, "always allow"), so
 # run with sessions closed to avoid racing one of those writes.
+# Arrays are unions, not overlays: `*` alone would replace the machine's
+# permissions.allow and hook lists with the managed ones. A managed entry that
+# later changes leaves its old copy behind, like a dropped key.
+# shellcheck disable=SC2016 # a jq program, not shell
+MERGE_MANAGED='def arr: if type == "array" then . else [] end;
+  . as $o | $m[0] as $n | ($o * $n)
+  | if $n.permissions.allow then .permissions.allow = (($o.permissions.allow | arr) as $a | $a + ($n.permissions.allow - $a)) else . end
+  | if $n.hooks then .hooks = reduce ($n.hooks | keys[]) as $k (($o.hooks | if type == "object" then . else {} end); .[$k] = ((.[$k] | arr) as $a | $a + ($n.hooks[$k] - $a))) else . end'
 MANAGED="${REPO_DIR}/claude/settings.managed.json"
 SETTINGS="${CLAUDE_DIR}/settings.json"
 if [ ! -f "${MANAGED}" ]; then
@@ -153,7 +165,7 @@ else
       || { echo "error   ${f}: expected exactly one JSON object" >&2; exit 1; }
   done
   if [ -f "${SETTINGS}" ]; then
-    merged="$(jq --slurpfile m "${MANAGED}" '. * $m[0]' "${SETTINGS}")"
+    merged="$(jq --slurpfile m "${MANAGED}" "${MERGE_MANAGED}" "${SETTINGS}")"
     current="$(jq -S . "${SETTINGS}")"
   else
     merged="$(jq -n --slurpfile m "${MANAGED}" '$m[0]')"
@@ -179,4 +191,38 @@ fi
 git -C "${REPO_DIR}" config core.hooksPath hooks
 echo "hooks   core.hooksPath = hooks"
 
+# Shared memory (private submodule) runs last, so its failure can't stop the rest.
+# `git pull --recurse-submodules` never initializes a submodule added upstream.
+MEMO_FAILED=""
+# Batch-mode SSH so an unknown host or a locked key fails instead of waiting for a person, unless the
+# machine already routes git's SSH (GIT_SSH_COMMAND, GIT_SSH, core.sshCommand), which must win.
+if [ ! -f "${REPO_DIR}/memo/install.sh" ]; then
+  if [ -z "${GIT_SSH_COMMAND:-}${GIT_SSH:-}" ] && ! git -C "${REPO_DIR}" config core.sshCommand >/dev/null; then
+    export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15"
+  fi
+  if ! init_err="$(GIT_TERMINAL_PROMPT=0 git -C "${REPO_DIR}" submodule update --init memo 2>&1)"; then
+    echo "warn    memo submodule init failed: ${init_err##*$'\n'}" >&2
+  fi
+fi
+# Shells that skip the login profile (`ssh host cmd`) often lack bun's default install dir.
+if ! command -v bun >/dev/null && [ -x "${HOME}/.bun/bin/bun" ]; then
+  PATH="${HOME}/.bun/bin:${PATH}"
+fi
+if [ ! -f "${REPO_DIR}/memo/install.sh" ]; then
+  if [ -f "${REPO_DIR}/claude/AGENTS.md" ]; then
+    echo "error   memo submodule unavailable, yet claude/AGENTS.md tells every session to use memo" >&2
+    MEMO_FAILED=1
+  else
+    echo "skip    memo (private submodule not initialized)"
+  fi
+elif bash "${REPO_DIR}/memo/install.sh"; then
+  echo "ok      memo"
+else
+  MEMO_FAILED=1
+fi
+
+if [ -n "${MEMO_FAILED}" ]; then
+  echo "FAILED  memo: fix it and rerun; start no agent session here until \`memo status\` says ready" >&2
+  exit 1
+fi
 echo "done."

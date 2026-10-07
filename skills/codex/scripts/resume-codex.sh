@@ -137,6 +137,8 @@ if [[ "$HOST_OPT_IN" == approve-for-me && "$RECORDED_SANDBOX" == approve-for-me 
   REVIEWER_ARGS=(-c 'approvals_reviewer="auto_review"')
 fi
 
+# Reviewers and workers never touch the shared memory; the owner's AGENTS.md tells sessions to.
+MEMO_PREAMBLE="You are a subagent. Don't run memo."
 N=1
 while [[ -e "$CODEX_DIR/response-$N.md" ]]; do
   N=$((N + 1))
@@ -144,7 +146,8 @@ done
 RESPONSE_FILE="$CODEX_DIR/response-$N.md"
 LOG_FILE="$CODEX_DIR/log.jsonl"
 
-cp "$PROMPT_FILE" "$CODEX_DIR/followup-$N.md"
+[[ "$PROMPT_FILE" -ef "$CODEX_DIR/followup-$N.md" ]] && { echo "ERROR: the prompt file is this run's own followup-$N.md" >&2; exit 2; }
+{ echo "$MEMO_PREAMBLE"; echo; cat "$PROMPT_FILE"; } > "$CODEX_DIR/followup-$N.md"
 
 echo "Resuming codex session $SID (model=${MODEL:-config default}, effort=$EFFORT, home=${CODEX_HOME:-~/.codex})..." >&2
 echo "Output dir: $CODEX_DIR" >&2
@@ -158,7 +161,7 @@ codex exec resume "$SID" \
   -c "project_doc_max_bytes=$DOC_MAX" \
   ${REVIEWER_ARGS[@]+"${REVIEWER_ARGS[@]}"} \
   -o "$RESPONSE_FILE" \
-  - < "$PROMPT_FILE" \
+  - < "$CODEX_DIR/followup-$N.md" \
   >> "$LOG_FILE" 2>&1
 EXIT=$?
 set -e
