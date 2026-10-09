@@ -368,7 +368,8 @@ PR="$S/prep-root"; mkdir -p "$PR"/{pa,pb,pd,pe} "$S/trusted/sub" "$S/trusted/sub
 ln -s "$PR/pa" "$PR/pc"
 pp() { env CLAUDE_ACCOUNTS_ROOT="$PR" XDG_CACHE_HOME="$S/cache-pp" "$CU" "$@"; }
 ino() { ls -i "$1" | awk '{print $1}'; }
-pstart() { ps -o lstart= -p "$1" | tr -s ' ' | sed 's/^ //;s/ $//'; }
+# The form Claude Code writes as procStart; ps in the caller's locale differs.
+pstart() { LC_ALL=C TZ=UTC ps -o lstart= -p "$1" | tr -s ' ' | sed 's/^ //;s/ $//'; }
 TR="$(cd "$S/trusted" && pwd -P)"
 printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$TR" > "$HOME/.claude.json"
 printf '{"keep":1,"lastOnboardingVersion":"1.0"}\n' > "$PR/pa/.claude.json"
