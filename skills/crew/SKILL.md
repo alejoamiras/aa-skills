@@ -84,4 +84,5 @@ Never put secrets in a brief.
 - **No permission laundering**: never ask a worker to do something this session was denied, or that this session's settings would block. A worker that reports a denial goes to the owner. A worker's grant never counts as this session's authorization.
 - Workers never start workers. `CREW_WORKER=1` in their environment makes spawn refuse.
 - Claude Code only: Codex has no SendMessage.
+- **Untested: macOS accounts with a browser login.** Crew has run on macOS `setup-token` accounts and on Linux browser-login accounts, which keep `.credentials.json` in the account dir. On macOS, a browser login lives in the Keychain, and no worker has run on one. If a worker shows a login screen, `crew.sh stop` it and tell the owner. Never run the login flow from crew.
 - **After a Claude Code update**, run `CREW_LIVE=<account> bash tests/live-crew.sh` from a session in the aa-skills repo before relying on crew. It depends on undocumented internals: the `sessions/<pid>.json` layout, the `procStart` form (C-locale UTC `ps` lstart on macOS, `/proc` stat field 22 on Linux), and `uds:` addressing.
