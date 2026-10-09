@@ -114,6 +114,7 @@ AUTH_ENV=(ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
   CLAUDE_CODE_USE_ANTHROPIC_AWS CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD
   CLAUDE_CODE_USE_MANTLE CLAUDE_CODE_USE_GATEWAY)
 NEVER=999999999999   # sorts absent or unparseable resets to the bottom
+SESSION_WINDOW=18300 # 5h plus 5 min of clock skew: no real session reset lies further ahead
 
 # Snapshot cache. A status line renders constantly and must never pay for a
 # 4-second probe, so it reads this file and refreshes in the background.
@@ -897,21 +898,36 @@ pct_paint() {
   if [[ $1 == "-" ]]; then printf '%s-%s' "${DIM}" "${RST}"; else paint_left "$1"; fi
 }
 
-# A 5h reset as its table cell shows it: the time alone when it falls today, with the day otherwise,
-# and nothing once it has passed (the reading predates the reset, so its percentage is stale too).
-# The CLI may print a same-day reset as a bare time ("4:30pm"), read here as today's.
+# A 5h reset as its table cell shows it: the time alone when it falls today, with the day otherwise;
+# "reset" once it has passed (the reading predates it, so its percentage is stale); nothing when it is
+# unreadable or beyond one window ahead, which also rejects to_epoch's year rollover of an old reading.
+# The CLI may print a reset as a bare time ("1am"); one already behind us is tomorrow's if that falls
+# within the window, else an elapsed one. Assumes the CLI prints this machine's timezone, as WEEK does.
 session_when() {
-  local when="$1" e
+  local when="$1" e now
   [[ -z ${when} || ${when} == "-" ]] && return 0
-  [[ ${when} =~ ^[0-9] ]] && when="$(date '+%b %-d') ${when}"
-  e=$(to_epoch "${when}")
-  [[ ${e} != "${NEVER}" ]] && ((10#${e} > $(date +%s))) || return 0
-  when=${when/ at / }; when=${when//,/}
-  if [[ $(fmt_epoch "${e}" '%F') == "$(date '+%F')" ]]; then printf '%s' "${when##* }"; else printf '%s' "${when}"; fi
+  now=$(date +%s)
+  if [[ ${when} =~ ^[0-9] ]]; then
+    e=$(to_epoch "$(date '+%b %-d') ${when}")
+    [[ ${e} == "${NEVER}" ]] && return 0
+    e=$((10#${e}))
+    ((e <= now && e + 86400 <= now + SESSION_WINDOW)) && e=$((e + 86400))
+  else
+    e=$(to_epoch "${when}")
+    [[ ${e} == "${NEVER}" ]] && return 0
+    e=$((10#${e}))
+  fi
+  ((e <= now)) && { printf 'reset'; return 0; }
+  ((e > now + SESSION_WINDOW)) && return 0
+  if [[ $(fmt_epoch "${e}" '%F') == "$(date '+%F')" ]]; then
+    fmt_epoch "${e}" '%-I:%M%p' | sed -E -e 's/AM$/am/' -e 's/PM$/pm/' -e 's/:00(am|pm)$/\1/'
+  else
+    fmt_epoch "${e}" '%b %-d %-I:%M%p' | sed -E -e 's/AM$/am/' -e 's/PM$/pm/' -e 's/:00(am|pm)$/\1/'
+  fi
 }
 
 table() {
-  local rows key name email plan sl sr wl wr pl pv active org obs note swhen
+  local rows key name email plan sl sr wl wr pl pv active org obs note swhen spct
   rows=$(gather) || exit 1
 
   local -a n_c=() p_c=() s_pl=() s_pa=() w_pl=() w_pa=() x_pl=() x_pa=() notes=()
@@ -965,12 +981,13 @@ table() {
     fi
     p_c+=("${plan}")
     swhen=$(session_when "${sr}")
-    if [[ ${sl} == "-" || -z ${swhen} ]]; then
-      s_pl+=("$(printf '%4s' "$(pct_plain "${sl}")")")
-      s_pa+=("$(printf '%*s%s' "$((4 - ${#sl} - 1))" "" "$(pct_paint "${sl}")")")
+    spct=$(pct_plain "${sl}")
+    if [[ -z ${swhen} ]]; then
+      s_pl+=("$(printf '%4s' "${spct}")")
+      s_pa+=("$(printf '%*s%s' "$((4 - ${#spct}))" "" "$(pct_paint "${sl}")")")
     else
-      s_pl+=("$(printf '%4s  %s' "$(pct_plain "${sl}")" "${swhen}")")
-      s_pa+=("$(printf '%*s%s  %s%s%s' "$((4 - ${#sl} - 1))" "" "$(pct_paint "${sl}")" "${DIM}" "${swhen}" "${RST}")")
+      s_pl+=("$(printf '%4s  %s' "${spct}" "${swhen}")")
+      s_pa+=("$(printf '%*s%s  %s%s%s' "$((4 - ${#spct}))" "" "$(pct_paint "${sl}")" "${DIM}" "${swhen}" "${RST}")")
     fi
     x_pl+=("$(pct_plain "${pv}")");  x_pa+=("$(pct_paint "${pv}")")
     if [[ ${wl} == "-" || ${when} == "-" ]]; then
