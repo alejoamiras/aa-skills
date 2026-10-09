@@ -114,6 +114,7 @@ AUTH_ENV=(ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
   CLAUDE_CODE_USE_ANTHROPIC_AWS CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD
   CLAUDE_CODE_USE_MANTLE CLAUDE_CODE_USE_GATEWAY)
 NEVER=999999999999   # sorts absent or unparseable resets to the bottom
+SESSION_WINDOW=18300 # 5h plus 5 min of clock skew: no real session reset lies further ahead
 
 # Snapshot cache. A status line renders constantly and must never pay for a
 # 4-second probe, so it reads this file and refreshes in the background.
@@ -897,8 +898,40 @@ pct_paint() {
   if [[ $1 == "-" ]]; then printf '%s-%s' "${DIM}" "${RST}"; else paint_left "$1"; fi
 }
 
+# A 5h reset as its table cell shows it: the time alone when it falls today, with the day otherwise;
+# "reset" once it has passed (the reading predates it, so its percentage is stale); nothing when it is
+# unreadable or beyond one window ahead, which also rejects to_epoch's year rollover of an old reading.
+# The CLI may print a reset as a bare time ("1am"); one already behind us is tomorrow's if that falls
+# within the window, else an elapsed one. Assumes the CLI prints this machine's timezone, as WEEK does.
+session_when() {
+  local when="$1" e t now
+  [[ -z ${when} || ${when} == "-" ]] && return 0
+  now=$(date +%s)
+  if [[ ${when} =~ ^[0-9] ]]; then
+    e=$(to_epoch "$(date '+%b %-d') ${when}")
+    [[ ${e} == "${NEVER}" ]] && return 0
+    e=$((10#${e}))
+    if ((e <= now)); then
+      # Tomorrow's date from today's noon: noon plus a day stays on the next date across a DST change.
+      t=$(to_epoch "$(fmt_epoch "$((10#$(to_epoch "$(date '+%b %-d') 12pm") + 86400))" '%b %-d') ${when}")
+      [[ ${t} != "${NEVER}" ]] && ((10#${t} <= now + SESSION_WINDOW)) && e=$((10#${t}))
+    fi
+  else
+    e=$(to_epoch "${when}")
+    [[ ${e} == "${NEVER}" ]] && return 0
+    e=$((10#${e}))
+  fi
+  ((e <= now)) && { printf 'reset'; return 0; }
+  ((e > now + SESSION_WINDOW)) && return 0
+  if [[ $(fmt_epoch "${e}" '%F') == "$(date '+%F')" ]]; then
+    fmt_epoch "${e}" '%-I:%M%p' | sed -E -e 's/AM$/am/' -e 's/PM$/pm/' -e 's/:00(am|pm)$/\1/'
+  else
+    fmt_epoch "${e}" '%b %-d %-I:%M%p' | sed -E -e 's/AM$/am/' -e 's/PM$/pm/' -e 's/:00(am|pm)$/\1/'
+  fi
+}
+
 table() {
-  local rows key name email plan sl sr wl wr pl pv active org obs note
+  local rows key name email plan sl sr wl wr pl pv active org obs note swhen spct
   rows=$(gather) || exit 1
 
   local -a n_c=() p_c=() s_pl=() s_pa=() w_pl=() w_pa=() x_pl=() x_pa=() notes=()
@@ -951,7 +984,15 @@ table() {
       fi
     fi
     p_c+=("${plan}")
-    s_pl+=("$(pct_plain "${sl}")");  s_pa+=("$(pct_paint "${sl}")")
+    swhen=$(session_when "${sr}")
+    spct=$(pct_plain "${sl}")
+    if [[ -z ${swhen} ]]; then
+      s_pl+=("$(printf '%4s' "${spct}")")
+      s_pa+=("$(printf '%*s%s' "$((4 - ${#spct}))" "" "$(pct_paint "${sl}")")")
+    else
+      s_pl+=("$(printf '%4s  %s' "${spct}" "${swhen}")")
+      s_pa+=("$(printf '%*s%s  %s%s%s' "$((4 - ${#spct}))" "" "$(pct_paint "${sl}")" "${DIM}" "${swhen}" "${RST}")")
+    fi
     x_pl+=("$(pct_plain "${pv}")");  x_pa+=("$(pct_paint "${pv}")")
     if [[ ${wl} == "-" || ${when} == "-" ]]; then
       w_pl+=("$(pct_plain "${wl}")"); w_pa+=("$(pct_paint "${wl}")")
@@ -974,7 +1015,7 @@ table() {
   done
 
   hrule "┌" "┬" "┐" "${w0}" "${w1}" "${w2}" "${w3}" "${w4}"
-  printf '│ %s%-*s%s │ %s%-*s%s │ %s%*s%s │ %s%-*s%s │ %s%*s%s │\n' \
+  printf '│ %s%-*s%s │ %s%-*s%s │ %s%-*s%s │ %s%-*s%s │ %s%*s%s │\n' \
     "${BOLD}" "${w0}" "${h0}" "${RST}" "${BOLD}" "${w1}" "${h1}" "${RST}" \
     "${BOLD}" "${w2}" "${h2}" "${RST}" "${BOLD}" "${w3}" "${h3}" "${RST}" \
     "${BOLD}" "${w4}" "${plabel}" "${RST}"
@@ -984,7 +1025,7 @@ table() {
     printf '│ '
     pad_cell "${n_c[i]}" "${n_c[i]}" "${w0}" left;               printf ' │ '
     pad_cell "${p_c[i]}" "${p_c[i]}" "${w1}" left;               printf ' │ '
-    pad_cell "${s_pa[i]}" "${s_pl[i]}" "${w2}" right;            printf ' │ '
+    pad_cell "${s_pa[i]}" "${s_pl[i]}" "${w2}" left;             printf ' │ '
     pad_cell "${w_pa[i]}" "${w_pl[i]}" "${w3}" left;             printf ' │ '
     pad_cell "${x_pa[i]}" "${x_pl[i]}" "${w4}" right;            printf ' │\n'
   done
