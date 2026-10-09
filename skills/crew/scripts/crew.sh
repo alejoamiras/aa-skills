@@ -172,7 +172,8 @@ cmd_spawn() {
     pane_tail "${sid}"
     T kill-session -t "${sid}" 2> /dev/null
     if [[ -n ${wstart} ]] && ! reap "${ppid}" "${wstart}"; then
-      die_with 4 "crew-${slug} could not be tagged, and pid ${ppid} did not exit even after KILL; check it by hand"
+      printf 'crew: pid %s did not exit even after KILL; waiting for it, so the account stays reserved\n' "${ppid}" >&2
+      while alive_as "${ppid}" "${wstart}"; do sleep 1; done
     fi
     die_with 4 "crew-${slug} died at startup or could not be tagged; removed"
   fi
