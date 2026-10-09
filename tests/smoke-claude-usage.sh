@@ -229,6 +229,9 @@ t "pairing: current names it from the slot" test "$(nr current)" = tk-pair
 calls=$(wc -l < "$NET/argv")
 nr --json > /dev/null
 t "probe: a reading is reused within the TTL" test "$(wc -l < "$NET/argv")" -eq "$calls"
+t "table: a session shows its 5h reset time" grep -qE 'tk-free +│[^│]*│ +92%  ([A-Z][a-z]{2} [0-9]{1,2} )?[0-9]{1,2}(:[0-9]{2})?[ap]m' <(CLAUDE_USAGE_TTL=99999 nr)
+f=$(ls "$S"/cache-net/claude-usage/*/token-tk-free.tsv); awk -F'\t' -v OFS='\t' -v r=$(( $(date +%s) - 60 )) '{ $7 = r; print }' "$f" > "$f.n" && mv "$f.n" "$f"
+t "table: a passed 5h reset shows no time" grep -qE 'tk-free +│[^│]*│ +92% +│' <(CLAUDE_USAGE_TTL=99999 nr)
 echo team > "$HOME/.claude/plan"
 t "pairing: never by org on a team plan" grep -q '"account":"main","active":true' <(nr --json)
 rm -f "$HOME/.claude/plan"

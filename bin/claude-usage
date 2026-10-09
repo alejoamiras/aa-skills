@@ -897,8 +897,21 @@ pct_paint() {
   if [[ $1 == "-" ]]; then printf '%s-%s' "${DIM}" "${RST}"; else paint_left "$1"; fi
 }
 
+# A 5h reset as its table cell shows it: the time alone when it falls today, with the day otherwise,
+# and nothing once it has passed (the reading predates the reset, so its percentage is stale too).
+# The CLI may print a same-day reset as a bare time ("4:30pm"), read here as today's.
+session_when() {
+  local when="$1" e
+  [[ -z ${when} || ${when} == "-" ]] && return 0
+  [[ ${when} =~ ^[0-9] ]] && when="$(date '+%b %-d') ${when}"
+  e=$(to_epoch "${when}")
+  [[ ${e} != "${NEVER}" ]] && ((10#${e} > $(date +%s))) || return 0
+  when=${when/ at / }; when=${when//,/}
+  if [[ $(fmt_epoch "${e}" '%F') == "$(date '+%F')" ]]; then printf '%s' "${when##* }"; else printf '%s' "${when}"; fi
+}
+
 table() {
-  local rows key name email plan sl sr wl wr pl pv active org obs note
+  local rows key name email plan sl sr wl wr pl pv active org obs note swhen
   rows=$(gather) || exit 1
 
   local -a n_c=() p_c=() s_pl=() s_pa=() w_pl=() w_pa=() x_pl=() x_pa=() notes=()
@@ -951,7 +964,14 @@ table() {
       fi
     fi
     p_c+=("${plan}")
-    s_pl+=("$(pct_plain "${sl}")");  s_pa+=("$(pct_paint "${sl}")")
+    swhen=$(session_when "${sr}")
+    if [[ ${sl} == "-" || -z ${swhen} ]]; then
+      s_pl+=("$(printf '%4s' "$(pct_plain "${sl}")")")
+      s_pa+=("$(printf '%*s%s' "$((4 - ${#sl} - 1))" "" "$(pct_paint "${sl}")")")
+    else
+      s_pl+=("$(printf '%4s  %s' "$(pct_plain "${sl}")" "${swhen}")")
+      s_pa+=("$(printf '%*s%s  %s%s%s' "$((4 - ${#sl} - 1))" "" "$(pct_paint "${sl}")" "${DIM}" "${swhen}" "${RST}")")
+    fi
     x_pl+=("$(pct_plain "${pv}")");  x_pa+=("$(pct_paint "${pv}")")
     if [[ ${wl} == "-" || ${when} == "-" ]]; then
       w_pl+=("$(pct_plain "${wl}")"); w_pa+=("$(pct_paint "${wl}")")
@@ -974,7 +994,7 @@ table() {
   done
 
   hrule "┌" "┬" "┐" "${w0}" "${w1}" "${w2}" "${w3}" "${w4}"
-  printf '│ %s%-*s%s │ %s%-*s%s │ %s%*s%s │ %s%-*s%s │ %s%*s%s │\n' \
+  printf '│ %s%-*s%s │ %s%-*s%s │ %s%-*s%s │ %s%-*s%s │ %s%*s%s │\n' \
     "${BOLD}" "${w0}" "${h0}" "${RST}" "${BOLD}" "${w1}" "${h1}" "${RST}" \
     "${BOLD}" "${w2}" "${h2}" "${RST}" "${BOLD}" "${w3}" "${h3}" "${RST}" \
     "${BOLD}" "${w4}" "${plabel}" "${RST}"
@@ -984,7 +1004,7 @@ table() {
     printf '│ '
     pad_cell "${n_c[i]}" "${n_c[i]}" "${w0}" left;               printf ' │ '
     pad_cell "${p_c[i]}" "${p_c[i]}" "${w1}" left;               printf ' │ '
-    pad_cell "${s_pa[i]}" "${s_pl[i]}" "${w2}" right;            printf ' │ '
+    pad_cell "${s_pa[i]}" "${s_pl[i]}" "${w2}" left;             printf ' │ '
     pad_cell "${w_pa[i]}" "${w_pl[i]}" "${w3}" left;             printf ' │ '
     pad_cell "${x_pa[i]}" "${x_pl[i]}" "${w4}" right;            printf ' │\n'
   done
