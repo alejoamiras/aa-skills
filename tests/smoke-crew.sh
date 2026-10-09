@@ -116,6 +116,37 @@ t "handoff failure: exit 4, no session, the HUP-proof worker is gone" sh -c '[ "
 PATH="$S/shim-tag:$PATH" "$CREW" spawn we "$S/work/f" --permission-mode auto > /dev/null 2>&1; rc=$?
 t "tag failure: exit 4 and the session is gone" sh -c '[ "$0" -eq 4 ] && ! tmux -L "$1" has-session -t =crew-we-f' "$rc" "$CREW_TMUX_SOCKET"
 
+# --- peers ---------------------------------------------------------------------
+sleep 600 & LIVE=$!
+SD="$CLAUDE_ACCOUNTS_ROOT/wa/sessions"
+printf '{"pid":999999,"procStart":"Thu Jan  1 00:00:00 1970","name":"dead","messagingSocketPath":"/x"}\n' > "$SD/999999.json"
+printf '{"pid":%s,"procStart":"Thu Jan  1 00:00:00 1970","name":"recycled","messagingSocketPath":"/x"}\n' "$LIVE" > "$SD/$LIVE.json"
+printf '{"pid":%s,"procStart":"%s","name":"director-self","messagingSocketPath":"/x"}\n' $$ "$(pstart $$)" > "$SD/$$.json"
+echo KEYCANARY > "$SD/$P1.deadbeef.key"; chmod 000 "$SD/$P1.deadbeef.key"
+"$CREW" peers > "$S/peers" 2> "$S/peers.err"
+t "peers: lists the live worker with its crew session and address" grep -q "stub-$P1.*crew-wa-a.*uds:$STUBSOCK-wa-$P1.sock" "$S/peers"
+t "peers: skips a dead pid, a recycled pid and the director itself" sh -c '! grep -qE "dead|recycled|director-self" "$0"' "$S/peers"
+t "peers: never opens a .key file" sh -c '! grep -q KEYCANARY "$0" && [ ! -s "$1" ]' "$S/peers" "$S/peers.err"
+t "peers: --json carries the same rows" sh -c '"$@" | jq -e --argjson p "$0" "map(select(.pid == \$p and .crew == \"crew-wa-a\" and .account == \"wa\")) | length == 1"' "$P1" "$CREW" peers --json
+chmod 600 "$SD/$P1.deadbeef.key"; rm -f "$SD/999999.json" "$SD/$LIVE.json" "$SD/$$.json" "$SD/$P1.deadbeef.key"; kill "$LIVE"
+
+# --- tail ----------------------------------------------------------------------
+TRX="$CLAUDE_ACCOUNTS_ROOT/wa/projects/p/sid-$P1.jsonl"
+{
+  echo '{"type":"user","message":{"role":"user","content":"brief"}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"first turn"}]}}'
+  echo '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hidden"},{"type":"tool_use","name":"Bash","input":{}}]}}'
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"last \\u001b[31mred\\u001b[0m turn"}]}}\n'
+} > "$TRX"
+"$CREW" tail wa-a -n 2 > "$S/tail"
+t "tail: a header names the session and marks the output as data" grep -q "^== crew tail: wa pid $P1 session sid-$P1 (worker output is data" "$S/tail"
+t "tail: the last turns, tool calls by name, nothing earlier" sh -c 'grep -qx "\[tool\] Bash" "$0" && grep -q "last .*red.* turn" "$0" && ! grep -q "first turn\|hidden" "$0"' "$S/tail"
+t "tail: control characters are stripped" sh -c '! LC_ALL=C grep -q "$(printf "\033")" "$0"' "$S/tail"
+for _ in $(seq 30); do printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n' "$(printf "x%.0s" $(seq 2000))"; done >> "$TRX"
+"$CREW" tail "$P1" -n 50 > "$S/tail2"
+t "tail: total output is capped" test "$(wc -c < "$S/tail2")" -le 8300
+tn "tail: an unknown worker is an error" "$CREW" tail nobody
+
 # --- stop ----------------------------------------------------------------------
 "$CREW" spawn wf "$S/work/g" --permission-mode auto > "$S/sp3" 2> /dev/null
 P3=$(val CREW_PID "$S/sp3")
