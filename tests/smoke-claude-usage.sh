@@ -34,6 +34,7 @@ cat > "$S/bin/claude" <<'STUB'
 acct=$(basename "${CLAUDE_CONFIG_DIR:-main}")
 plan=$(cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plan" 2>/dev/null || echo max)
 org=$(cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/org" 2>/dev/null || echo "org-$acct")
+[[ $1 == --version ]] && { echo "9.9.9 (Claude Code)"; exit 0; }
 [[ $1 == auth ]] && { printf '{\n  "loggedIn": true,\n  "email": "%s@x",\n  "orgId": "%s",\n  "subscriptionType": "%s"\n}\n' "$acct" "$org" "$plan"; exit 0; }
 if [[ " $* " == *" /usage "* ]]; then
   echo "You are currently using your subscription to power your Claude Code usage"
@@ -361,6 +362,75 @@ t "pairing: an older slot reading never revives a newer spent token" test "$(rkm
 tk=$(mktok bareshow); reply "$tk" 429 "request-id: r"
 printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add bareshow > /dev/null 2>&1
 t "show: a bare 429 prints as refused, unknown numbers, no crash" sh -c '"$@" > "$0" 2>&1 && grep -q "^refused" "$0" && grep -q "Current session: unknown" "$0"' "$S/show.out" env CLAUDE_ACCOUNTS_ROOT="$RK" XDG_CACHE_HOME="$S/cache-r2" "$CU" show bareshow
+
+# --- account-home config: onboarding seed, prepare, reservations ---------------
+PR="$S/prep-root"; mkdir -p "$PR"/{pa,pb,pd,pe} "$S/trusted/sub" "$S/trusted/sub2" "$S/trusted-evil" "$S/trusted/a#b"
+ln -s "$PR/pa" "$PR/pc"
+pp() { env CLAUDE_ACCOUNTS_ROOT="$PR" XDG_CACHE_HOME="$S/cache-pp" "$CU" "$@"; }
+ino() { ls -i "$1" | awk '{print $1}'; }
+# Claude Code's procStart form: /proc stat field 22 on Linux, C-locale UTC lstart elsewhere.
+pstart() {
+  if [ -r "/proc/$1/stat" ]; then sed 's/.*) //' "/proc/$1/stat" | awk '{print $20}'
+  else LC_ALL=C TZ=UTC ps -o lstart= -p "$1" | tr -s ' ' | sed 's/^ //;s/ $//'; fi
+}
+TR="$(cd "$S/trusted" && pwd -P)"
+printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$TR" > "$HOME/.claude.json"
+printf '{"keep":1,"lastOnboardingVersion":"1.0"}\n' > "$PR/pa/.claude.json"
+pp run pa -p x > /dev/null 2>&1
+t "seed: run marks onboarding done, keeps every existing key" jq -e '.hasCompletedOnboarding == true and .keep == 1 and .lastOnboardingVersion == "1.0"' "$PR/pa/.claude.json"
+pp run pe -p x > /dev/null 2>&1
+t "seed: a fresh home gets the running claude's version" jq -e '.lastOnboardingVersion == "9.9.9"' "$PR/pe/.claude.json"
+i1=$(ino "$PR/pa/.claude.json"); pp run pa -p x > /dev/null 2>&1
+t "seed: a second run writes nothing" test "$(ino "$PR/pa/.claude.json")" = "$i1"
+pp prepare pa "$S/trusted/sub" > /dev/null 2>&1
+t "prepare: trust under a trusted ancestor lands on the exact physical dir" jq -e --arg p "$TR/sub" '.projects[$p].hasTrustDialogAccepted == true' "$PR/pa/.claude.json"
+tn "prepare: a sibling sharing the prefix is not covered" pp prepare pa "$S/trusted-evil"
+tn "prepare: a dir with '#' is refused" pp prepare pa "$S/trusted/a#b"
+tn "prepare: a symlinked home is refused" pp prepare =pc "$S/trusted/sub"
+echo '{bad' > "$PR/pb/.claude.json"
+tn "prepare: a malformed .claude.json is refused" pp prepare pb "$S/trusted/sub"
+t "prepare: ...and left as it was" grep -qx '{bad' "$PR/pb/.claude.json"
+pp prepare main "$S/trusted/sub2" > /dev/null 2>&1
+t "prepare: main writes ~/.claude.json after the same check" jq -e --arg p "$TR/sub2" '.projects[$p].hasTrustDialogAccepted == true' "$HOME/.claude.json"
+pp prepare pd "$S/trusted/sub" > /dev/null 2>&1 & pp prepare pd "$S/trusted/sub2" > /dev/null 2>&1 & wait
+t "prepare: two in parallel keep both trust entries" jq -e --arg a "$TR/sub" --arg b "$TR/sub2" '.projects[$a] and .projects[$b]' "$PR/pd/.claude.json"
+# A live session: a sleeping process registered the way Claude Code does it.
+sleep 300 & LIVE=$!
+mkdir -p "$PR/pa/sessions"; printf '{"pid":%s,"procStart":"%s"}\n' "$LIVE" "$(pstart "$LIVE")" > "$PR/pa/sessions/$LIVE.json"
+pp prepare pa "$S/trusted/sub2" > /dev/null 2>&1; rc=$?
+t "busy: a needed write exits 2 while a session lives" test "$rc" -eq 2
+t "busy: a write that changes nothing still succeeds" pp prepare pa "$S/trusted/sub"
+printf '{"pid":%s,"procStart":"Mon Jan  1 00:00:00 2001"}\n' "$LIVE" > "$PR/pa/sessions/$LIVE.json"
+t "busy: a recycled pid (other start time) is not a live session" pp prepare pa "$S/trusted/sub2"
+rm -f "$PR/pa/sessions/$LIVE.json"
+mkdir -p "$PR/pd/.launching"; printf '%s %s\n' "$LIVE" "$(pstart "$LIVE")" > "$PR/pd/.launching/live1"; echo "999999 Mon Jan  1 00:00:00 2001" > "$PR/pd/.launching/dead1"
+mkdir -p "$S/trusted/sub3"
+pp prepare pd "$S/trusted/sub3" > /dev/null 2>&1; rc=$?
+t "reserve: a live launch reservation blocks a needed write" test "$rc" -eq 2
+t "reserve: a dead reservation is pruned" test ! -e "$PR/pd/.launching/dead1"
+rm -f "$PR/pd/.launching/live1"
+pp prepare pd "$S/trusted/sub3" --hold L1 "$LIVE" > /dev/null 2>&1
+t "reserve: --hold creates the reservation with the write" grep -q "^$LIVE " "$PR/pd/.launching/L1"
+tn "reserve: a launch id is never reused" pp prepare pd "$S/trusted/sub3" --hold L1 "$LIVE"
+tn "reserve: only the owner may extend it" pp hold pd L1 $$ "$LIVE"
+t "reserve: the owner extends it" pp hold pd L1 "$LIVE" $$
+t "reserve: ...with the new process's line" grep -q "^$$ " "$PR/pd/.launching/L1"
+tn "reserve: only the owner may release it" pp release pd L1 $$
+t "reserve: the owner releases it" sh -c '"$@" && [ ! -e "$0" ]' "$PR/pd/.launching/L1" env CLAUDE_ACCOUNTS_ROOT="$PR" XDG_CACHE_HOME="$S/cache-pp" "$CU" release pd L1 "$LIVE"
+LK="$PR/pd/.claude-usage-config.lock"; mkdir "$LK"; printf '%s %s\n' "$LIVE" "$(pstart "$LIVE")" > "$LK/holder"
+pp prepare pd "$S/trusted/sub" --hold L2 "$LIVE" > /dev/null 2>&1; rc=$?
+t "lock: a live holder makes prepare give up with exit 2" test "$rc" -eq 2
+echo "999999 Mon Jan  1 00:00:00 2001" > "$LK/holder"
+pp prepare pd "$S/trusted/sub" > "$S/lk1" 2>&1 & p1=$!
+pp prepare pd "$S/trusted/sub" > "$S/lk2" 2>&1 & p2=$!
+wait "$p1" "$p2"
+t "lock: a dead holder is never stolen, by either of two callers" sh -c 'grep -q "no longer running" "$0" && grep -q "no longer running" "$1" && grep -q "^999999 " "$2/holder"' "$S/lk1" "$S/lk2" "$LK"
+t "lock: the printed recovery clears it and prepare then succeeds" sh -c 'eval "$(sed -n "s/^  //p" "$0")" && "$@"' "$S/lk1" env CLAUDE_ACCOUNTS_ROOT="$PR" XDG_CACHE_HOME="$S/cache-pp" "$CU" prepare pd "$S/trusted/sub"
+mkdir "$LK"
+pp prepare pd "$S/trusted/sub" > "$S/lk3" 2>&1; rc=$?
+t "lock: a lock with no holder record gets the same recovery, never a steal" sh -c '[ "$0" -eq 2 ] && grep -q "no holder record" "$1" && [ -d "$2" ]' "$rc" "$S/lk3" "$LK"
+t "lock: ...which clears it" sh -c 'eval "$(sed -n "s/^  //p" "$0")" && "$@"' "$S/lk3" env CLAUDE_ACCOUNTS_ROOT="$PR" XDG_CACHE_HOME="$S/cache-pp" "$CU" prepare pd "$S/trusted/sub"
+kill "$LIVE" 2> /dev/null
 
 # --- reviewer scripts ---------------------------------------------------------
 echo "review this" > "$S/prompt"; mkdir -p "$S/repo"

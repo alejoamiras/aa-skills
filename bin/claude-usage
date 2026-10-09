@@ -31,7 +31,8 @@
 #                                shorthand. Links this machine's ~/.claude stack
 #                                (CLAUDE.md, AGENTS.md, statusline.sh,
 #                                settings.json, plugins, skills) into the
-#                                account first
+#                                account first, and marks first-run onboarding
+#                                done (needs jq; skipped while the account runs)
 #   claude-usage add <name>      store a `claude setup-token` token (pasted
 #                                hidden, or piped on stdin — never an argument)
 #   claude-usage add <name> --login [email]
@@ -49,6 +50,14 @@
 #   =<key>                       in run and resolve: that exact account key,
 #                                no name matching and no selector words (for
 #                                scripts that recorded a key)
+#   claude-usage prepare <name> <dir> [--hold <id> <pid>]
+#                                trust <dir> for that account, only where this
+#                                session's own Claude Code trusts it or a parent;
+#                                exit 2 = the account is busy (a live session
+#                                would race the write). --hold records a launch
+#                                reservation that keeps it busy while <pid> lives
+#   claude-usage hold|release <name> <id> <owner-pid> [<pid>]
+#                                extend or end that reservation (its owner only)
 #   claude-usage current         the account this shell is on (its row in the
 #                                table; exit 1 when it cannot be told)
 #   claude-usage statusline      compact cached segment for statusline.sh
@@ -1695,6 +1704,212 @@ link_stack() {
   return 0
 }
 
+# --- account-home config (.claude.json) ---------------------------------------
+# Claude Code rewrites .claude.json whole while it runs, so a write from here
+# while a session (or a launch not yet registered) lives on the account would
+# lose one side's change. Writes therefore go through one fail-closed mutex
+# and refuse while the account is busy; a write that changes nothing is free.
+
+# A process start time in the form Claude Code records as procStart in
+# sessions/<pid>.json: on Linux, /proc/<pid>/stat field 22 (clock ticks since
+# boot); elsewhere, `ps -o lstart` in the C locale and UTC (any other locale
+# or zone reorders or shifts it), spaces squeezed.
+proc_start() {
+  local s f
+  if [[ -r /proc/$1/stat ]]; then
+    s=$(< "/proc/$1/stat") 2> /dev/null || return 0
+    # Skip "pid (comm) ": comm may itself contain spaces and parentheses.
+    read -r -a f <<< "${s##*) }"
+    printf '%s' "${f[19]:-}"
+  else
+    LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2> /dev/null | tr -s ' ' | sed 's/^ //;s/ $//'
+  fi
+}
+
+# True when <pid> is alive AND started at <start>: a recycled pid is not it.
+alive_as() {
+  [[ $1 =~ ^[0-9]+$ && -n ${2:-} ]] || return 1
+  [[ $(proc_start "$1") == "$(tr -s ' ' <<< "$2" | sed 's/^ //;s/ $//')" ]]
+}
+
+# The account's config dir and the .claude.json beside it. The slot keeps its
+# config at ~/.claude.json, outside ~/.claude.
+account_home() { [[ $1 == main ]] && printf '%s' "${MAIN_DIR}" || printf '%s' "${ACCOUNTS_ROOT}/$1"; }
+account_cfg() { [[ $1 == main ]] && printf '%s' "${HOME}/.claude.json" || printf '%s' "${ACCOUNTS_ROOT}/$1/.claude.json"; }
+
+# A registered live session, or a live launch reservation (.launching/<id>:
+# "<pid> <start>" lines, live while any line is).
+account_busy() {
+  local home="$1" f pid start
+  for f in "${home}"/sessions/*.json; do
+    [[ -f ${f} ]] || continue
+    pid=$(jq -r '.pid // empty' "${f}" 2> /dev/null)
+    start=$(jq -r '.procStart // empty' "${f}" 2> /dev/null)
+    alive_as "${pid}" "${start}" && return 0
+  done
+  for f in "${home}"/.launching/*; do
+    reservation_live "${f}" && return 0
+  done
+  return 1
+}
+
+reservation_live() {
+  local pid start
+  [[ -f $1 ]] || return 1
+  while read -r pid start; do alive_as "${pid}" "${start}" && return 0; done < "$1"
+  return 1
+}
+
+# Never steals: a holder that died mid-write leaves the lock for a human, who
+# gets the exact commands. Held only for one read-modify-write.
+CFG_LOCK=""
+config_lock() {
+  local lock="$1/.claude-usage-config.lock" i=0 hp hs
+  while ! mkdir "${lock}" 2> /dev/null; do
+    read -r hp hs < "${lock}/holder" 2> /dev/null || hp=""
+    if [[ -n ${hp} ]] && ! alive_as "${hp}" "${hs}"; then
+      printf 'claude-usage: %s is held by pid %s, which is no longer running.\n' "${lock}" "${hp}" >&2
+      printf 'If no claude-usage command is running for this account, clear it:\n  rm -f %q && rmdir %q\n' "${lock}/holder" "${lock}" >&2
+      return 2
+    fi
+    if ((i++ >= 50)); then
+      if [[ -n ${hp} ]]; then
+        printf 'claude-usage: %s is busy (another config write); try again\n' "${lock}" >&2
+      else
+        # A writer that died between mkdir and its holder record.
+        printf 'claude-usage: %s has no holder record after 5 s.\n' "${lock}" >&2
+        printf 'If no claude-usage command is running for this account, clear it:\n  rm -f %q && rmdir %q\n' "${lock}/holder" "${lock}" >&2
+      fi
+      return 2
+    fi
+    sleep 0.1
+  done
+  if ! printf '%s %s\n' "$$" "$(proc_start $$)" > "${lock}/holder"; then
+    rmdir "${lock}" 2> /dev/null
+    return 2
+  fi
+  CFG_LOCK="${lock}"
+}
+config_unlock() { [[ -n ${CFG_LOCK} ]] && rm -f "${CFG_LOCK}/holder" && rmdir "${CFG_LOCK}"; CFG_LOCK=""; }
+
+# Applies a jq filter to an account's .claude.json under the mutex.
+# 0 = applied or nothing to change; 1 = malformed file; 2 = busy or locked.
+config_update() {
+  local key="$1" filter="$2" home cfg cur new tmp mode rc=0 f
+  shift 2
+  home=$(account_home "${key}"); cfg=$(account_cfg "${key}")
+  command -v jq > /dev/null || { printf 'claude-usage: jq is required to edit %s\n' "${cfg}" >&2; return 2; }
+  mkdir -p "${home}" && config_lock "${home}" || return 2
+  if [[ -e ${cfg} ]]; then
+    cur=$(jq -c . "${cfg}" 2> /dev/null) || { printf 'claude-usage: %s is not valid JSON — not touching it\n' "${cfg}" >&2; config_unlock; return 1; }
+  else
+    cur='{}'
+  fi
+  new=$(jq -c "$@" "${filter}" <<< "${cur}") || { config_unlock; return 1; }
+  if [[ ${new} != "${cur}" ]]; then
+    if account_busy "${home}"; then
+      printf 'claude-usage: %s has a live session; not editing %s while it runs\n' "${key}" "${cfg}" >&2
+      rc=2
+    else
+      mode=$(stat -c %a "${cfg}" 2> /dev/null || stat -f %Lp "${cfg}" 2> /dev/null || echo 600)
+      if ! { tmp=$(mktemp "${cfg}.XXXXXX") && jq . <<< "${new}" > "${tmp}" && chmod "${mode}" "${tmp}" && mv "${tmp}" "${cfg}"; }; then
+        rm -f "${tmp}"
+        rc=1
+      fi
+    fi
+  fi
+  for f in "${home}"/.launching/*; do
+    [[ -f ${f} ]] && ! reservation_live "${f}" && rm -f "${f}"
+  done
+  ((rc == 0)) && [[ -n ${HOLD_ID} ]] && { reservation_new "${home}" || rc=2; }
+  config_unlock
+  return "${rc}"
+}
+
+# Exclusive: a launch id names one launch, never two.
+HOLD_ID="" HOLD_PID=""
+reservation_new() {
+  if ! { mkdir -p "$1/.launching" &&
+    (set -o noclobber; printf '%s %s\n' "${HOLD_PID}" "$(proc_start "${HOLD_PID}")" > "$1/.launching/${HOLD_ID}") 2> /dev/null; }; then
+    printf 'claude-usage: launch id %s already exists\n' "${HOLD_ID}" >&2
+    return 1
+  fi
+}
+
+# Skips the first-run theme and welcome screens. Best effort: a busy account
+# or a missing jq only means the screens appear.
+seed_onboarding() {
+  local v
+  v=$(claude --version 2> /dev/null | awk 'NR == 1 { print $1 }')
+  # shellcheck disable=SC2016 # $v is a jq variable
+  config_update "$1" '.hasCompletedOnboarding = true | if .lastOnboardingVersion or $v == "" then . else .lastOnboardingVersion = $v end' --arg v "${v}"
+}
+
+refuse_alias_home() {
+  # Linking into a home that is really the slot would move the slot's own
+  # files aside and leave links pointing at themselves.
+  [[ -L $1 || $1 -ef ${MAIN_DIR} ]] && die "$1 is a symlink — refusing to use it as an account home"
+  return 0
+}
+
+# Trust <dir> for an account, but only where the caller's own Claude Code
+# already trusts it or an ancestor: a worker never gets trust its director
+# lacks. Ancestors match on whole components, so /a/x never covers /a/x-evil.
+cmd_prepare() {
+  local q="${1:-}" dir="${2:-}" key phys mine rc=0
+  [[ -n ${q} && -n ${dir} ]] || die "usage: claude-usage prepare <account> <dir> [--hold <id> <pid>]"
+  shift 2
+  if [[ ${1:-} == --hold ]]; then
+    HOLD_ID="${2:-}" HOLD_PID="${3:-}"
+    valid_name "${HOLD_ID}" || die "invalid launch id: ${HOLD_ID}"
+    [[ ${HOLD_PID} =~ ^[0-9]+$ ]] || die "--hold needs a live pid"
+    kill -0 "${HOLD_PID}" 2> /dev/null || die "--hold needs a live pid"
+  fi
+  command -v jq > /dev/null || die "prepare needs jq"
+  case "${q}" in =*) key=$(literal_key "${q#=}") ;; *) key=$(resolve_key "${q}") ;; esac || exit 1
+  [[ ${key} == main ]] || refuse_alias_home "${ACCOUNTS_ROOT}/${key}"
+  [[ -d ${dir} ]] || die "not a directory: ${dir}"
+  phys=$(cd "${dir}" && pwd -P) || die "cannot enter ${dir}"
+  [[ ${phys} == *[[:cntrl:]#]* ]] && die "refusing a directory whose path has '#' or control characters: ${phys}"
+  mine="${CLAUDE_CONFIG_DIR:+${CLAUDE_CONFIG_DIR}/.claude.json}"
+  mine="${mine:-${HOME}/.claude.json}"
+  jq -e --arg p "${phys}" '[.projects // {} | to_entries[] | select(.value.hasTrustDialogAccepted == true) | .key]
+    | any(. as $k | $p == $k or ($p | startswith(($k | rtrimstr("/")) + "/")))' "${mine}" > /dev/null 2>&1 ||
+    die "${phys} is not trusted by this session's Claude Code (${mine}) — open claude there once yourself first"
+  if [[ ${key} != main ]]; then
+    local hold="${HOLD_ID}"
+    HOLD_ID=""
+    seed_onboarding "${key}" || exit $?
+    HOLD_ID="${hold}"
+  fi
+  # shellcheck disable=SC2016 # $p is a jq variable
+  config_update "${key}" '.projects[$p] = ((.projects[$p] // {}) + {hasTrustDialogAccepted: true})' --arg p "${phys}" || rc=$?
+  exit "${rc}"
+}
+
+# Only the launch's owner (the process named on its first line) extends or
+# ends a reservation.
+cmd_reserve() {
+  local op="$1" q="${2:-}" id="${3:-}" owner="${4:-}" pid="${5:-}" key home f hp hs rc=0
+  [[ -n ${q} ]] && valid_name "${id}" && [[ ${owner} =~ ^[0-9]+$ ]] ||
+    die "usage: claude-usage hold <account> <id> <owner-pid> <pid> | release <account> <id> <owner-pid>"
+  case "${q}" in =*) key=$(literal_key "${q#=}") ;; *) key=$(resolve_key "${q}") ;; esac || exit 1
+  home=$(account_home "${key}"); f="${home}/.launching/${id}"
+  config_lock "${home}" || exit 2
+  read -r hp hs < "${f}" 2> /dev/null || hp=""
+  if [[ ${hp} != "${owner}" ]] || ! alive_as "${hp}" "${hs}"; then
+    printf 'claude-usage: launch %s is not held by pid %s\n' "${id}" "${owner}" >&2
+    rc=1
+  elif [[ ${op} == hold ]]; then
+    [[ ${pid} =~ ^[0-9]+$ ]] && kill -0 "${pid}" 2> /dev/null &&
+      printf '%s %s\n' "${pid}" "$(proc_start "${pid}")" >> "${f}" || rc=1
+  else
+    rm -f "${f}"
+  fi
+  config_unlock
+  exit "${rc}"
+}
+
 # One line on what the snapshot knows about an account's headroom.
 describe() {
   local want="$1" key name email plan sl sr wl wr pl pv active org obs note out="" rows
@@ -1742,10 +1957,9 @@ cmd_run() {
   else
     dir="${ACCOUNTS_ROOT}/${key}"
     label=$(label_for "${key}")
-    # Linking into a home that is really the slot would move the slot's own
-    # files aside and leave links pointing at themselves.
-    [[ -L ${dir} || ${dir} -ef ${MAIN_DIR} ]] && die "${dir} is a symlink — refusing to link the stack into it"
+    refuse_alias_home "${dir}"
     link_stack "${dir}"
+    seed_onboarding "${key}" 2> /dev/null
     export CLAUDE_CONFIG_DIR="${dir}"
   fi
 
@@ -1781,6 +1995,9 @@ case "${1:-table}" in
   statusline) cmd_statusline ;;
   run)        shift; cmd_run "$@" ;;
   resolve)    shift; cmd_resolve "$@" ;;
+  prepare)    shift; cmd_prepare "$@" ;;
+  hold)       shift; cmd_reserve hold "$@" ;;
+  release)    shift; cmd_reserve release "$@" ;;
   current)    ensure_snapshot; me=$(current_account); printf '%s\n' "${me}"; [[ ${me} != "${UNKNOWN}" ]] ;;
   add)        shift; cmd_add "$@" ;;
   remove|rm)  shift; cmd_remove "$@" ;;
