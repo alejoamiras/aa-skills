@@ -423,6 +423,10 @@ pp prepare pd "$S/trusted/sub" > "$S/lk2" 2>&1 & p2=$!
 wait "$p1" "$p2"
 t "lock: a dead holder is never stolen, by either of two callers" sh -c 'grep -q "no longer running" "$0" && grep -q "no longer running" "$1" && grep -q "^999999 " "$2/holder"' "$S/lk1" "$S/lk2" "$LK"
 t "lock: the printed recovery clears it and prepare then succeeds" sh -c 'eval "$(sed -n "s/^  //p" "$0")" && "$@"' "$S/lk1" env CLAUDE_ACCOUNTS_ROOT="$PR" XDG_CACHE_HOME="$S/cache-pp" "$CU" prepare pd "$S/trusted/sub"
+mkdir "$LK"
+pp prepare pd "$S/trusted/sub" > "$S/lk3" 2>&1; rc=$?
+t "lock: a lock with no holder record gets the same recovery, never a steal" sh -c '[ "$0" -eq 2 ] && grep -q "no holder record" "$1" && [ -d "$2" ]' "$rc" "$S/lk3" "$LK"
+t "lock: ...which clears it" sh -c 'eval "$(sed -n "s/^  //p" "$0")" && "$@"' "$S/lk3" env CLAUDE_ACCOUNTS_ROOT="$PR" XDG_CACHE_HOME="$S/cache-pp" "$CU" prepare pd "$S/trusted/sub"
 kill "$LIVE" 2> /dev/null
 
 # --- reviewer scripts ---------------------------------------------------------

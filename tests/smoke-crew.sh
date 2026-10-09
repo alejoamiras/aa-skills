@@ -25,7 +25,7 @@ export PATH="$S/bin:$ROOT/bin:$PATH" STUBSOCK="/tmp/cs-smoke-$$"
 unset CLAUDE_CONFIG_DIR CREW_WORKER CLAUDE_ACCOUNT TMUX
 # The director: this shell, with a messaging token a worker must never see.
 export CLAUDE_PID=$$ CLAUDE_CODE_MESSAGING_SOCKET="$S/director.sock" CLAUDE_CODE_MESSAGING_TOKEN=director-secret
-mkdir -p "$HOME/.claude" "$S/bin" "$CLAUDE_ACCOUNTS_ROOT"/{wa,wb,wc,wd,we,wf} "$S/work"/{a,b,c,d,e,f,g,h} "$S/work/semi;" "$S/untrusted"
+mkdir -p "$HOME/.claude" "$S/bin" "$CLAUDE_ACCOUNTS_ROOT"/{wa,wb,wc,wd,we,wf,wg} "$S/work"/{a,b,c,d,e,f,g,h} "$S/work/semi;" "$S/untrusted"
 WORK="$(cd "$S/work" && pwd -P)"
 printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$WORK" > "$HOME/.claude.json"
 FAIL=0
@@ -34,7 +34,8 @@ tn() { local label="$1"; shift; if "$@" > /dev/null 2>&1; then echo "FAIL  $labe
 pstart() { LC_ALL=C TZ=UTC ps -o lstart= -p "$1" | tr -s ' ' | sed 's/^ //;s/ $//'; }
 
 # Stub claude. env -i reaches it, so its behaviour comes from a file in the
-# account home: register (default) | exit | never | hupproof | register-exit.
+# account home: register (default) | exit | never | hupproof | stubborn
+# (ignores HUP and TERM, never registers) | register-exit.
 cat > "$S/bin/claude" << 'STUB'
 #!/usr/bin/env bash
 [[ $1 == --version ]] && { echo "9.9.9 (Claude Code)"; exit 0; }
@@ -44,7 +45,8 @@ env > "$h/env.$$"
 mode=$(cat "$h/mode" 2> /dev/null || echo register)
 [[ $mode == exit ]] && { echo "stub: boom"; exit 3; }
 [[ $mode == hupproof ]] && trap '' HUP
-if [[ $mode != never ]]; then
+[[ $mode == stubborn ]] && trap '' HUP TERM
+if [[ $mode != never && $mode != stubborn ]]; then
   sock="$(cat "$h/sockbase")-$$.sock"
   python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$sock"
   mkdir -p "$h/sessions" "$h/projects/p"
@@ -56,7 +58,7 @@ fi
 exec sleep 600
 STUB
 chmod +x "$S/bin/claude"
-for a in wa wb wc wd we wf; do echo "$STUBSOCK-$a" > "$CLAUDE_ACCOUNTS_ROOT/$a/sockbase"; done
+for a in wa wb wc wd we wf wg; do echo "$STUBSOCK-$a" > "$CLAUDE_ACCOUNTS_ROOT/$a/sockbase"; done
 val() { sed -n "s/^$1=//p" "$2"; }
 T() { tmux -L "$CREW_TMUX_SOCKET" "$@"; }
 
@@ -99,11 +101,15 @@ t "no registration: exit 3, session kept with its tags" sh -c '[ "$0" -eq 3 ] &&
 t "no registration: its reservation stays live" test -n "$(ls -A "$CLAUDE_ACCOUNTS_ROOT/wc/.launching")"
 CREW_REGISTER_TIMEOUT=2 "$CREW" spawn wc "$S/work/d" --permission-mode auto > /dev/null 2>&1; rc=$?
 t "no registration: a later spawn needing a config write exits 2" test "$rc" -eq 2
-# C1: the same slug on another server is another launch with its own reservation.
+# The same name on another server is another launch with its own reservation.
 CREW_TMUX_SOCKET="$SOCK2" CREW_REGISTER_TIMEOUT=2 "$CREW" spawn wc "$S/work/c" --permission-mode auto > /dev/null 2>&1
 t "reservations: the same name on two servers keeps two reservations" test "$(ls "$CLAUDE_ACCOUNTS_ROOT/wc/.launching" | wc -l)" -eq 2
+CREW_TMUX_SOCKET="$SOCK2" "$CREW" stop wc-c > /dev/null 2>&1
+claude-usage prepare wc "$S/work/c" > /dev/null 2>&1
+t "reservations: ending one launch leaves the other live" sh -c '[ "$(ls "$0" | wc -l)" -eq 1 ] && [ -n "$(tmux -L "$1" list-sessions -F "#{session_name}" | grep -x crew-wc-c)" ]' "$CLAUDE_ACCOUNTS_ROOT/wc/.launching" "$CREW_TMUX_SOCKET"
+tn "spawn: an option missing its value is a usage error" "$CREW" spawn wb "$S/work/b" --name
 
-# C2 and tag failure: shims fail one step; the HUP-proof stub must still go.
+# Handoff and tag failures: shims fail one step; the worker must still go.
 mkdir -p "$S/shim-hold" "$S/shim-tag"
 # The hold fails late, once the stub has started ignoring HUP.
 printf '#!/usr/bin/env bash\n[ "$1" = hold ] && { sleep 3; exit 1; }\nexec "%s" "$@"\n' "$ROOT/bin/claude-usage" > "$S/shim-hold/claude-usage"
@@ -113,6 +119,10 @@ echo hupproof > "$CLAUDE_ACCOUNTS_ROOT/wd/mode"
 PATH="$S/shim-hold:$PATH" "$CREW" spawn wd "$S/work/e" --permission-mode auto > /dev/null 2>&1; rc=$?
 HP=$(ls "$CLAUDE_ACCOUNTS_ROOT/wd"/env.* 2> /dev/null | sed 's/.*env\.//' | head -1)
 t "handoff failure: exit 4, no session, the HUP-proof worker is gone" sh -c '[ "$0" -eq 4 ] && ! tmux -L "$1" has-session -t =crew-wd-e && [ -n "$2" ] && sleep 1 && ! kill -0 "$2"' "$rc" "$CREW_TMUX_SOCKET" "$HP"
+echo stubborn > "$CLAUDE_ACCOUNTS_ROOT/wg/mode"
+PATH="$S/shim-hold:$PATH" "$CREW" spawn wg "$S/work/e" --permission-mode auto --name stubborn > /dev/null 2>&1; rc=$?
+SP=$(ls "$CLAUDE_ACCOUNTS_ROOT/wg"/env.* 2> /dev/null | sed 's/.*env\.//' | head -1)
+t "handoff failure: a worker ignoring HUP and TERM is still ended" sh -c '[ "$0" -eq 4 ] && [ -n "$1" ] && sleep 1 && ! kill -0 "$1"' "$rc" "$SP"
 PATH="$S/shim-tag:$PATH" "$CREW" spawn we "$S/work/f" --permission-mode auto > /dev/null 2>&1; rc=$?
 t "tag failure: exit 4 and the session is gone" sh -c '[ "$0" -eq 4 ] && ! tmux -L "$1" has-session -t =crew-we-f' "$rc" "$CREW_TMUX_SOCKET"
 

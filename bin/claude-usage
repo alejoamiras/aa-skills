@@ -1761,10 +1761,22 @@ config_lock() {
       printf 'If no claude-usage command is running for this account, clear it:\n  rm -f %q && rmdir %q\n' "${lock}/holder" "${lock}" >&2
       return 2
     fi
-    ((i++ < 50)) || { printf 'claude-usage: %s is busy (another config write); try again\n' "${lock}" >&2; return 2; }
+    if ((i++ >= 50)); then
+      if [[ -n ${hp} ]]; then
+        printf 'claude-usage: %s is busy (another config write); try again\n' "${lock}" >&2
+      else
+        # A writer that died between mkdir and its holder record.
+        printf 'claude-usage: %s has no holder record after 5 s.\n' "${lock}" >&2
+        printf 'If no claude-usage command is running for this account, clear it:\n  rm -f %q && rmdir %q\n' "${lock}/holder" "${lock}" >&2
+      fi
+      return 2
+    fi
     sleep 0.1
   done
-  printf '%s %s\n' "$$" "$(proc_start $$)" > "${lock}/holder"
+  if ! printf '%s %s\n' "$$" "$(proc_start $$)" > "${lock}/holder"; then
+    rmdir "${lock}" 2> /dev/null
+    return 2
+  fi
   CFG_LOCK="${lock}"
 }
 config_unlock() { [[ -n ${CFG_LOCK} ]] && rm -f "${CFG_LOCK}/holder" && rmdir "${CFG_LOCK}"; CFG_LOCK=""; }

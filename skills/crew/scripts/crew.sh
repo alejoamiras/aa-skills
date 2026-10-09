@@ -35,6 +35,7 @@ CONF="${HERE}/../crew.tmux.conf"
 SOCK="${CREW_TMUX_SOCKET:-crew}"
 # Relative entries would let the worker's directory supply the binaries.
 CLEAN_PATH=$(tr ':' '\n' <<< "${PATH}" | grep '^/' | paste -sd: -)
+export PATH="${CLEAN_PATH}"
 ENV_BIN=$(PATH="${CLEAN_PATH}" command -v env) || die "env not found"
 TMUX_BIN=$(PATH="${CLEAN_PATH}" command -v tmux) || die "tmux not found"
 CU_BIN=$(PATH="${CLEAN_PATH}" command -v claude-usage) || die "claude-usage not found"
@@ -78,19 +79,22 @@ homes() {
   done
 }
 
-# "=name:" — the exact-match '=' prefix needs the ':' wherever tmux expects a
-# pane or window target rather than a session.
-opt() { T show-options -v -t "=$1:" "$2" 2> /dev/null; }
+# By session id ($N): a name can be freed and taken again between two calls.
+opt() { T show-options -v -t "$1" "$2" 2> /dev/null; }
 
-# Waits for a signalled process to go, then TERMs it only if it is still the
-# same process (pid and start time).
+# Waits for a HUP'd worker to exit, escalating to TERM, then KILL. Every signal
+# is preceded by an identity check, so a recycled pid is never hit. Fails only
+# if the same process is still alive at the end.
 reap() {
-  local pid="$1" start="$2" i
-  for ((i = 0; i < 20; i++)); do
-    alive_as "${pid}" "${start}" || return 0
-    sleep 0.5
+  local pid="$1" start="$2" sig i
+  for sig in TERM KILL ''; do
+    for ((i = 0; i < 20; i++)); do
+      alive_as "${pid}" "${start}" || return 0
+      sleep 0.5
+    done
+    [[ -n ${sig} ]] && alive_as "${pid}" "${start}" && kill "-${sig}" "${pid}" 2> /dev/null
   done
-  kill -TERM "${pid}" 2> /dev/null
+  ! alive_as "${pid}" "${start}"
 }
 
 pane_tail() { T capture-pane -p -t "$1" 2> /dev/null | grep -v '^[[:space:]]*$' | tail -15 >&2; }
@@ -101,9 +105,12 @@ cmd_spawn() {
   local deadline f rc
   while (($#)); do
     case "$1" in
-      --permission-mode) mode="${2:-}"; shift 2 ;;
-      --name) slug="${2:-}"; shift 2 ;;
-      --model) model="${2:-}"; shift 2 ;;
+      --permission-mode | --name | --model) (($# >= 2)) || die "$1 needs a value" ;;
+    esac
+    case "$1" in
+      --permission-mode) mode="$2"; shift 2 ;;
+      --name) slug="$2"; shift 2 ;;
+      --model) model="$2"; shift 2 ;;
       --ssh-agent) ssh=1; shift ;;
       -*) die "unknown option: $1" ;;
       *) if [[ -z ${account} ]]; then account="$1"; elif [[ -z ${dir} ]]; then dir="$1"; else die "unexpected argument: $1"; fi; shift ;;
@@ -152,7 +159,9 @@ cmd_spawn() {
   wstart=$(proc_start "${ppid}")
 
   # From here an untagged or unreserved worker must not survive: stop could
-  # not find it, and a config write could race it.
+  # not find it, and a config write could race it. Until hold succeeds, the
+  # reservation names only this process, so spawn must not exit while the
+  # worker lives.
   if ! { [[ -n ${wstart} ]] &&
     "${CU_BIN}" hold "=${key}" "${launch}" "$$" "${ppid}" &&
     T set-option -t "${sid}" @crew_owner "${owner}" &&
@@ -162,7 +171,9 @@ cmd_spawn() {
     T set-option -t "${sid}" @crew_dir "${phys}"; }; then
     pane_tail "${sid}"
     T kill-session -t "${sid}" 2> /dev/null
-    [[ -n ${wstart} ]] && reap "${ppid}" "${wstart}"
+    if [[ -n ${wstart} ]] && ! reap "${ppid}" "${wstart}"; then
+      die_with 4 "crew-${slug} could not be tagged, and pid ${ppid} did not exit even after KILL; check it by hand"
+    fi
     die_with 4 "crew-${slug} died at startup or could not be tagged; removed"
   fi
 
@@ -224,6 +235,7 @@ cmd_tail() {
     pid="${target}"
   else
     valid_slug "${target#crew-}" || die "invalid name: ${target}"
+    # '=' (exact match) needs the trailing ':' where tmux expects a pane.
     pid=$(T display -p -t "=crew-${target#crew-}:" '#{pane_pid}' 2> /dev/null) || die "no crew session ${target}"
   fi
   while IFS=$'\t' read -r acct home; do
@@ -245,19 +257,22 @@ cmd_tail() {
 
 # --- stop ---------------------------------------------------------------------
 stop_one() {
-  local s="$1" rec rpid rstart live
-  if [[ $(T display -p -t "=${s}:" '#{pane_dead}' 2> /dev/null) == 1 ]]; then
-    T kill-session -t "=${s}" && printf 'stopped %s (already exited)\n' "${s}"
+  local id="$1" s="$2" rec rpid rstart live
+  if [[ $(T display -p -t "${id}" '#{pane_dead}' 2> /dev/null) == 1 ]]; then
+    T kill-session -t "${id}" && printf 'stopped %s (already exited)\n' "${s}"
     return
   fi
-  rec=$(opt "${s}" @crew_pid); rpid="${rec%%:*}"; rstart="${rec#*:}"
-  live=$(T display -p -t "=${s}:" '#{pane_pid}' 2> /dev/null)
+  rec=$(opt "${id}" @crew_pid); rpid="${rec%%:*}"; rstart="${rec#*:}"
+  live=$(T display -p -t "${id}" '#{pane_pid}' 2> /dev/null)
   if [[ ${live} != "${rpid}" ]] || ! alive_as "${rpid}" "${rstart}"; then
     printf 'crew: refusing %s: its pane no longer runs the worker spawn started\n' "${s}" >&2
     return 1
   fi
-  T kill-session -t "=${s}" || return 1
-  reap "${rpid}" "${rstart}"
+  T kill-session -t "${id}" || return 1
+  if ! reap "${rpid}" "${rstart}"; then
+    printf 'crew: %s: pid %s did not exit even after KILL\n' "${s}" "${rpid}" >&2
+    return 1
+  fi
   printf 'stopped %s\n' "${s}"
 }
 
@@ -274,9 +289,9 @@ cmd_stop() {
   done
   [[ -n ${what} ]] || die "usage: crew.sh stop <slug> | --mine | --orphans [--force]"
   me=$(my_owner)
-  while read -r s; do
+  while read -r id s; do
     [[ ${s} == crew-* ]] || continue
-    owner=$(opt "${s}" @crew_owner)
+    owner=$(opt "${id}" @crew_owner)
     [[ -n ${owner} ]] || continue
     case "${what}" in
       --mine) [[ -n ${me} && ${owner} == "${me}" ]] || continue ;;
@@ -290,8 +305,8 @@ cmd_stop() {
         ;;
     esac
     any=1
-    stop_one "${s}" || rc=1
-  done < <(T list-sessions -F '#{session_name}' 2> /dev/null)
+    stop_one "${id}" "${s}" || rc=1
+  done < <(T list-sessions -F '#{session_id} #{session_name}' 2> /dev/null)
   if ((!any)) && [[ ${what} != --* ]]; then
     die "no crew session crew-${what#crew-}"
   fi
