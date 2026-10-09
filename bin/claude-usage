@@ -1710,10 +1710,21 @@ link_stack() {
 # lose one side's change. Writes therefore go through one fail-closed mutex
 # and refuse while the account is busy; a write that changes nothing is free.
 
-# A process start time, spaces squeezed. Claude Code's sessions/<pid>.json
-# records procStart as `ps` prints it in the C locale and UTC; any other locale
-# or zone reorders or shifts it.
-proc_start() { LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2> /dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; }
+# A process start time in the form Claude Code records as procStart in
+# sessions/<pid>.json: on Linux, /proc/<pid>/stat field 22 (clock ticks since
+# boot); elsewhere, `ps -o lstart` in the C locale and UTC (any other locale
+# or zone reorders or shifts it), spaces squeezed.
+proc_start() {
+  local s f
+  if [[ -r /proc/$1/stat ]]; then
+    s=$(< "/proc/$1/stat") 2> /dev/null || return 0
+    # Skip "pid (comm) ": comm may itself contain spaces and parentheses.
+    read -r -a f <<< "${s##*) }"
+    printf '%s' "${f[19]:-}"
+  else
+    LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2> /dev/null | tr -s ' ' | sed 's/^ //;s/ $//'
+  fi
+}
 
 # True when <pid> is alive AND started at <start>: a recycled pid is not it.
 alive_as() {

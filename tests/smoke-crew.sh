@@ -31,7 +31,11 @@ printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$WORK" > "$HOME/
 FAIL=0
 t() { local label="$1"; shift; if "$@" > /dev/null 2>&1; then echo "ok    $label"; else echo "FAIL  $label"; FAIL=1; fi; }
 tn() { local label="$1"; shift; if "$@" > /dev/null 2>&1; then echo "FAIL  $label (expected failure)"; FAIL=1; else echo "ok    $label"; fi; }
-pstart() { LC_ALL=C TZ=UTC ps -o lstart= -p "$1" | tr -s ' ' | sed 's/^ //;s/ $//'; }
+# Claude Code's procStart form: /proc stat field 22 on Linux, C-locale UTC lstart elsewhere.
+pstart() {
+  if [ -r "/proc/$1/stat" ]; then sed 's/.*) //' "/proc/$1/stat" | awk '{print $20}'
+  else LC_ALL=C TZ=UTC ps -o lstart= -p "$1" | tr -s ' ' | sed 's/^ //;s/ $//'; fi
+}
 
 # Stub claude. env -i reaches it, so its behaviour comes from a file in the
 # account home: register (default) | exit | never | hupproof | stubborn
@@ -50,7 +54,8 @@ if [[ $mode != never && $mode != stubborn ]]; then
   sock="$(cat "$h/sockbase")-$$.sock"
   python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$sock"
   mkdir -p "$h/sessions" "$h/projects/p"
-  start=$(LC_ALL=C TZ=UTC ps -o lstart= -p $$ | tr -s ' ' | sed 's/^ //;s/ $//')
+  if [[ -r /proc/$$/stat ]]; then start=$(sed 's/.*) //' /proc/$$/stat | awk '{print $20}')
+  else start=$(LC_ALL=C TZ=UTC ps -o lstart= -p $$ | tr -s ' ' | sed 's/^ //;s/ $//'); fi
   printf '{"pid":%s,"sessionId":"sid-%s","procStart":"%s","name":"stub-%s","status":"idle","cwd":"%s","messagingSocketPath":"%s"}\n' \
     $$ $$ "$start" $$ "$PWD" "$sock" > "$h/sessions/$$.json"
 fi

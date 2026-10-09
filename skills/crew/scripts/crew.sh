@@ -53,8 +53,18 @@ T() {
     ${TMUX_TMPDIR:+TMUX_TMPDIR="${TMUX_TMPDIR}"} "${TMUX_BIN}" -L "${SOCK}" "$@"
 }
 
-# Claude Code records procStart in this form; see claude-usage proc_start.
-proc_start() { LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2> /dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; }
+# The form Claude Code records as procStart; kept identical to claude-usage's
+# proc_start (Linux: /proc stat field 22; elsewhere: C-locale UTC lstart).
+proc_start() {
+  local s f
+  if [[ -r /proc/$1/stat ]]; then
+    s=$(< "/proc/$1/stat") 2> /dev/null || return 0
+    read -r -a f <<< "${s##*) }"
+    printf '%s' "${f[19]:-}"
+  else
+    LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2> /dev/null | tr -s ' ' | sed 's/^ //;s/ $//'
+  fi
+}
 alive_as() {
   [[ $1 =~ ^[0-9]+$ && -n ${2:-} ]] || return 1
   [[ $(proc_start "$1") == "$(tr -s ' ' <<< "$2" | sed 's/^ //;s/ $//')" ]]
