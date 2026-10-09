@@ -904,14 +904,18 @@ pct_paint() {
 # The CLI may print a reset as a bare time ("1am"); one already behind us is tomorrow's if that falls
 # within the window, else an elapsed one. Assumes the CLI prints this machine's timezone, as WEEK does.
 session_when() {
-  local when="$1" e now
+  local when="$1" e t now
   [[ -z ${when} || ${when} == "-" ]] && return 0
   now=$(date +%s)
   if [[ ${when} =~ ^[0-9] ]]; then
     e=$(to_epoch "$(date '+%b %-d') ${when}")
     [[ ${e} == "${NEVER}" ]] && return 0
     e=$((10#${e}))
-    ((e <= now && e + 86400 <= now + SESSION_WINDOW)) && e=$((e + 86400))
+    if ((e <= now)); then
+      # Tomorrow's date from today's noon: noon plus a day stays on the next date across a DST change.
+      t=$(to_epoch "$(fmt_epoch "$((10#$(to_epoch "$(date '+%b %-d') 12pm") + 86400))" '%b %-d') ${when}")
+      [[ ${t} != "${NEVER}" ]] && ((10#${t} <= now + SESSION_WINDOW)) && e=$((10#${t}))
+    fi
   else
     e=$(to_epoch "${when}")
     [[ ${e} == "${NEVER}" ]] && return 0
