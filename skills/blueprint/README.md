@@ -82,7 +82,6 @@ The plan ships with two ready-to-paste strings:
 implementations-plan/
 ├── index.md              # ACTIVE plans only
 ├── lessons.md            # gotchas promoted out of closed plans
-├── follow-ups.md         # open follow-ups lifted out of closing plans
 ├── <plan>/
 │   ├── plan.md           # COMMITTED — the plan, audit verdicts inline
 │   ├── recon.md          # COMMITTED — Phase 0.4 reuse / adapt / dedup map
@@ -96,4 +95,4 @@ implementations-plan/
 
 Transcripts, competing drafts and the ELI5 fallback are written during the run and left uncommitted (`implementations-plan/.gitignore`): the verdicts already live inline in `plan.md`, and reviewer transcripts are the worst source of absolute local paths. They are disposable — `agent-worktree done` deletes them with the worktree — so the committed plan has to stand alone.
 
-Closing a plan writes an Outcome block (date, final status, and a line retiring its seeds), promotes the durable lessons to `lessons.md` under an ~8 KiB budget that forces pruning, moves open follow-ups to `follow-ups.md`, and archives the folder, all inside the delivery: the single PR's final commits, or a docs-only close-out PR on top of the stack. The merge that lands the work closes the plan; no docs PR trails it. The same merge triggers the teardown: a running `/loop`, the session that performed the merge, or the next turn of a delivered plan removes the worktree and its branches without being asked. `implementations-plan/.ignore` keeps the archive out of *default* ripgrep traversal — an explicit path, `git grep` or a lesson link still reaches it, which is why the Outcome block, not the ignore file, is what stops a closed plan being read as live instructions.
+Closing a plan writes an Outcome block (date, final status, and a line retiring its seeds), promotes the durable lessons to `lessons.md` under an ~8 KiB budget that forces pruning, files each open item as a GitHub issue (a private draft security advisory for a suspected exploitable weakness) with the numbers on the Outcome's `Open items:` line, and archives the folder, all inside the delivery: the single PR's final commits, or a docs-only close-out PR on top of the stack. The merge that lands the work closes the plan; no docs PR trails it. The same merge triggers the teardown: a running `/loop`, the session that performed the merge, or the next turn of a delivered plan removes the worktree and its branches without being asked. `implementations-plan/.ignore` keeps the archive out of *default* ripgrep traversal — an explicit path, `git grep` or a lesson link still reaches it, which is why the Outcome block, not the ignore file, is what stops a closed plan being read as live instructions.
