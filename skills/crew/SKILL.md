@@ -21,7 +21,7 @@ A crew worker is the same model family as the director. It never counts as a cro
 
 ## Before spawning
 
-1. **Check quota**: run `claude-usage`. Pick an account with headroom, or pass `other` to get the best account that is not this one.
+1. **Check quota**: run `claude-usage`. Pick an account with headroom, or pass `other` to get the best account that is not this one. Skip any account whose row is all `-`: its login has usually expired. Such a session starts with no login screen and fails only on its first message.
 2. **Check that crew is allowed here.** Do not use crew if this session runs with restrictions crew cannot copy to a worker: CLI `--allowedTools`/`--disallowedTools` flags, a sandbox, or rules the owner set for this session only. Do the work yourself or ask the owner. Workers get only the shared `settings.json` rules.
 3. **Know your permission mode.** The system reminders say it (for example "auto mode is active"). Pass the same mode to the worker. A worker in another mode holds your messages for approval.
 
