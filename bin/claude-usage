@@ -953,7 +953,7 @@ table() {
       if [[ ${plabel} == PREMIUM || ${plabel} == "${up}" ]]; then plabel="${up}"; else plabel="PREMIUM"; fi
     fi
 
-    when=${wr/ at / }
+    when=${wr/ at / }; when=${when//,/}
     if [[ ${active} == 1 ]]; then
       n_c+=("▶ ${name}")
       if [[ ${name} == main ]]; then
