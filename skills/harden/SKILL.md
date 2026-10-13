@@ -307,57 +307,66 @@ The page is a **standalone single-file HTML** (no external CSS, no JavaScript de
 
 ### Phase 6: File (opt-in, owner-approved)
 
-Until the audit dir lands, it is a finding's only record, and an unlanded worktree takes its findings with it. Filing gives each verified finding a home that outlives the run. The homes are defined once, in the blueprint skill's **Where open work lives**: a GitHub issue for actionable work, a **private draft security advisory** for anything exploitable, and never a public issue for that. This phase applies that section.
+Until the audit dir lands, it is a finding's only record, and an unlanded worktree takes its findings with it. Filing gives the findings worth tracking a home that outlives the run. The homes are defined once, in the blueprint skill's **Where open work lives**: a GitHub issue for actionable work, and a **private draft security advisory** for anything exploitable, never a public issue or comment. This phase applies that section.
 
-**When it runs**: only with `filing: ask`, and only after the stakeholder report exists. In these cases it writes the plan (step 1) and files nothing:
+**When it runs**: only with `filing: ask`, after the stakeholder report exists. It writes the plan (step 1) and files nothing in these cases:
 - the run is unattended;
-- the owner does not administer the repository (`gh repo view --json viewerPermission -q .viewerPermission` is not `ADMIN`);
-- for issue rows only, issues are disabled (`hasIssuesEnabled` is `false`).
+- the authenticated `gh` user does not administer the repository (`viewerPermission` other than `ADMIN`);
+- for issue rows only, issues are disabled.
 
-1. **Plan**: write `findings/filing.md`, one row per verified finding: id, title, route, fingerprint, existing match. Route by the first matching row:
+**Pin the target first**: run `gh repo view --json nameWithOwner,viewerPermission,hasIssuesEnabled` once, from the worktree. Pass that `owner/repo` explicitly to every later call (`--repo`, or the literal path in `gh api`) and show it in the plan: the owner approves a list for one named repository.
+
+1. **Plan**: write `findings/filing.md` with one row per verified finding: id, title, route, fingerprint, candidate matches, proposed action. Route by the first matching row:
 
    | Finding | Route |
    |---|---|
-   | `Potential …`, or confidence `low` | not filed; it stays in the report |
-   | `security` | one private draft advisory each |
-   | `bugs` or `quality` that the Routing rule sends to `security` on a second look (an untrusted actor could use it against confidentiality, integrity, authorization or availability), or that you are unsure about | one private draft advisory each; the plan says why |
-   | `bugs` Blocker / Critical / Major; `quality` architectural / structural | one issue each |
-   | the rest (`bugs` Minor; `quality` local / cosmetic) | one roll-up issue for the run: a checklist, one line per finding |
+   | `Potential …`, or confidence `low` | report only |
+   | `security` | private draft advisory |
+   | `bugs` or `quality` that the Routing rule sends to `security` on a second look, or that you are unsure about | private draft advisory. Give it a CVSS band and CWE per the `security` framework first, and say why in the plan |
+   | `bugs` Blocker / Critical / Major; `quality` architectural / structural | issue |
+   | the rest | report only; the owner may promote any row to an issue |
 
    Findings NOT pursued are never filed.
-2. **Fingerprint and dedupe**, so a rerun extends what an earlier run filed instead of opening a twin.
-   - Every item, and every roll-up line, carries `harden-fp: <focus>/<mapping>/<path>#<symbol>`. Here mapping is the CWE, bug type or smell, and path and symbol are the primary sink or location. Leave out line numbers, because they drift.
-   - Put it in plain text in the body's `## Record`.
-   - Before proposing, look for an exact match:
-     - issues: `gh issue list --state all --limit 1000 --json number,state,body` (narrow with `--search "harden-fp in:body"` on a larger tracker), then match the exact string with `jq`;
-     - advisories: `gh api --paginate "repos/{owner}/{repo}/security-advisories?per_page=100"` (every state), matching `description`.
-   - An open match gets a comment with this run's evidence, not a new item. For an advisory match, note it and file nothing.
-   - A closed match is a regression: file a new item that links the old one.
-3. **Approve**: show the owner the plan, with route, title, severity and matches for each row. Ask once with `AskUserQuestion`: file all, file only the one-per-item rows, or file nothing ("Other" edits the list). Nothing is created before an explicit yes, and the yes covers that list only.
-4. **File**. Write each body to a `mktemp` file and pass it by path (`--body-file`, `--input`). Never pass a body inline.
-   - **Issue**: `gh issue create --title "<title>" --body-file <file>`.
+2. **Match existing items**. This step only proposes; it writes nothing.
+   - Each filed item carries `harden-fp: <focus>/<mapping>/<path>#<symbol>` in plain text under `## Record`. Mapping is the CWE, bug type or smell. Path and symbol are the primary sink or location. Leave out line numbers, because they drift.
+   - Collect candidates from the complete lists, not from search:
+     - issues: `gh api --paginate "repos/<owner>/<repo>/issues?state=all&per_page=100"`, dropping entries that have `pull_request`;
+     - advisories: `gh api --paginate "repos/<owner>/<repo>/security-advisories?per_page=100"`.
+
+     A candidate is an exact fingerprint in a body or description, or a title naming the same path and symbol. The title check catches items filed by hand.
+   - A candidate is a match only once you confirm the same root cause and boundary. When two findings share a fingerprint, give the second a `-2` suffix.
+   - The proposed action for a match depends on its state:
+     - open issue: a comment with this run's evidence;
+     - draft or triage advisory: none, recorded as already tracked;
+     - closed issue, or closed or published advisory: a recurrence, filed as a new item that names the old one.
+   - **A finding routed to an advisory never touches a public item.** It gets no comment on, and no link from, an existing issue, even one it matched. Its advisory may name the issue.
+3. **Approve**: show the owner the target repository and the plan, with action, route, title, severity and match for each row. Ask once with `AskUserQuestion`: file the proposed actions, or file nothing ("Other" edits the list). Nothing is created or commented on before an explicit yes, and the yes covers that list only.
+4. **File** the approved actions in order. Write each body to a `mktemp` file and pass it by path (`--body-file`, `--input`), never inline.
+   - **Issue**: `gh issue create --repo <owner/repo> --title "<title>" --body-file <file>`.
      - Add `--label` only for labels that already exist (`gh label list`); never create one.
      - The body uses blueprint's five sections:
        - `## What happens`: the ELI5's first two paragraphs.
-       - `## Where`: every instance as a permalink at the audited commit, `https://github.com/<owner>/<repo>/blob/<sha>/<path>#L<a>-L<b>`. When that commit is not on GitHub, use `path:line @ <short sha>` instead.
+       - `## Where`: each instance as a permalink at the audited commit, `https://github.com/<owner>/<repo>/blob/<sha>/<path>#L<a>-L<b>`. When that commit is not on GitHub, use `path:line @ <short sha>`.
        - `## Impact`: severity, confidence, found by.
        - `## Possible fix`.
-       - `## Record`: `/harden <focus> <effort>`, run id, commit and fingerprint.
+       - `## Record`: `/harden <focus> <effort>`, run id, commit, fingerprint.
      - Never put a local path or the Artifact URL in the body; the Artifact is private to the owner.
-   - **Advisory**: `gh api -X POST "repos/{owner}/{repo}/security-advisories" --input <json>`. Fields:
+   - **Comment**: `gh issue comment <N> --repo <owner/repo> --body-file <file>`, with the same `## Where` and `## Record`.
+   - **Advisory**: `gh api -X POST "repos/<owner>/<repo>/security-advisories" --input <json>`. Fields:
      - `summary`: the title.
-     - `description`: the same five sections. The full trace may go here, because the draft is private.
+     - `description`: the five sections. The full trace may go here, because the draft is private.
      - `severity`: `critical|high|medium|low`, from the CVSS band. Never set `cvss_vector_string` as well.
-     - `cwe_ids`: from the Mapping.
-     - `vulnerabilities`: required even when the repository ships no package. Use `[{"package":{"ecosystem":"npm","name":"<package>"}}]` for a published package, and otherwise `"ecosystem":"other"` with the repository name.
+     - `cwe_ids`.
+     - `vulnerabilities`: required even when nothing is published. Use the package's real ecosystem and name (`npm`, `pip`, `go`, `rust`, … per the API's list), or `[{"package":{"ecosystem":"other","name":"<repo>"}}]` when there is no package.
 
      It needs a token with `repo` (or `repository_advisories:write`) and admin or security-manager rights.
-   - **A failed advisory never falls back to a public issue.** Record the failure and tell the owner.
-   - On any failure, stop: record what was created and report it. A rerun is safe, because the fingerprints dedupe what already exists.
-5. **Record**:
-   - Fill the result column of `findings/filing.md`: `#N`, `GHSA-…`, `commented on #M`, or `skipped`.
-   - Add one line to `report.md`'s Executive summary listing what was filed.
-   - Filed items point at the audited commit, not at the report, so they stand on their own.
+   - **A failed advisory never falls back to a public issue.**
+   - After each action, write its result into `filing.md`: `#N`, `GHSA-…`, or `commented on #M`.
+   - On a failure, stop and report. A retry starts from `filing.md`:
+     - skip what is recorded as done;
+     - check the tracker for any action whose outcome is unknown;
+     - ask again before the rest.
+5. **Record**: add one line to `report.md`'s Executive summary listing what was filed and which findings remain report-only.
 
 ### Leaving the worktree
 
@@ -365,7 +374,7 @@ The report is the only copy until it lands, so the run ends by securing it, not 
 
 1. Commit the run directory on the worktree branch — one commit, `docs(audit): <focus> <date>`, nothing else in it. **Then list what the commit left behind**: `git status --porcelain --ignored -- audit/<focus>/<run-id>` — every `!!` line is a file the repo gitignores, which is not in the commit and dies with the worktree. Name those files to the user (a tracked `report.md` beside an ignored `report.html` loses the stakeholder report on teardown). If everything is ignored there is nothing to commit: the report exists only as files in the worktree, landing it is not on offer unless the user asks to force-add it, and removing the worktree deletes it. Say so.
 2. Do not push or open a PR on your own. A pushed `security` report is a published vulnerability inventory; where it goes is the user's call.
-3. **In a worktree this run created**: set the manifest status (`agent-worktree status <slug> "report ready: awaiting your call"`) and offer the ways out — **land it** (a PR from the branch; once it merges, run `agent-worktree done <slug> --merged`, which removes the worktree and its branches), **keep it** while the fixes are planned, or **discard it** (`agent-worktree done <slug> --force`). After Phase 6 filed something, discarding loses only the long-form report.
+3. **In a worktree this run created**: set the manifest status (`agent-worktree status <slug> "report ready: awaiting your call"`) and offer the ways out — **land it** (a PR from the branch; once it merges, run `agent-worktree done <slug> --merged`, which removes the worktree and its branches), **keep it** while the fixes are planned, or **discard it** (`agent-worktree done <slug> --force`). Discarding loses every finding Phase 6 did not file: name those first.
 4. **As a guest in another task's worktree** (Phase 0.5): none of those apply. The worktree is that task's to land or remove, and `done --force` here would destroy its uncommitted work. Leave the report where it is and say that it travels with that task's branch — or, if `audit/` is ignored, that it will be deleted when that worktree is torn down, so copy it out first if it must survive.
 
 Never remove the worktree unprompted while its report is unmerged.

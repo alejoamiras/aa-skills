@@ -38,10 +38,10 @@ The design decisions that matter:
 - **Bounded context.** In-cluster traces cap at ~4 functions of inter-procedural depth (beyond that, hallucination rates spike), with an escalation rule for handoff edges (event→listener, DI inject→consumer, hook→handler) so event-driven flows don't vanish at cluster boundaries.
 - **Dedupe by root cause, not location.** The same flaw in 5 places is one finding with 5 `instances` — remediation scope stays accurate without inflating counts.
 - **Findings outlive the run, on your say-so.** After the report, Phase 6 proposes the following:
-  - an issue per significant bug or quality finding, and one roll-up issue for the rest;
-  - a private draft security advisory for anything exploitable, never a public issue.
+  - an issue per significant bug or quality finding;
+  - a private draft security advisory for anything exploitable, never a public issue or comment.
 
-  It files only what you approve. Fingerprints keep reruns from opening duplicates, and unattended runs only write the proposal.
+  It files only what you approve, for the one repository it names. It matches what is already tracked, so a rerun comments instead of duplicating. Unattended runs only write the proposal.
 - **Anchoring-guarded verification.** The verifier re-reads the source and states its own conclusion *before* seeing the original claim, ordered by severity bucket so a lone Critical is never crowded out by many Highs. Low-confidence Criticals get relabeled `Potential Critical`, never silently kept.
 
 ## What each effort level differentiates
