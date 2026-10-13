@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # blueprint-view-tailscale.sh — reference implementation of the blueprint
-# skill's BLUEPRINT_VIEW_CMD contract (skills/blueprint/SKILL.md, "Remote
-# viewing" section) for machines on a Tailscale tailnet.
+# skill's BLUEPRINT_VIEW_CMD contract (skills/blueprint/references/
+# eli5-file-mode.md, "Remote viewing") for machines on a Tailscale tailnet.
 #
 # Contract:
 #   blueprint-view <plan-dir>          UP: publish, print base URL (one line, no trailing slash)

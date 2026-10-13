@@ -2,7 +2,16 @@
 
 A plan-creation protocol for Claude Code and Codex with **four tiers of ceremony**. The core bet: the expensive part of non-trivial work is not typing the code — it's discovering mid-implementation that the plan was wrong. Blueprint front-loads that discovery with cross-model audits, explicit assumptions, and a human approval gate that cannot be hand-waved past.
 
-> This README explains the concepts. The exact protocol the agent follows lives in [`SKILL.md`](SKILL.md) — if they ever disagree, SKILL.md wins.
+> This README explains the concepts. The exact protocol the agent follows lives in [`SKILL.md`](SKILL.md) and the [`references/`](references/) files it tells the agent to read at set points — if they ever disagree with this README, they win.
+
+`SKILL.md` holds every rule a run always needs. Material that only some runs need lives in `references/`, and `SKILL.md` names the point at which to read each file:
+
+| File | Read when |
+|---|---|
+| [`references/deep-tiers.md`](references/deep-tiers.md) | before drafting a `deep` or `mega-deep` plan |
+| [`references/multi-arc.md`](references/multi-arc.md) | before writing the Delivery section of a multi-arc plan, or one that recommends lanes |
+| [`references/eli5-file-mode.md`](references/eli5-file-mode.md) | when the ELI5 is a local `eli5.html` (no Artifact tool, or the plan stays on your infrastructure) |
+| [`references/harness.md`](references/harness.md) | before Phase 0 on a Codex driver |
 
 ## Invocation
 
