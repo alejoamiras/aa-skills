@@ -1,6 +1,6 @@
 ---
 name: harden
-description: Whole-codebase audit skill with three focuses (security / bugs / quality) and five effort levels (low / medium / high / max / ultra). Map-reduce protocol with parallel Claude + Codex agents per cluster, coordinator-of-specialists shape (Cloudflare-style). Once scope is confirmed the run homes itself into a task-named git worktree (`harden-<focus>`), so nothing is written into the canonical clone's checkout. Produces impact-bucketed reports under `audit/<focus>/<date-run-id>/` plus a stakeholder report — a Claude Artifact when Claude Code drives, a standalone `report.html` otherwise. Use when finishing a vibecoded project that needs cleanup passes before shipping, or any time the user wants a whole-codebase scan rather than a diff review. Trigger phrases include "/harden security", "/harden bugs", "/harden quality", "audit this codebase for X", "whole repo review", "bug hunt", "security pass", "maintainability audit", "scan this repo". Auto-fire ONLY on explicit audit verbs (audit / scan / whole repo review / bug hunt / security pass / maintainability audit), NOT on generic "shipping prep" or "implementation help" language. If the user invokes bare `/harden` or "harden this app" without specifying focus, ask which focus they want (security / bugs / quality / all three sequentially) before proceeding. NOT for diff-only review (use /code-review).
+description: Whole-codebase audit skill with three focuses (security / bugs / quality) and five effort levels (low / medium / high / max / ultra). Map-reduce protocol with parallel Claude + Codex agents per cluster, coordinator-of-specialists shape (Cloudflare-style). Once scope is confirmed the run homes itself into a task-named git worktree (`harden-<focus>`), so nothing is written into the canonical clone's checkout. Produces impact-bucketed reports under `audit/<focus>/<date-run-id>/` plus a stakeholder report — a Claude Artifact when Claude Code drives, a standalone `report.html` otherwise. After the report, and only on the owner's yes to the exact list, files verified findings as GitHub issues, or as private draft security advisories when exploitable. Use when finishing a vibecoded project that needs cleanup passes before shipping, or any time the user wants a whole-codebase scan rather than a diff review. Trigger phrases include "/harden security", "/harden bugs", "/harden quality", "audit this codebase for X", "whole repo review", "bug hunt", "security pass", "maintainability audit", "scan this repo". Auto-fire ONLY on explicit audit verbs (audit / scan / whole repo review / bug hunt / security pass / maintainability audit), NOT on generic "shipping prep" or "implementation help" language. If the user invokes bare `/harden` or "harden this app" without specifying focus, ask which focus they want (security / bugs / quality / all three sequentially) before proceeding. NOT for diff-only review (use /code-review).
 ---
 
 # Harden
@@ -49,8 +49,9 @@ Before any scanning, briefly confirm with the user (use `AskUserQuestion` for cl
 - **Top-tier Claude model** (ask only when the effort uses one: the Phase 3 coordinator at `high`, Phases 1–2 at `max`/`ultra`): **Opus 5.5** (`model: 'opus'`, recommended default) or **Fable 5.1** (`model: 'fable'`, opt-in: slower and more expensive). Record it as `claude_model` in the run's `raw/` notes; every slot the Effort table labels "Fable" runs on that choice.
 - **Codex model** (always: every effort has Codex legs): **GPT-6.1 Sol** (`gpt-6.1-sol`, recommended default: near-Astra quality, much faster and cheaper, which adds up across a cluster fan-out) or **GPT-6 Astra** (`gpt-6-astra`, opt-in: the strongest reviewer, slower and more expensive). Record it as `codex_model` next to `claude_model`; every slot the Effort table labels "Codex" runs on it, passed as the fifth argument of every `run-codex.sh` call (its own default is Astra; a resume against the same codex-dir stays on the session's model).
 - **Where may the stakeholder report live?** Decide the `report_mode` ONCE here: **Artifact** (the default when the driver is Claude Code, the `Artifact` tool is present, and the report may be published to claude.ai as a default-private page) or **file** (`report.html` next to `report.md`: Codex or any other driver, no Artifact tool, or the report must stay on this machine). A security audit is a vulnerability inventory — if the user hesitates, choose file.
+- **File the findings afterwards?** Record `filing: ask` (the default) or `off`. With `ask`, Phase 6 proposes GitHub issues and private draft security advisories once the report exists, and files only the list the owner then approves. Nothing is filed during the scan.
 
-**Unattended fallback** (CI, scheduled runs, AFK mode, or any non-interactive context): if no answer arrives within a reasonable wait, default to Opus 5.5 for the top-tier slot, GPT-6.1 Sol for the Codex legs (GPT-6 Astra when the Codex CLI is older than 0.159.1, Sol's floor), the whole repo minus generated/vendor/`node_modules`/`dist`/`build` directories at origin's default branch, and to **file** mode (never publish findings nobody approved). State the assumptions explicitly in the report's Methodology section so the user knows what was scanned.
+**Unattended fallback** (CI, scheduled runs, AFK mode, or any non-interactive context): if no answer arrives within a reasonable wait, default to Opus 5.5 for the top-tier slot, GPT-6.1 Sol for the Codex legs (GPT-6 Astra when the Codex CLI is older than 0.159.1, Sol's floor), the whole repo minus generated/vendor/`node_modules`/`dist`/`build` directories at origin's default branch, and to **file** mode (never publish findings nobody approved). Phase 6 then writes its proposed list and files nothing. State the assumptions explicitly in the report's Methodology section so the user knows what was scanned.
 
 ### Phase 0.5: Workspace homing
 
@@ -304,11 +305,67 @@ The page is a **standalone single-file HTML** (no external CSS, no JavaScript de
 
 **Remote viewing (headless boxes, file mode only)**: if `BLUEPRINT_VIEW_CMD` is set, additionally run `$BLUEPRINT_VIEW_CMD <absolute path to audit/<focus>/<run-id>>` and print the returned URL + `/report.html` on its own standalone line — full contract (stdout validation, failure notice, `--down`) is defined once in the blueprint skill's "Remote viewing" section; same rules apply here. **Teardown discipline is stricter than blueprint's**: audit reports are a vulnerability inventory, so serve only while the user is actually reading — run `$BLUEPRINT_VIEW_CMD --down <same dir>` as soon as the user acknowledges the report (their next instruction counts), or at session end, whichever comes first, and confirm the teardown in chat. Note the mount covers the repo's whole `audit/` tree (all runs), mirroring blueprint's whole-tree behavior.
 
-**Leaving the worktree.** The report is the only copy until it lands, so the run ends by securing it, not by cleaning up:
+### Phase 6: File (opt-in, owner-approved)
+
+Until the audit dir lands, it is a finding's only record, and an unlanded worktree takes its findings with it. Filing gives each verified finding a home that outlives the run. The homes are defined once, in the blueprint skill's **Where open work lives**: a GitHub issue for actionable work, a **private draft security advisory** for anything exploitable, and never a public issue for that. This phase applies that section.
+
+**When it runs**: only with `filing: ask`, and only after the stakeholder report exists. In these cases it writes the plan (step 1) and files nothing:
+- the run is unattended;
+- the owner does not administer the repository (`gh repo view --json viewerPermission -q .viewerPermission` is not `ADMIN`);
+- for issue rows only, issues are disabled (`hasIssuesEnabled` is `false`).
+
+1. **Plan**: write `findings/filing.md`, one row per verified finding: id, title, route, fingerprint, existing match. Route by the first matching row:
+
+   | Finding | Route |
+   |---|---|
+   | `Potential …`, or confidence `low` | not filed; it stays in the report |
+   | `security` | one private draft advisory each |
+   | `bugs` or `quality` that the Routing rule sends to `security` on a second look (an untrusted actor could use it against confidentiality, integrity, authorization or availability), or that you are unsure about | one private draft advisory each; the plan says why |
+   | `bugs` Blocker / Critical / Major; `quality` architectural / structural | one issue each |
+   | the rest (`bugs` Minor; `quality` local / cosmetic) | one roll-up issue for the run: a checklist, one line per finding |
+
+   Findings NOT pursued are never filed.
+2. **Fingerprint and dedupe**, so a rerun extends what an earlier run filed instead of opening a twin.
+   - Every item, and every roll-up line, carries `harden-fp: <focus>/<mapping>/<path>#<symbol>`. Here mapping is the CWE, bug type or smell, and path and symbol are the primary sink or location. Leave out line numbers, because they drift.
+   - Put it in plain text in the body's `## Record`.
+   - Before proposing, look for an exact match:
+     - issues: `gh issue list --state all --limit 1000 --json number,state,body` (narrow with `--search "harden-fp in:body"` on a larger tracker), then match the exact string with `jq`;
+     - advisories: `gh api --paginate "repos/{owner}/{repo}/security-advisories?per_page=100"` (every state), matching `description`.
+   - An open match gets a comment with this run's evidence, not a new item. For an advisory match, note it and file nothing.
+   - A closed match is a regression: file a new item that links the old one.
+3. **Approve**: show the owner the plan, with route, title, severity and matches for each row. Ask once with `AskUserQuestion`: file all, file only the one-per-item rows, or file nothing ("Other" edits the list). Nothing is created before an explicit yes, and the yes covers that list only.
+4. **File**. Write each body to a `mktemp` file and pass it by path (`--body-file`, `--input`). Never pass a body inline.
+   - **Issue**: `gh issue create --title "<title>" --body-file <file>`.
+     - Add `--label` only for labels that already exist (`gh label list`); never create one.
+     - The body uses blueprint's five sections:
+       - `## What happens`: the ELI5's first two paragraphs.
+       - `## Where`: every instance as a permalink at the audited commit, `https://github.com/<owner>/<repo>/blob/<sha>/<path>#L<a>-L<b>`. When that commit is not on GitHub, use `path:line @ <short sha>` instead.
+       - `## Impact`: severity, confidence, found by.
+       - `## Possible fix`.
+       - `## Record`: `/harden <focus> <effort>`, run id, commit and fingerprint.
+     - Never put a local path or the Artifact URL in the body; the Artifact is private to the owner.
+   - **Advisory**: `gh api -X POST "repos/{owner}/{repo}/security-advisories" --input <json>`. Fields:
+     - `summary`: the title.
+     - `description`: the same five sections. The full trace may go here, because the draft is private.
+     - `severity`: `critical|high|medium|low`, from the CVSS band. Never set `cvss_vector_string` as well.
+     - `cwe_ids`: from the Mapping.
+     - `vulnerabilities`: required even when the repository ships no package. Use `[{"package":{"ecosystem":"npm","name":"<package>"}}]` for a published package, and otherwise `"ecosystem":"other"` with the repository name.
+
+     It needs a token with `repo` (or `repository_advisories:write`) and admin or security-manager rights.
+   - **A failed advisory never falls back to a public issue.** Record the failure and tell the owner.
+   - On any failure, stop: record what was created and report it. A rerun is safe, because the fingerprints dedupe what already exists.
+5. **Record**:
+   - Fill the result column of `findings/filing.md`: `#N`, `GHSA-…`, `commented on #M`, or `skipped`.
+   - Add one line to `report.md`'s Executive summary listing what was filed.
+   - Filed items point at the audited commit, not at the report, so they stand on their own.
+
+### Leaving the worktree
+
+The report is the only copy until it lands, so the run ends by securing it, not by cleaning up:
 
 1. Commit the run directory on the worktree branch — one commit, `docs(audit): <focus> <date>`, nothing else in it. **Then list what the commit left behind**: `git status --porcelain --ignored -- audit/<focus>/<run-id>` — every `!!` line is a file the repo gitignores, which is not in the commit and dies with the worktree. Name those files to the user (a tracked `report.md` beside an ignored `report.html` loses the stakeholder report on teardown). If everything is ignored there is nothing to commit: the report exists only as files in the worktree, landing it is not on offer unless the user asks to force-add it, and removing the worktree deletes it. Say so.
 2. Do not push or open a PR on your own. A pushed `security` report is a published vulnerability inventory; where it goes is the user's call.
-3. **In a worktree this run created**: set the manifest status (`agent-worktree status <slug> "report ready: awaiting your call"`) and offer the ways out — **land it** (a PR from the branch; once it merges, run `agent-worktree done <slug> --merged`, which removes the worktree and its branches), **keep it** while the fixes are planned, or **discard it** (`agent-worktree done <slug> --force`).
+3. **In a worktree this run created**: set the manifest status (`agent-worktree status <slug> "report ready: awaiting your call"`) and offer the ways out — **land it** (a PR from the branch; once it merges, run `agent-worktree done <slug> --merged`, which removes the worktree and its branches), **keep it** while the fixes are planned, or **discard it** (`agent-worktree done <slug> --force`). After Phase 6 filed something, discarding loses only the long-form report.
 4. **As a guest in another task's worktree** (Phase 0.5): none of those apply. The worktree is that task's to land or remove, and `done --force` here would destroy its uncommitted work. Leave the report where it is and say that it travels with that task's branch — or, if `audit/` is ignored, that it will be deleted when that worktree is torn down, so copy it out first if it must survive.
 
 Never remove the worktree unprompted while its report is unmerged.
@@ -565,7 +622,8 @@ audit/<focus>/<YYYY-MM-DD>-<run-id>/
 │   └── ...
 ├── findings/
 │   ├── consolidated.md               # after Phase 3 reduce
-│   └── verified.md                   # after Phase 4 verifier
+│   ├── verified.md                   # after Phase 4 verifier
+│   └── filing.md                     # Phase 6 plan and results (filing: ask)
 ├── report.md                         # Phase 5 markdown report (always; in Artifact mode it also records the Artifact URL)
 └── report.html                       # Phase 5 stakeholder report source (every focus; the published page in file mode)
 ```
@@ -597,4 +655,4 @@ From the multi-agent LLM auditing literature plus codex-flagged failure modes sp
 - NOT for diff-only review (use `/code-review max --fix`).
 - NOT a substitute for human review on critical findings. Verify before acting on Critical / Blocker.
 - NOT idempotent: rerunning on the same codebase gives slightly different results (different model rollouts, agent contexts). Cross-run agreement is signal.
-- NOT composed with `/blueprint`. The report is the deliverable. The user decides what to fix; `/blueprint` is a separate skill for implementing fixes if the user chooses to.
+- NOT composed with `/blueprint`. The report, plus any items Phase 6 filed, is the deliverable. The user decides what to fix; `/blueprint` is a separate skill for implementing fixes if the user chooses to.
