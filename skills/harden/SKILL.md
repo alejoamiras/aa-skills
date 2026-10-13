@@ -333,12 +333,12 @@ Until the audit dir lands, it is a finding's only record, and an unlanded worktr
      - issues: `gh api --paginate "repos/<owner>/<repo>/issues?state=all&per_page=100"`, dropping entries that have `pull_request`;
      - advisories: `gh api --paginate "repos/<owner>/<repo>/security-advisories?per_page=100"`.
 
-     A candidate is an exact fingerprint in a body or description, or a title naming the same path and symbol. The title check catches items filed by hand.
-   - A candidate is a match only once you confirm the same root cause and boundary. When two findings share a fingerprint, give the second a `-2` suffix.
-   - The proposed action for a match depends on its state:
-     - open issue: a comment with this run's evidence;
-     - draft or triage advisory: none, recorded as already tracked;
-     - closed issue, or closed or published advisory: a recurrence, filed as a new item that names the old one.
+     Candidates are items whose body or description holds the fingerprint, and items that name the same path, symbol or behavior. Items filed by hand rarely carry a fingerprint, so read the plausible candidates; do not stop at string matches.
+   - A candidate is a match only once you confirm the same root cause and boundary. The fingerprint is a hint, not an identity: two distinct findings may share one.
+   - An **active** match owns the work:
+     - an open issue gets a comment with this run's evidence;
+     - a draft or triage advisory gets nothing, recorded as already tracked.
+   - Only when there is no active match does a closed issue, or a closed or published advisory, make this a recurrence. Check the finding against that item's fix first, then propose a new item that names the old one.
    - **A finding routed to an advisory never touches a public item.** It gets no comment on, and no link from, an existing issue, even one it matched. Its advisory may name the issue.
 3. **Approve**: show the owner the target repository and the plan, with action, route, title, severity and match for each row. Ask once with `AskUserQuestion`: file the proposed actions, or file nothing ("Other" edits the list). Nothing is created or commented on before an explicit yes, and the yes covers that list only.
 4. **File** the approved actions in order. Write each body to a `mktemp` file and pass it by path (`--body-file`, `--input`), never inline.
@@ -346,7 +346,7 @@ Until the audit dir lands, it is a finding's only record, and an unlanded worktr
      - Add `--label` only for labels that already exist (`gh label list`); never create one.
      - The body uses blueprint's five sections:
        - `## What happens`: the ELI5's first two paragraphs.
-       - `## Where`: each instance as a permalink at the audited commit, `https://github.com/<owner>/<repo>/blob/<sha>/<path>#L<a>-L<b>`. When that commit is not on GitHub, use `path:line @ <short sha>`.
+       - `## Where`: each instance as a permalink at the audited commit, `https://github.com/<owner>/<repo>/blob/<sha>/<path>#L<a>-L<b>`. When that commit is not on GitHub, use `path:line @ <short sha>`. A location in uncommitted code (a dirty guest worktree) is marked `uncommitted, relative to <sha>`. Never link it as if that commit holds it.
        - `## Impact`: severity, confidence, found by.
        - `## Possible fix`.
        - `## Record`: `/harden <focus> <effort>`, run id, commit, fingerprint.
