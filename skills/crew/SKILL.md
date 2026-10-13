@@ -1,6 +1,6 @@
 ---
 name: crew
-description: Runs live Claude Code workers on the owner's OTHER claude-usage accounts, each in its own tmux session, and talks to them both ways with SendMessage while they work. Use when a long, interactive or write-heavy task should run on another subscription to spare this session's quota, or when the owner asks for a worker they can attach to and steer. Do NOT use for one-shot or read-only research (use the claude skill's headless worker), for parallel subtasks inside this account (use the Agent tool), from Codex (SendMessage is Claude Code only), or from inside a crew worker.
+description: Runs live Claude Code workers on the owner's OTHER claude-usage accounts, each in its own tmux session, and talks to them both ways with SendMessage while they work. Use ONLY when the owner asks for it: "use crew", a worker on another account, a worker they can attach to and steer, or handing a long, interactive or write-heavy task to another subscription. Never start workers on your own initiative, even when this session's quota runs low: suggest crew instead. Do NOT use for one-shot or read-only research (use the claude skill's headless worker), for parallel subtasks inside this account (use the Agent tool), from Codex (SendMessage is Claude Code only), or from inside a crew worker.
 ---
 
 # crew
