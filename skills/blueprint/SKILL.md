@@ -27,7 +27,7 @@ Blueprint's ceremony is the plan's rigor, NOT agent headcount. Subagent fan-out 
 | Recon agents (0.4) | **1–3 total** (1 batched reuse sweep + 0–2 subsystem mappers) | User says "wide recon" / the repo is a large unfamiliar monorepo |
 | `/code-review` | **OFF** — not run; the codex fix loop is the review (see Post-implementation) | User opts in at the Phase 0 question (then `low`/`medium` sized to the diff; `high`/`max` only on an explicit ask) |
 | Foreign-reviewer effort (every `/codex` — or `/claude` — call in this skill) | **`high`** (the Phase 0 `codex_model` via `/codex`; the Phase 0 `claude_model` via `/claude`) | User asks for `xhigh`/`max` for the run — `xhigh` roughly doubles wall-clock per round on Astra for marginal review gain |
-| Parallel lanes | **Off** (`pace: serial`) | The owner picks `lanes` or `lanes+crew` at Phase 0; at most 3 lanes |
+| Parallel lanes | **Off**; the plan only assesses them | The owner approves the plan's lanes at the approval gate; at most 3 |
 | Codex fix-loop rounds | Until clean, hard stop at 3 | Never — 3 rounds is a scope smell, surface instead |
 | Recon cross-model check | Off | User asks; then ONE codex pass at `gpt-5.6-terra` (cheap tier) re-testing the absence claims |
 | Explainer (`explainer` skill) | **Off** — when on: one background worker, a foreign-reviewer script loop (≤ 3 rounds at `high` on the Phase 0 model), one TTS request (≤ 6,000 characters, cached) | The owner says yes to the Phase 0 question in their own message; never on a subagent's or loop's run |
@@ -64,7 +64,7 @@ This skill is one `SKILL.md` installed for both **Claude Code** and **Codex**. T
 
 **Artifact names are by family, not role**: `audit-codex.md` holds the OpenAI-family review and `audit-fable.md` the Anthropic-family review whichever harness drives, so a plan's audit trail reads the same from either side.
 
-**Record the driver in `plan.md`** front matter (`driver: claude-code | codex`, next to `eli5_mode`, `code_review`, `claude_model`, `codex_model`, `explainer` and `pace`), and generate the Post-implementation section, the Delivery section and the seeds with the **concrete** skill names and model slugs for that driver (`/codex` or `/claude`, the reviewer's model as its script argument, `/code-review` or `codex review`, `/goal` with or without `/loop`). A fresh implementing session reads plan.md, not this table; it must not have to re-derive the mapping.
+**Record the driver in `plan.md`** front matter (`driver: claude-code | codex`, next to `eli5_mode`, `code_review`, `claude_model`, `codex_model` and `explainer`), and generate the Post-implementation section, the Delivery section and the seeds with the **concrete** skill names and model slugs for that driver (`/codex` or `/claude`, the reviewer's model as its script argument, `/code-review` or `codex review`, `/goal` with or without `/loop`). A fresh implementing session reads plan.md, not this table; it must not have to re-derive the mapping.
 
 ---
 
@@ -83,12 +83,6 @@ This skill is one `SKILL.md` installed for both **Claude Code** and **Codex**. T
 - **The Claude leg's model — ASK (`mid` and above; every tier on a Codex driver)**: the top-tier Claude planner/auditor — the "fable" role, or the `/claude` foreign reviewer when Codex drives — runs on **Opus 5.5** or **Fable 5.1**. Ask via `AskUserQuestion` with Opus 5.5 first as the recommended default; offer Fable 5.1 as the opt-in for plans where the strongest reviewer is worth it, and say it is slower and more expensive. Record `claude_model: opus | fable` in plan.md's front matter: every fable-leg spawn, `/claude` call and seed in the run uses it. `light` on Claude Code has no Claude leg, so skip it there.
 - **The Codex leg's model — ASK (every tier on Claude Code; `mid` and above on a Codex driver)**: the Codex leg is the `/codex` foreign reviewer when Claude Code drives and the same-family subagent when Codex does, and it runs on **GPT-6.1 Sol** or **GPT-6 Astra**. `light` on a Codex driver has no Codex leg (its one audit is Claude's), so skip the question there; it never changes the model the driver itself runs on. Ask via `AskUserQuestion` with GPT-6.1 Sol first as the recommended default (near-Astra quality, much faster and cheaper); offer GPT-6 Astra as the opt-in for plans where the strongest reviewer is worth it, and say it is slower and more expensive. Record `codex_model: sol | astra` in plan.md's front matter: every `/codex` call, Codex subagent and seed in the run uses it (`gpt-6.1-sol` / `gpt-6-astra`). With no user to ask, use Sol; when the Codex CLI is older than 0.159.1 (Sol's floor), use Astra. Either way, record which model ran and why.
 - **Narrated explainer — ASK only when the owner started this run with their own message** (never in a subagent, never from a `/goal` or `/loop` brief; there it is `off` without asking): "Make a narrated explainer for this plan? It is a 2–5 minute animated section inside the ELI5. The foreign reviewer polishes the script from the plan and ELI5, the narration text goes to ElevenLabs, you pick a look from four previews on a private page, and the page and audio are published with the ELI5." Options: `narrated` (offer only when the `explainer` skill's preflight passes), `captions` (animated, no voice; the script review and style board still apply), `off`. Record `explainer: off | narrated | captions` in plan.md's front matter. The front matter records the answer; only the owner's answer authorizes the job (see the `explainer` skill's Authorization).
-- **Pace — ASK (`mid` and above)**: speed or cost. Options:
-  - `serial` (the default; the only option on `light`, and what an unattended run gets);
-  - `lanes`: independent phases may run in parallel, with `Agent` subagents on an explicit model;
-  - `lanes+crew`: lanes may also use crew workers on other accounts.
-
-  Lanes buy wall-clock with quota and integration work. The plan proposes them only where they pay (see Execution lanes). Record `pace: serial | lanes | lanes+crew` in plan.md's front matter.
 - **Post-implementation hardening**: will this work eventually need `/harden security` or `/harden quality`? Recommended (but not auto-scheduled) if the plan touches trust boundaries, auth, secrets, CI/CD, publishing, or repo-wide security posture. Note: `/harden` is thorough/expensive — usually scheduled for pre-release of a library or app, NOT after every plan. Surface this so the user can decide upfront.
 
 Wait for answers before proceeding.
@@ -391,7 +385,7 @@ The post-impl steps (Phase 5+ below) are executed by the IMPLEMENTING session �
 **Loop placement (the plan.md section spells out the one that applies):**
 
 - **Single-arc plan**: steps 1–3 run once, over the whole implementation diff, after the last phase goes green; then steps 4 and 5, and step 6 once the PR merges.
-- **Multi-arc plan**: steps 1–3 run **per arc, at each arc boundary** — after the arc's phases go green and BEFORE `gh stack add` opens the next arc (unless Delivery marks the boundary pipelined; see Execution lanes) — scoped to that arc's diff while the arc is still the stack tip (fixes land on their own branch; nothing cascades; no later arc ever builds on unreviewed code). Brief codex with the arc map ("this is arc N of M; later arcs will build X on it") so seams reserved for later arcs aren't flagged as dead code. After ALL arcs are green and looped, run one **final cross-arc integration pass**: a FRESH codex session over the net diff from plan baseline, asking explicitly for cross-arc issues (seams between arcs, duplication across arcs, drift from the plan) — same iterative loop; it should converge in a round or two since every arc was already cleaned. `/code-review` (when opted in) runs per arc only — don't repeat it over the net diff. Then steps 4 and 5, and step 6 once the close-out merges.
+- **Multi-arc plan**: steps 1–3 run **per arc, at each arc boundary** — after the arc's phases go green and BEFORE `gh stack add` opens the next arc (unless Delivery marks the boundary pipelined; see Execution lanes) — scoped to that arc's diff while the arc is still the stack tip (fixes land on their own branch; no later arc's review or PR ever rests on an unreviewed base; only a `pipelined` boundary lets implementation run ahead). Brief codex with the arc map ("this is arc N of M; later arcs will build X on it") so seams reserved for later arcs aren't flagged as dead code. After ALL arcs are green and looped, run one **final cross-arc integration pass**: a FRESH codex session over the net diff from plan baseline, asking explicitly for cross-arc issues (seams between arcs, duplication across arcs, drift from the plan) — same iterative loop; it should converge in a round or two since every arc was already cleaned. `/code-review` (when opted in) runs per arc only — don't repeat it over the net diff. Then steps 4 and 5, and step 6 once the close-out merges.
 
 **The no-over-engineering rule** (include verbatim in every post-impl codex prompt, initial and resumed): *"Report bugs and small, targeted improvements only. Do not propose speculative abstractions, extra configuration surface, new layers, or rewrites — the smallest change that fixes each real problem. If code works and is clear, leave it alone."*
 
@@ -414,20 +408,24 @@ Sizing rule: an arc must be independently revertable and reviewable in one sitti
 
 ### Execution lanes and review pipelining
 
-The Delivery section also says how the work runs. It may declare two speed-ups, which are audited like the rest of the plan and written into plan.md for the implementing session; neither is improvised mid-run.
+The Delivery section also says how the work runs. It is written into plan.md, audited, and approved with the rest of the plan; nothing here is improvised mid-run.
 
-- **Review pipelining** (any `pace`, multi-arc plans):
-  - At a boundary that Delivery marks `pipelined`, the next arc starts while the current arc's codex loop runs. Delivery must name the interfaces the next arc consumes as frozen.
-  - Run that review from a detached worktree of the arc (`git worktree add --detach <path> <arc-branch>`), because the plan's worktree moves on.
-  - Fixes land on the arc branch, and `gh stack sync` carries them up.
-  - A fix that changes a frozen interface ends pipelining at that boundary: finish the loop, then rework the next arc.
-  - An arc's own loop never starts before the loop below it converges.
-- **Parallel lanes** (`pace: lanes` or `lanes+crew` only):
-  - Phases with no dependency between them, and with disjoint file ownership, run at the same time.
-  - Delivery adds a lanes table: lane → phases → owned paths → executor (`Agent` with an explicit model; with `lanes+crew`, also a crew worker on a named account) → worktree slug.
-  - Shared hotspots (manifests, lockfiles, generated files, `index.md`, `lessons.md`) belong to one lane, or wait for the serial work after the lanes.
-  - At most 3 lanes. Each passes its own phase gates and codex loop in its own worktree, then joins the stack as consecutive arcs, in the declared order, rebased onto the tip. The final cross-arc pass reviews the seams.
-  - Propose lanes only when the critical path drops by about 30% or more against serial. State both estimates in the plan.
+- **Parallelism assessment** (every multi-phase plan, one short paragraph):
+  - name the phases that are truly independent: disjoint files, and no semantic coupling (migration numbering, shared fixtures or identifiers, generated outputs);
+  - estimate the critical path serial and with lanes;
+  - recommend lanes only when they cut it by about 30% or more.
+- **Review pipelining** (multi-arc plans, per boundary). Delivery may mark an arc boundary `pipelined` and name the interfaces arc N+1 consumes from arc N as frozen. At that boundary:
+  - Check out arc N's own branch in a review worktree (`git worktree add <path> <arc-N-branch>`), with its own deps and run-isolation claims. Codex reviews there; fixes are committed there, so each resumed pass sees them.
+  - Meanwhile the plan worktree implements arc N+1, but its loop does not start yet.
+  - When N's loop converges: checkpoint N+1 to a clean tree, run one `gh stack sync`, rerun N+1's gates, and remove the review worktree. Only then may N+1's loop start.
+  - A fix that changes a frozen interface ends pipelining at that boundary: finish N's loop, sync, then rework N+1.
+- **Parallel lanes** run only when the owner approves them at the approval gate. Agent subagents only, at most 3. The plan then pins down:
+  - the common base SHA;
+  - the lanes table: lane → phases → owned paths → `Agent` model → worktree slug and branch;
+  - the join order and the exact commands that rebase each lane onto the stack tip as the next arc;
+  - the gates rerun after each join; any conflict resolution is re-reviewed before that arc counts as clean.
+
+  The implementing session coordinates: only it touches the stack, plan.md, `index.md` and `lessons.md`, and it removes each lane worktree after its join.
 
 ### `gh stack` mechanics (agent-safe forms)
 
