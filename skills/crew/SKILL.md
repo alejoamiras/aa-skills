@@ -1,6 +1,6 @@
 ---
 name: crew
-description: Runs live Claude Code workers on the owner's OTHER claude-usage accounts, each in its own tmux session, and talks to them both ways with SendMessage while they work. Use when a long, interactive or write-heavy task should run on another subscription to spare this session's quota, or when the owner asks for a worker they can attach to and steer. Do NOT use for one-shot or read-only research (use the claude skill's headless worker), for parallel subtasks inside this account (use the Agent tool), from Codex (SendMessage is Claude Code only), or from inside a crew worker.
+description: Runs live Claude Code workers on the owner's OTHER claude-usage accounts, each in its own tmux session, and talks to them both ways with SendMessage while they work. Use ONLY when the owner asks for it: "use crew", a worker on another account, a worker they can attach to and steer, or handing a long, interactive or write-heavy task to another subscription. Never start workers on your own initiative, even when this session's quota runs low: suggest crew instead. Do NOT use for one-shot or read-only research (use the claude skill's headless worker), for parallel subtasks inside this account (use the Agent tool), from Codex (SendMessage is Claude Code only), or from inside a crew worker.
 ---
 
 # crew
@@ -21,9 +21,10 @@ A crew worker is the same model family as the director. It never counts as a cro
 
 ## Before spawning
 
-1. **Check quota**: run `claude-usage`. Pick an account with headroom, or pass `other` to get the best account that is not this one. Skip any account whose row is all `-`: its login has usually expired. Such a session starts with no login screen and fails only on its first message.
-2. **Check that crew is allowed here.** Do not use crew if this session runs with restrictions crew cannot copy to a worker: CLI `--allowedTools`/`--disallowedTools` flags, a sandbox, or rules the owner set for this session only. Do the work yourself or ask the owner. Workers get only the shared `settings.json` rules.
-3. **Know your permission mode.** The system reminders say it (for example "auto mode is active"). Pass the same mode to the worker. A worker in another mode holds your messages for approval.
+1. **The owner asked for crew** in this conversation: they named it, or asked for a worker on another account. If they did not, suggest it and stop.
+2. **Check quota**: run `claude-usage`. Pick an account with headroom, or pass `other` to get the best account that is not this one. Skip any account whose row is all `-`: its login has usually expired. Such a session starts with no login screen and fails only on its first message.
+3. **Check that crew is allowed here.** Do not use crew if this session runs with restrictions crew cannot copy to a worker: CLI `--allowedTools`/`--disallowedTools` flags, a sandbox, or rules the owner set for this session only. Do the work yourself or ask the owner. Workers get only the shared `settings.json` rules.
+4. **Know your permission mode.** The system reminders say it (for example "auto mode is active"). Pass the same mode to the worker. A worker in another mode holds your messages for approval.
 
 ## Spawn
 
