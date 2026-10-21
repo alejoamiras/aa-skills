@@ -57,6 +57,7 @@ Never start crew workers. Keep messages short; put long output in files and send
 ```
 
 Never put secrets in a brief.
+Never name a roster account in a brief either: no `CLAUDE_ACCOUNT=<name>` or `CODEX_ACCOUNT=<name>` command, no "the default login is <name>". Workers quote their brief into committed plans and lessons, and the name maps the owner's accounts (AGENTS.md § Paths). Route by role (`best`, "the account your environment sets"); the name goes in the spawn's environment, never in the text.
 
 ## Messaging and waiting
 
