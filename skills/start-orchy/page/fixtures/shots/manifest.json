@@ -1,0 +1,5 @@
+{"shots": [
+ {"id": "p1-01-today", "parent": "p1-01-today", "issues": [1], "records": ["P1-01"], "option": "today", "light": "px-light.png", "dark": "px-dark.png", "browser": "chrome", "caption": "Today: the header on two lines."},
+ {"id": "p1-01-a", "parent": "p1-01-a", "issues": [1], "records": ["P1-01"], "option": "A", "light": "px-light.png", "dark": "px-dark.png", "browser": "chrome", "caption": "Option A: the header on two lines, as today."},
+ {"id": "p1-01-b", "parent": "p1-01-b", "issues": [1], "records": ["P1-01"], "option": "B", "light": "px-light.png", "dark": "px-dark.png", "browser": "chrome", "caption": "Option B: the title and the date on one line."}
+], "skipped": []}

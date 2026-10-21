@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# gh mock for smoke-orchy: fixtures in $MOCK_DIR (pr-<n>.json, checks.json, status.json, merged.json, diff-<n>.txt, files-<n>.txt); every call logged to $MOCK_DIR/gh.log
+set -u; echo "$*" >> "$MOCK_DIR/gh.log"
+jqexpr=""; args=("$@"); for ((i=0;i<${#args[@]};i++)); do [ "${args[i]}" = --jq ] && jqexpr=${args[i+1]}; done
+case "$1 $2" in
+"auth status") exit 0;;
+"pr view") f="$MOCK_DIR/pr-$3.json"; [ -f "$f" ] || { echo "no such pr" >&2; exit 1; }; jq -r "$jqexpr" "$f";;
+"pr merge") n=$3; f="$MOCK_DIR/pr-$n.json"; want=""; for ((i=0;i<${#args[@]};i++)); do [ "${args[i]}" = --match-head-commit ] && want=${args[i+1]}; done
+  [ -n "$want" ] || { echo "MOCK: merge without --match-head-commit" >&2; exit 1; }
+  [ "$want" = "$(jq -r .headRefOid "$f")" ] || { echo "head commit mismatch" >&2; exit 1; }
+  tmp=$(mktemp); jq '.state="MERGED" | .mergeCommit={oid:"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}' "$f" > "$tmp" && mv "$tmp" "$f"; echo "✓ Squashed and merged";;
+"pr diff") [ "${MOCK_GH_FAIL:-}" = diff ] && { echo "HTTP 500" >&2; exit 1; }; if printf '%s\n' "$@" | grep -qx -- --name-only; then cat "$MOCK_DIR/files-$3.txt"; else cat "$MOCK_DIR/diff-$3.txt"; fi;;
+"pr list") if printf '%s\n' "$@" | grep -qx -- merged; then jq -r "$jqexpr" "$MOCK_DIR/merged.json"; else echo -n ""; fi;;
+"api repos/"*) case "$2" in *check-runs) jq -r "$jqexpr" "$MOCK_DIR/checks.json";; *status) jq -r "$jqexpr" "$MOCK_DIR/status.json";; *) exit 1;; esac;;
+*) echo "MOCK gh: unhandled $*" >&2; exit 1;;
+esac

@@ -1,0 +1,12 @@
+# start-orchy
+
+One Claude Code session runs a repository's whole backlog as a program: it triages the open issues into lanes, gives each lane its own git worktree and a headless lead on one of the owner's other `claude-usage` accounts, merges converged PRs on a fixed policy, and turns every product decision into a page with pictures that the owner signs. It ticks every 35 minutes and reads only files, so it survives the owner being away.
+
+What makes it safe to leave running:
+
+- **Leads never merge; the orchestrator merges only on a mechanical policy** (pinned head, every required check green, MERGEABLE CLEAN, the lead's own done marker, a gate-weakening scan it reads), and never into a protected branch.
+- **The owner decides what a person sees**, on a decision page with each option's own picture, or by a message quoted on the issue. Nothing visible ships on an audit's approve.
+- **Nothing leaves the machine that maps the owner's accounts**: a prompt that carries a roster name or a home path is refused before the launch.
+- **State lives outside the repo** (`~/.cache/orchy/<owner>-<repo>`): reports, briefs, prompts, watchers, pages. The repository sees only lane branches, plans and PRs.
+
+The playbook is [`SKILL.md`](SKILL.md); the rules with their evidence are [`references/house-rules.md`](references/house-rules.md); the decision-page data model is [`page/README.md`](page/README.md). The `blueprint` skill plans every lane, the `codex` skill is the panel's foreign leg, `agent-worktree` and `claude-usage` (this repo's `bin/`) are the hands.

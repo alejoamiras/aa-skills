@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# claude-usage mock: `run` stays alive a while (a lead), anything else prints a headroom table
+[ "${1:-}" = run ] || { echo "account  5h  week"; exit 0; }
+echo '{"type":"system","session_id":"00000000-0000-4000-8000-000000000001"}'
+i=0; while [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done

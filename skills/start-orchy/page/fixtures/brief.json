@@ -1,0 +1,7 @@
+{
+ "pages": {"1": "Two calls about the home screen."},
+ "records": {
+  "P1-01": {"ask": "Should the home header use one line instead of two?", "now": "The header stays on two lines.", "options": {"A": "Keep two lines.", "B": "One line; the list gains 18 px."}, "pick": {"id": "B", "why": "More room for the list; nothing else changes."}},
+  "P1-02": {"ask": "Approve one short line for the empty list?", "now": "The longer text stays."}
+ }
+}

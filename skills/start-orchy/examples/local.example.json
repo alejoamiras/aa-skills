@@ -1,0 +1,21 @@
+{
+  "accounts": {
+    "use": [
+      "acct-a",
+      "acct-b",
+      "acct-c"
+    ],
+    "never": [
+      "acct-main"
+    ],
+    "heavy_per_account": 2,
+    "light_per_account": 3,
+    "min_week_left_pct": 70
+  },
+  "load_max": 144,
+  "session_url": "https://claude.ai/code/session_<id of the orchestrator session>",
+  "artifact_url": "",
+  "measurement_refs": "-measure-",
+  "prompt_ban": "\\b(acct-a|acct-b|acct-c|acct-main)\\b|CLAUDE_ACCOUNT=[a-z]|CODEX_ACCOUNT=[a-z]|claude\\.ai/artifact/",
+  "load_max_note": "three quarters of nproc, derived at bootstrap"
+}

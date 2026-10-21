@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "bootstrap": "complete",
+  "approved_at": "2026-01-01T00:00:00Z",
+  "trunk": "dev",
+  "protected": [
+    "main",
+    "release/*"
+  ],
+  "install": "bun install --frozen-lockfile",
+  "worktrees": {
+    "root": ".claude/worktrees",
+    "branch_prefix": "worktree-"
+  },
+  "plans": {
+    "dir": "implementations-plan",
+    "archive": "implementations-plan/archive",
+    "check": ""
+  },
+  "gates": "`bun run lint`, `bun run typecheck`, `bun run test`; the touched e2e files at retry 0",
+  "quality_bar": "production",
+  "merge": {
+    "method": "squash",
+    "required_checks": [
+      "quality-status",
+      "e2e-status"
+    ],
+    "watch_rounds": 300
+  },
+  "labels": {
+    "known_limit": "known-limit",
+    "owner_decision": "owner-decision",
+    "blocked": "blocked:external",
+    "lane_prefix": "lane:"
+  },
+  "leads": {
+    "model": "opus",
+    "model_name": "Claude Opus 5.5",
+    "codex_model": "gpt-6.1-sol",
+    "codex_model_short": "sol",
+    "codex_effort": "high",
+    "tier_default": "mid"
+  },
+  "never_open": [],
+  "delegations": [],
+  "scan": {
+    "gate_files": "^\\.github/|biome\\.json|eslint|tsconfig|bunfig|vitest\\.config|playwright\\.config|required-checks|audit-acks",
+    "weakening": "continue-on-error|\\|\\| true|\\.skip\\(|\\.only\\(|test\\.todo|retries:|if: false|allow_failure|biome-ignore lint|eslint-disable|@ts-ignore|@ts-expect-error|required_status|--admin",
+    "leak": "(/home|/Users|/mnt)/[a-z]|CLAUDE_ACCOUNT=[a-z]|CODEX_ACCOUNT=[a-z]|claude\\.ai/artifact/"
+  },
+  "pages": {
+    "enabled": true,
+    "title": "App Backlog Decisions",
+    "product": "the app"
+  },
+  "teardown": {
+    "hand_remove": false
+  }
+}

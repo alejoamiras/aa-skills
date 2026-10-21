@@ -1,0 +1,30 @@
+{
+ "page": {"no": 2, "name": "Settings list", "wave": 1, "lanes": ["home-1"], "intro": "One call about how the settings list is grouped.", "issues": [2]},
+ "records": [
+  {
+   "id": "P2-01", "issue": [2], "page_no": 2, "kind": "visual",
+   "title": "Settings: one list or three groups",
+   "lane": "home-1 arc 1",
+   "surface": "The settings screen lists every setting in one column.",
+   "options": [
+    {"id": "A", "text": "Keep one flat list."},
+    {"id": "B", "text": "Group the settings under three headings."}
+   ],
+   "recommend": {"id": "B", "why": "Three short groups are quicker to scan than one long list."},
+   "buttons": ["Option A", "Option B", "Note"],
+   "rule_or_precedent": "A visible change is the owner's call.",
+   "shots": [
+    {"id": "p2-01-a", "kind": "option", "route": "settings", "capture": "the settings list, option A", "theme": "light + dark", "browser": ["chrome"]},
+    {"id": "p2-01-b", "kind": "option", "route": "settings", "capture": "the settings list, option B", "theme": "light + dark", "browser": ["chrome"]}
+   ],
+   "writes_back": {
+    "on_choice": "## Decision\n\nOwner, {date}, decision page 2 (Settings list): **Option {option}**. {option_text}\n\nOwner note: {note}\n",
+    "options": {"A": "The settings stay in one list.", "B": "The settings are grouped under three headings."}
+   }
+  }
+ ],
+ "manifest_rows": [
+  {"id": "p2-01-a", "parent": "p2-01-a", "issues": [2], "records": ["P2-01"], "option": "A", "light": "px-light.png", "dark": "px-dark.png", "browser": "chrome", "caption": "Option A: one flat list."},
+  {"id": "p2-01-b", "parent": "p2-01-b", "issues": [2], "records": ["P2-01"], "option": "B", "light": "px-light.png", "dark": "px-dark.png", "browser": "chrome", "caption": "Option B: three groups with headings."}
+ ]
+}

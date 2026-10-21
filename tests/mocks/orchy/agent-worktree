@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# agent-worktree mock: `done --merged` refuses when $MOCK_AW_REFUSE=1, `new` creates a plain worktree, the rest is a no-op
+set -u; echo "$*" >> "$MOCK_DIR/aw.log"
+case "$1" in
+new) git worktree add -q -b "worktree-$2" ".claude/worktrees/$2" HEAD;;
+done) if printf '%s\n' "$@" | grep -qx -- --merged && [ "${MOCK_AW_REFUSE:-0}" = 1 ]; then echo "refusing: HEAD is not contained in origin trunk"; exit 1; fi; echo "ok";;
+*) exit 0;;
+esac

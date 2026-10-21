@@ -1,0 +1,50 @@
+{
+ "site": {"repo": "example/app", "title": "App Backlog Decisions", "product": "the app", "collection": "decisions", "trunk": "main"},
+ "generated": "2026-01-05",
+ "repo_head": "abc1234",
+ "pages": [
+  {"no": 1, "name": "Home screen", "wave": 1, "lanes": ["home-1"], "intro": "Two calls about the home screen: the header layout, and the line shown when the list is empty.", "issues": [1, 2]}
+ ],
+ "charter": [],
+ "standing_rules": [],
+ "holds": {"merge_holds": [], "execution_gates": [], "reservations": []},
+ "no_ask": [],
+ "records": [
+  {
+   "id": "P1-01", "issue": [1], "page": "Home screen", "page_no": 1, "kind": "visual",
+   "title": "Home header: two lines or one",
+   "lane": "home-1 arc 1",
+   "surface": "The home screen header shows the title and the date on two lines.",
+   "options": [
+    {"id": "A", "text": "Keep the header on two lines."},
+    {"id": "B", "text": "Put the title and the date on one line; the header loses 18 px of height."}
+   ],
+   "recommend": {"id": "B", "why": "It gives the list more room and changes nothing else."},
+   "buttons": ["Option A", "Option B", "Note"],
+   "rule_or_precedent": "A visible change is the owner's call.",
+   "shots": [
+    {"id": "p1-01-today", "kind": "before", "route": "home", "capture": "the header, full width", "theme": "light + dark", "browser": ["chrome"]},
+    {"id": "p1-01-a", "kind": "option", "route": "home", "capture": "the header, option A", "theme": "light + dark", "browser": ["chrome"]},
+    {"id": "p1-01-b", "kind": "option", "route": "home", "capture": "the header, option B", "theme": "light + dark", "browser": ["chrome"]}
+   ],
+   "writes_back": {
+    "on_choice": "## Decision\n\nOwner, {date}, decision page 1 (Home screen): **Option {option}**. {option_text}\n\nOwner note: {note}\n",
+    "options": {"A": "The header stays on two lines.", "B": "The title and the date share one line."}
+   }
+  },
+  {
+   "id": "P1-02", "issue": [2], "page": "Home screen", "page_no": 1, "kind": "approve",
+   "title": "Empty list: one short line",
+   "lane": "home-1 arc 1",
+   "surface": "The home list, when it has no rows.",
+   "proposal": "Replace the two-sentence empty-list text with one line: \"Nothing here yet.\"",
+   "buttons": ["Approve", "Change (with a note)"],
+   "rule_or_precedent": "Copy changes ship on the owner's approval.",
+   "shots": [],
+   "writes_back": {
+    "on_approve": "## Decision\n\nOwner, {date}, decision page 1 (Home screen): **approved**.\n\nThe empty list reads \"Nothing here yet.\"\n",
+    "on_change": "## Decision\n\nOwner, {date}, decision page 1 (Home screen): **changed**.\n\n{note}\n"
+   }
+  }
+ ]
+}
