@@ -76,6 +76,7 @@ o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1); grep -q 'hand-removed' <<<"$o" |
 mkpr "$SHA"; "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 30 >/dev/null || fail "arm-merge for disarm"
 wp=$(cut -d' ' -f1 "$ORCHY_HOME/watch/merge-9.pid"); "$ORCHY" disarm 9 | grep -q 'stopped merge-9' || fail "disarm did not stop the watcher"
 sleep 1; [ ! -d "/proc/$wp" ] || fail "watcher $wp still alive after disarm"
+[ "$(ps -eo pid,args | grep -c "[w]atch-merge 9 ")" = 0 ] || fail "a watch-merge 9 process survived disarm: $(ps -eo pid,args | grep "[w]atch-merge 9 ")"
 sleep 60 & hp=$!; echo "$hp $(awk '{print $22}' /proc/$hp/stat) 2026-01-01T00:00:00Z other" > "$ORCHY_HOME/orchestrator.lock"
 if "$ORCHY" lock >/dev/null 2>&1; then fail "lock did not refuse a live holder"; fi
 kill $hp; wait $hp 2>/dev/null || true; "$ORCHY" lock | grep -q '^locked' || fail "lock did not replace a stale holder"; "$ORCHY" unlock >/dev/null

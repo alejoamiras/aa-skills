@@ -167,7 +167,8 @@ bun $S/apply-decisions.ts --answers <fresh dir> --apply     # gh issue edit, lan
 - Everything from `<!-- orchy:decision -->` to the end of an issue body is replaced on every apply, so nothing goes below that marker by hand.
 - A closed issue gets its Decision without a Pickup.
 - `--apply` adds `<lane_label_prefix><slug>` (creating the label) and removes `owner_decision_label`.
-- Apply writes the choices a signoff snapshotted (`choices`, `notes`), never the live docs alone: a choice changed after signing is held, and a signoff whose `except` note is set holds its whole page (exit 3) until `except_resolved: true` is written onto that signoff doc with ArtifactData `update`.
+- Apply writes the choices a signoff snapshotted (`choices`, `notes`), never the live docs alone: a `null` snapshot is the signed default even if a doc appeared later, a choice changed after signing is held, and a signoff whose `except` note is set holds its whole page until `except_resolved: true` is written onto that signoff doc with ArtifactData `update`. An issue that any held page or record contributes to is not written at all (its earlier decisions stay), and apply exits 3 while anything is held.
+- `public-notes.json` keys: `<record id>` releases a note, `<record id>.<field>` releases `result`, `next_step`, `recorded` or `except`.
 - `MANUAL` lines list what is still yours: unanswered or held items, read options without `recorded`, held pages and unrecorded checks.
 
 ## Rules the renderer and the tools impose

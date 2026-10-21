@@ -71,12 +71,13 @@ config) cfg "$1";;
 local) lcl "$1";;
 lock)
   f="$H/orchestrator.lock"; me=$(session_pid)
-  for try in 1 2; do
+  for try in 1 2 3; do
     if ( set -o noclobber; echo "$me $(pstart "$me") $(now) ${ORCHY_SESSION:-}" > "$f" ) 2>/dev/null; then echo "locked $REPO for session pid $me"; exit 0; fi
-    read -r p st t _ < "$f"
+    read -r p st t _ < "$f" 2>/dev/null || { sleep 1; continue; }
     [ "$p" = "$me" ] && { echo "already locked by this session (pid $me)"; exit 0; }
     if [ -d "/proc/$p" ] && [ "$(pstart "$p")" = "$st" ]; then echo "refused: another orchestrator holds $REPO (pid $p since $t)"; exit 2; fi
-    rm -f "$f"   # stale: the holder is gone
+    # a stale holder: one contender at a time replaces it (mkdir is the mutex), so two contenders cannot unlink each other's fresh lock
+    if mkdir "$f.takeover" 2>/dev/null; then read -r p2 _ < "$f" 2>/dev/null; [ "$p2" = "$p" ] && rm -f "$f"; rmdir "$f.takeover"; else sleep 1; fi
   done; echo "lock: could not claim $f"; exit 2;;
 unlock) rm -f "$H/orchestrator.lock"; echo "unlocked";;
 render)
@@ -177,6 +178,7 @@ watch-merge)
   sha_ok "$PIN" || { echo "REFUSED: pin must be the full 40-hex head sha"; exit 4; }
   mapfile -t REQ < <(cfg '.merge.required_checks[]'); [ "${#REQ[@]}" -gt 0 ] || { echo "REFUSED: merge.required_checks is empty"; exit 4; }
   method=$(cfg '.merge.method // "squash"'); rounds=$(cfg '.merge.watch_rounds // 300'); WS=${ORCHY_WATCH_SLEEP:-60}
+  echo "$$ $(pstart $$)" > "$H/watch/merge-$N.pid"   # the watcher's own identity, whatever wrapper started it
   pr_state() { gh pr view "$N" --repo "$REPO" --json state,isDraft,baseRefName,headRefOid,mergeable,mergeStateStatus --jq '"\(.state) \(.isDraft) \(.baseRefName) \(.headRefOid) \(.mergeable) \(.mergeStateStatus)"' 2>/dev/null; }
   checks() { # name<TAB>status<TAB>conclusion: the newest check-run per name, then a commit status only for a name no check-run carries; exit 1 on an API failure
     local cr st
@@ -232,10 +234,15 @@ arm-merge)
   N=$1; sha_ok "$2" || { echo "refused: pin must be the full 40-hex head sha"; exit 4; }
   delay=${6:-0}; args=("$1" "$2" "$3" "$4"); [ -n "${5:-}" ] && args+=("$5")
   watcher_alive "$H/watch/merge-$N.pid" && { echo "refused: merge-$N is already armed (pid $(cut -d' ' -f1 "$H/watch/merge-$N.pid"))"; exit 1; }
-  ( cd "$ROOT" && ORCHY_ROOT="$ROOT" ORCHY_HOME="$H" setsid nohup bash -c "sleep $delay; exec bash '$(realpath "$0")' watch-merge $(printf '%q ' "${args[@]}")" > "$H/watch/merge-$N.out" 2>&1 & p=$!; sleep 1; echo "$p $(pstart "$p")" > "$H/watch/merge-$N.pid" )
+  ( cd "$ROOT" && exec env ORCHY_ROOT="$ROOT" ORCHY_HOME="$H" setsid nohup bash -c "sleep $delay; exec bash '$(realpath "$0")' watch-merge $(printf '%q ' "${args[@]}")" ) > "$H/watch/merge-$N.out" 2>&1 &
+  p=$!; echo "$p $(pstart "$p")" > "$H/watch/merge-$N.pid"; sleep 1   # the watcher overwrites this with its own identity once it runs
   echo "armed merge-$N pid $(cut -d' ' -f1 "$H/watch/merge-$N.pid") (delay ${delay}s) -> $H/watch/merge-$N.out";;
 disarm)
-  for f in "$H"/watch/merge-${1:-*}.pid; do [ -f "$f" ] || continue; n=$(basename "$f" .pid); if watcher_alive "$f"; then p=$(cut -d' ' -f1 "$f"); kill -- "-$p" 2>/dev/null || kill "$p"; echo "stopped $n"; else echo "$n not running"; fi; done;;
+  for f in "$H"/watch/merge-${1:-*}.pid; do [ -f "$f" ] || continue; n=$(basename "$f" .pid); num=${n#merge-}
+    if watcher_alive "$f"; then p=$(cut -d' ' -f1 "$f"); kill -- "-$p" 2>/dev/null; kill "$p" 2>/dev/null; sleep 1; echo "stopped $n"; else echo "$n not running"; fi
+    # a wrapper that had not exec'd yet, or a child gh call, may outlive the group kill: finish by command line, never by a bare name
+    for q in $(pgrep -f "orchy.sh watch-merge $num " 2>/dev/null); do kill "$q" 2>/dev/null && echo "stopped stray $q of $n"; done
+  done;;
 teardown)
   need gh; need agent-worktree; s=$1; W="$WT_ROOT/$s"; q="$(basename "$ROOT")/$s"
   [ -d "$W" ] || { echo "$s: no worktree dir"; (cd "$ROOT" && agent-worktree done "$q" --forget 2>&1 | tail -1); exit 0; }

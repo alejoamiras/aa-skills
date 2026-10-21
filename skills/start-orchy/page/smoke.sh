@@ -101,9 +101,24 @@ ok "apply --apply: marker block below the original body, lane label, receipts, i
 
 # a choice changed after signing is held, never written; an except note holds the page; a sensitive result holds everything
 cp -r "$P/answers" "$T/ans2"; jq '.choice="A"' "$T/ans2/decisions/choice-P1-01.json" > "$T/c.json" && mv "$T/c.json" "$T/ans2/decisions/choice-P1-01.json"
-PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans2" > "$T/apply4.out" 2>&1 || fail "apply with a changed choice"
+rm -rf "$P/apply-preview"
+if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans2" > "$T/apply4.out" 2>&1; then fail "apply with a changed choice exited 0"; fi
 grep -q 'P1-01 changed after page 1 was signed (signed B, now A)' "$T/apply4.out" || fail "a changed choice was not held: $(cat "$T/apply4.out")"
-grep -q 'Option A' "$P/apply-preview/1.md" && fail "the changed choice reached the preview"
+[ ! -e "$P/apply-preview/1.md" ] || fail "the held record's issue got a preview"
+grep -q '#1 NOT WRITTEN' "$T/apply4.out" || fail "the held record's issue was not reported as held: $(cat "$T/apply4.out")"
+# an approve record changed to "change" after signing is held, never approved by default, and its issue is not touched
+cp -r "$P/answers" "$T/ans6"; jq '.choices["P1-02"]="approve"' "$T/ans6/decisions/signoff-P1.json" > "$T/c.json" && mv "$T/c.json" "$T/ans6/decisions/signoff-P1.json"
+jq -n '{"__id":"choice-P1-02","page":"decisions","page_no":1,"id":"P1-02","kind":"approve","issue":[2],"choice":"change","note":"","at":"2026-01-07T10:00:00.000Z","by":"u_example"}' > "$T/ans6/decisions/choice-P1-02.json"
+rm -rf "$T/issues"; mkdir -p "$T/issues"
+if PATH="$G:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans6" --apply > "$T/apply8.out" 2>&1; then fail "a held approve record exited 0"; fi
+grep -q 'P1-02 changed after page 1 was signed (signed approve, now change)' "$T/apply8.out" || fail "held approve not reported: $(cat "$T/apply8.out")"
+[ ! -e "$T/issues/2.json" ] || fail "a held approve record's issue was written: $(jq -r .body "$T/issues/2.json")"
+[ -e "$T/issues/1.json" ] || fail "the unaffected issue was not written"
+# a null snapshot is the signed default even when a doc appears later
+cp -r "$P/answers" "$T/ans7"; jq -n '{"__id":"choice-P1-02","page":"decisions","page_no":1,"id":"P1-02","kind":"approve","issue":[2],"choice":"change","note":"later","at":"2026-01-07T10:00:00.000Z","by":"u_example"}' > "$T/ans7/decisions/choice-P1-02.json"
+PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans7" > /dev/null 2>&1 || fail "apply with a post-signing doc on a null snapshot"
+grep -q '\*\*approved\*\*' "$P/apply-preview/2.md" || fail "a null snapshot did not stay the signed default: $(cat "$P/apply-preview/2.md")"
+grep -q 'later' "$P/apply-preview/2.md" && fail "a note added after signing reached the preview"
 cp -r "$P/answers" "$T/ans3"; jq '.except="Hold all of this page"' "$T/ans3/decisions/signoff-P1.json" > "$T/c.json" && mv "$T/c.json" "$T/ans3/decisions/signoff-P1.json"
 rm -rf "$T/issues"; mkdir -p "$T/issues"
 if PATH="$G:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans3" --apply > "$T/apply5.out" 2>&1; then fail "apply with an except note exited 0"; fi

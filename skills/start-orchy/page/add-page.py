@@ -86,5 +86,10 @@ def stage(obj, path):
     with open(f"{path}.tmp", "w") as fh: json.dump(obj, fh, ensure_ascii=False, indent=1)
 # both files are staged before either is replaced, so a failure leaves the originals whole
 os.makedirs(SD, exist_ok=True); stage(d, DP); stage(m, MP)
-for path in (DP, MP): os.replace(f"{path}.tmp", path)
+os.replace(f"{DP}.tmp", DP)
+try: os.replace(f"{MP}.tmp", MP)
+except OSError:
+    # the manifest did not land: put decisions.json back so the two files never disagree
+    if os.path.exists(f"{DP}.bak-p{no}-{stamp}"): shutil.copy2(f"{DP}.bak-p{no}-{stamp}", DP)
+    raise
 print(f"page {no} added: {len(recs)} records, {len(rows)} manifest rows; backups *.bak-p{no}-{stamp}")

@@ -40,7 +40,8 @@ for (const d of docs) {
   const id = String(d.__id ?? d.id ?? "").replace(/^choice-/, "");
   for (const k of FREE_TEXT) {
     if (typeof d[k] !== "string" || !d[k]) continue;
-    if (k === "note" && publicNotes[id] !== undefined) d.note = publicNotes[id];
+    const pub = publicNotes[k === "note" ? id : `${id}.${k}`] ?? (k === "note" ? undefined : publicNotes[`${id}.${k}`]);
+    if (pub !== undefined) d[k] = pub;
     else if (SENSITIVE.test(d[k])) held.push(`${id}.${k}`);
   }
   if (d.notes && typeof d.notes === "object") for (const k of Object.keys(d.notes)) {
@@ -48,7 +49,7 @@ for (const d of docs) {
     else if (typeof d.notes[k] === "string" && SENSITIVE.test(d.notes[k])) held.push(k);
   }
 }
-if (held.length) { console.error(`refused: notes need a public wording in public-notes.json first: ${[...new Set(held)].join(", ")}`); process.exit(4); }
+if (held.length) { console.error(`refused: these fields need a public wording in public-notes.json first (key "<record id>" for a note, "<record id>.<field>" for result, next_step, recorded or except): ${[...new Set(held)].join(", ")}`); process.exit(4); }
 const choices: Record<string, Doc> = {}, signoffs: Record<number, Doc> = {};
 for (const d of docs) { const id = d.__id ?? d.id; if (typeof id === "string" && id.startsWith("signoff-P")) signoffs[Number(id.slice(9))] = d; else if (d.id && d.kind) choices[d.id] = d; else if (typeof id === "string" && id.startsWith("choice-")) choices[id.slice(7)] = d; }
 
@@ -61,19 +62,33 @@ const out: Record<number, { page: number; order: number; text: string }[]> = {};
 const push = (issue: number, page: number, order: number, text: string) => (out[issue] ??= []).push({ page, order, text });
 const manual: string[] = [];
 const recorded: string[] = [];
+// What a signoff snapshotted is what was signed. Three outcomes per record: a doc (answered), undefined (signed as the
+// default; a doc added after signing does not count), or HELD (changed after signing: nothing of its issues is written).
+const HELD: Doc = { __held: true };
+const heldIssues = new Set<number>();
 const heldPages: number[] = [];
 const pagesToWrite = D.pages.filter((p: any) => signoffs[p.no]).filter((p: any) => {
   const s = signoffs[p.no];
   // an `except` note withholds the whole page until the orchestrator settles it with the owner and sets except_resolved on the signoff doc
-  if (s.except && !s.except_resolved) { heldPages.push(p.no); manual.push(`page ${p.no} HELD by its except note (set except_resolved on signoff-P${p.no} once settled): ${s.except}`); return false; }
+  if (s.except && !s.except_resolved) {
+    heldPages.push(p.no); manual.push(`page ${p.no} HELD by its except note (set except_resolved on signoff-P${p.no} once settled): ${s.except}`);
+    for (const r of D.records.filter((r: any) => r.page_no === p.no)) for (const n of r.issue) heldIssues.add(n);
+    if (p.no === 0) for (const c of D.charter) for (const n of c.applies_to ?? []) heldIssues.add(n);
+    return false;
+  }
   return true;
 });
-// the choice a signoff snapshotted is the signed one; a live doc that differs means the owner changed it after signing
 const signed = (s: Doc, id: string): Doc | undefined => {
-  const live = choices[id], snap = s.choices && typeof s.choices === "object" ? s.choices[id] : undefined;
-  if (snap === undefined || snap === null) return live;
-  if (live && live.choice !== snap) { manual.push(`${id} changed after page ${s.page_no} was signed (signed ${snap}, now ${live.choice}); held until the page is signed again`); return undefined; }
-  const note = s.notes && typeof s.notes === "object" && typeof s.notes[id] === "string" ? s.notes[id] : live?.note;
+  const live = choices[id];
+  if (!(s.choices && typeof s.choices === "object" && id in s.choices)) return live;   // a signoff without a snapshot: the live doc
+  const snap = s.choices[id];
+  if (snap === null) return undefined;
+  if (live && live.choice !== snap) {
+    manual.push(`${id} changed after page ${s.page_no} was signed (signed ${snap}, now ${live.choice}); held until the page is signed again`);
+    const rec = D.records.find((r: any) => r.id === id) ?? charterById[id]; for (const n of rec?.issue ?? rec?.applies_to ?? []) heldIssues.add(n);
+    return HELD;
+  }
+  const note = s.notes && typeof s.notes === "object" && typeof s.notes[id] === "string" ? s.notes[id] : "";
   return { ...(live ?? {}), choice: snap, note };
 };
 for (const p of pagesToWrite) {
@@ -81,7 +96,7 @@ for (const p of pagesToWrite) {
   let order = 0;
   if (p.no === 0) {
     for (const c of D.charter) {
-      const a = signed(s, c.id); if (!a) { manual.push(`${c.id} unanswered or held though page 0 is signed`); continue; }
+      const a = signed(s, c.id); if (a === HELD) continue; if (!a) { manual.push(`${c.id} unanswered though page 0 is signed`); continue; }
       const optText = c.options.find((o: any) => o.id === a.choice)?.text ?? "";
       for (const [key, tpl] of Object.entries<string>(c.writes_back)) {
         const targets = key === "*" ? c.applies_to : [Number(key)];
@@ -99,12 +114,12 @@ for (const p of pagesToWrite) {
     continue;
   }
   for (const r of D.records.filter((r: any) => r.page_no === p.no)) {
-    const a = signed(s, r.id), wb = r.writes_back; let text = "";
+    const a = signed(s, r.id), wb = r.writes_back; let text = ""; if (a === HELD) continue;
     if (r.check) { if (!a) { manual.push(`${r.id} (#${r.issue.join(", #")}) manual check not recorded; nothing written`); continue; } text = fill(wb.on_result, { date, result: a.result || "", next_step: a.next_step || "the orchestrator proposes one" }); }
     else if (r.kind === "approve") text = a?.choice === "change" ? fill(wb.on_change, { date, note: a.note || "" }) : fill(wb.on_approve, { date, note: a?.note || "" });
     else if (r.kind === "veto") text = a?.choice === "strike" ? fill(wb.on_strike, { date, note: a.note || "" }) : fill(wb.on_accept, { date });
     else if (r.kind === "visual") {
-      if (!a) { manual.push(`${r.id} unanswered or held though page ${p.no} is signed`); continue; }
+      if (!a) { manual.push(`${r.id} unanswered though page ${p.no} is signed`); continue; }
       if (a.choice === "read" && a.recorded) { recorded.push(`${r.id} (#${r.issue.join(", #")})`); text = `## Decision\n\nOwner, ${date}, decision page ${p.no} (${p.name}), ${r.title}: **a note instead of an option**.\n\nOwner note: ${a.note || "(none)"}\n\nRecorded: ${a.recorded}\n`; for (const n of r.issue) push(n, p.no, order++, text); continue; }
       if (a.choice === "read") { manual.push(`${r.id} (#${r.issue.join(", #")}) READ OPTION: the owner left it to the orchestrator; note: ${a.note || "(none)"}`); continue; }
       text = a.choice === "asis" ? fill(wb.on_as_is, { date, note: a.note || "(none)" }) : fill(wb.on_choice, { date, option: a.choice, option_text: wb.options?.[a.choice] ?? "", note: a.note || "(none)" });
@@ -137,6 +152,7 @@ function pickup(n: number): string {
 const sectionsFor = (n: number, withPickup = true) => { const segs = out[n].sort((x, y) => x.page - y.page || x.order - y.order); const [first, ...rest] = segs; return `${MARK}\n${first.text.trimEnd()}\n${rest.map(s => "\n" + s.text.replace(/^## Decision\n+/, "").trimEnd() + "\n").join("")}${withPickup ? "\n" + pickup(n) : ""}`; };
 
 const issues = Object.keys(out).map(Number).sort((a, b) => a - b);
+for (const n of [...heldIssues].sort((a, b) => a - b)) manual.push(`#${n} NOT WRITTEN: a held page or record contributes to it; its current decisions stay`);
 const prevDir = join(O, "apply-preview"); mkdirSync(prevDir, { recursive: true });
 const receiptsPath = join(O, "apply-receipts.json");
 const receipts: Record<string, any> = existsSync(receiptsPath) ? JSON.parse(readFileSync(receiptsPath, "utf8")) : {};
@@ -146,6 +162,7 @@ let written = 0, skipped = 0;
 for (const n of issues) {
   const block = sectionsFor(n); writeFileSync(join(prevDir, `${n}.md`), block);
   const lane = arcOf[n]?.lane.slug;
+  if (heldIssues.has(n)) continue;
   if (!APPLY) continue;
   const cur = JSON.parse(await sh(["gh", "issue", "view", String(n), "--repo", REPO, "--json", "body,labels,state"]));
   const norm = (t: string) => t.replace(/\r\n/g, "\n").trimEnd();
@@ -164,4 +181,4 @@ for (const n of issues) {
 console.log(`${APPLY ? "applied" : "dry-run"}: pages signed ${pagesToWrite.map((p: any) => p.no).join(",") || "none"}; issues ${issues.length}; written ${written}; skipped ${skipped}; previews in ${prevDir}`);
 if (recorded.length) console.log("RECORDED READ OPTIONS (written from their recorded field):\n- " + recorded.join("\n- "));
 if (manual.length) console.log("MANUAL:\n- " + manual.join("\n- "));
-if (heldPages.length) process.exit(3);
+if (heldPages.length || heldIssues.size) process.exit(3);
