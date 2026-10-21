@@ -73,7 +73,7 @@ const pagesToWrite = D.pages.filter((p: any) => signoffs[p.no]).filter((p: any) 
   if (s.except && !s.except_resolved) {
     heldPages.push(p.no); manual.push(`page ${p.no} HELD by its except note (set except_resolved on signoff-P${p.no} once settled): ${s.except}`);
     for (const r of D.records.filter((r: any) => r.page_no === p.no)) for (const n of r.issue) heldIssues.add(n);
-    if (p.no === 0) for (const c of D.charter) for (const n of c.applies_to ?? []) heldIssues.add(n);
+    if (p.no === 0) { for (const c of D.charter) for (const n of c.applies_to ?? []) heldIssues.add(n); for (const x of D.no_ask ?? []) heldIssues.add(x.issue); }
     return false;
   }
   return true;
@@ -160,9 +160,9 @@ const sh = async (cmd: string[]) => { const p = Bun.spawn(cmd, { stdout: "pipe",
 const labelsEnsured = new Set<string>();
 let written = 0, skipped = 0;
 for (const n of issues) {
+  if (heldIssues.has(n)) continue;
   const block = sectionsFor(n); writeFileSync(join(prevDir, `${n}.md`), block);
   const lane = arcOf[n]?.lane.slug;
-  if (heldIssues.has(n)) continue;
   if (!APPLY) continue;
   const cur = JSON.parse(await sh(["gh", "issue", "view", String(n), "--repo", REPO, "--json", "body,labels,state"]));
   const norm = (t: string) => t.replace(/\r\n/g, "\n").trimEnd();

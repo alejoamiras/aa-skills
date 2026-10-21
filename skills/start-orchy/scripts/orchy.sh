@@ -76,8 +76,8 @@ lock)
     read -r p st t _ < "$f" 2>/dev/null || { sleep 1; continue; }
     [ "$p" = "$me" ] && { echo "already locked by this session (pid $me)"; exit 0; }
     if [ -d "/proc/$p" ] && [ "$(pstart "$p")" = "$st" ]; then echo "refused: another orchestrator holds $REPO (pid $p since $t)"; exit 2; fi
-    # a stale holder: one contender at a time replaces it (mkdir is the mutex), so two contenders cannot unlink each other's fresh lock
-    if mkdir "$f.takeover" 2>/dev/null; then read -r p2 _ < "$f" 2>/dev/null; [ "$p2" = "$p" ] && rm -f "$f"; rmdir "$f.takeover"; else sleep 1; fi
+    # a stale holder: one contender at a time replaces it (the flock dies with its holder), so two contenders cannot unlink each other's fresh lock
+    ( flock -w 5 9 || exit 1; read -r p2 _ < "$f" 2>/dev/null; [ "$p2" = "$p" ] && rm -f "$f"; exit 0 ) 9>"$f.takeover" || sleep 1
   done; echo "lock: could not claim $f"; exit 2;;
 unlock) rm -f "$H/orchestrator.lock"; echo "unlocked";;
 render)
@@ -241,7 +241,7 @@ disarm)
   for f in "$H"/watch/merge-${1:-*}.pid; do [ -f "$f" ] || continue; n=$(basename "$f" .pid); num=${n#merge-}
     if watcher_alive "$f"; then p=$(cut -d' ' -f1 "$f"); kill -- "-$p" 2>/dev/null; kill "$p" 2>/dev/null; sleep 1; echo "stopped $n"; else echo "$n not running"; fi
     # a wrapper that had not exec'd yet, or a child gh call, may outlive the group kill: finish by command line, never by a bare name
-    for q in $(pgrep -f "orchy.sh watch-merge $num " 2>/dev/null); do kill "$q" 2>/dev/null && echo "stopped stray $q of $n"; done
+    for q in $(pgrep -f "orchy.sh watch-merge $num " 2>/dev/null); do tr '\0' '\n' < "/proc/$q/environ" 2>/dev/null | grep -qxF "ORCHY_HOME=$H" || continue; kill "$q" 2>/dev/null && echo "stopped stray $q of $n"; done
   done;;
 teardown)
   need gh; need agent-worktree; s=$1; W="$WT_ROOT/$s"; q="$(basename "$ROOT")/$s"

@@ -74,11 +74,20 @@ o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1); grep -q 'hand-removed' <<<"$o" |
 [ ! -d .claude/worktrees/y ] || fail "worktree y still there"
 # disarm stops a live watcher (its whole process group); lock refuses while another live holder has it and replaces a stale one
 mkpr "$SHA"; "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 30 >/dev/null || fail "arm-merge for disarm"
+# another home's watcher on the same PR number is never this home's stray
+H2="$T/home2"; mkdir -p "$H2"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$H2/"
+ORCHY_HOME="$H2" "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 30 >/dev/null || fail "arm-merge in a second home"
+wp2=$(cut -d' ' -f1 "$H2/watch/merge-9.pid")
 wp=$(cut -d' ' -f1 "$ORCHY_HOME/watch/merge-9.pid"); "$ORCHY" disarm 9 | grep -q 'stopped merge-9' || fail "disarm did not stop the watcher"
 sleep 1; [ ! -d "/proc/$wp" ] || fail "watcher $wp still alive after disarm"
-[ "$(ps -eo pid,args | grep -c "[w]atch-merge 9 ")" = 0 ] || fail "a watch-merge 9 process survived disarm: $(ps -eo pid,args | grep "[w]atch-merge 9 ")"
+[ -d "/proc/$wp2" ] || fail "disarm in one home killed another home's watcher on the same PR number"
+[ "$(ps -eo pid,args | grep "[w]atch-merge 9 " | grep -vc "^ *$wp2 ")" = 0 ] || fail "a watch-merge 9 process of this home survived disarm: $(ps -eo pid,args | grep "[w]atch-merge 9 ")"
+ORCHY_HOME="$H2" "$ORCHY" disarm 9 | grep -q 'stopped merge-9' || fail "disarm in the second home"
+sleep 1; [ ! -d "/proc/$wp2" ] || fail "the second home's watcher survived its own disarm"
 sleep 60 & hp=$!; echo "$hp $(awk '{print $22}' /proc/$hp/stat) 2026-01-01T00:00:00Z other" > "$ORCHY_HOME/orchestrator.lock"
 if "$ORCHY" lock >/dev/null 2>&1; then fail "lock did not refuse a live holder"; fi
+# a takeover file left by a killed contender never blocks the next one
+touch "$ORCHY_HOME/orchestrator.lock.takeover"
 kill $hp; wait $hp 2>/dev/null || true; "$ORCHY" lock | grep -q '^locked' || fail "lock did not replace a stale holder"; "$ORCHY" unlock >/dev/null
 for f in "$ORCHY_HOME"/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/null || true; done
 # the page toolchain's own smoke

@@ -133,6 +133,42 @@ grep -q 'P1-01.recorded' "$T/apply7.out" || fail "sensitive field not named: $(c
 if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans1" --page 1 > /dev/null 2>&1; then fail "--page still accepted"; fi
 ok "apply holds a post-signing change, an except note (until except_resolved) and a sensitive field; --page is refused"
 
+# an issue shared by a held page and a signed page is not written and gets no preview, while the signed page's other issues are
+cp -r "$P/answers" "$T/ans8"; jq '.except="Hold page 1"' "$T/ans8/decisions/signoff-P1.json" > "$T/c.json" && mv "$T/c.json" "$T/ans8/decisions/signoff-P1.json"
+jq -n '{"__id":"choice-P2-01","page":"decisions","page_no":2,"id":"P2-01","kind":"visual","issue":[2],"choice":"B","note":"","at":"2026-01-08T10:00:00.000Z","by":"u_example"}' > "$T/ans8/decisions/choice-P2-01.json"
+jq -n '{"__id":"signoff-P2","page":"decisions","page_no":2,"name":"Settings list","head":"abc1234","choices":{"P2-01":"B"},"notes":{},"except":"","changed":1,"at":"2026-01-08T10:01:00.000Z","by":"u_example"}' > "$T/ans8/decisions/signoff-P2.json"
+rm -rf "$T/issues" "$P/apply-preview"; mkdir -p "$T/issues"
+if PATH="$G:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans8" --apply > "$T/apply9.out" 2>&1; then fail "a shared held issue exited 0"; fi
+grep -q '^applied: pages signed 2;' "$T/apply9.out" || fail "page 2 was not the only signed page: $(head -1 "$T/apply9.out")"
+grep -q 'page 1 HELD by its except note' "$T/apply9.out" || fail "held page 1 not reported: $(cat "$T/apply9.out")"
+grep -q '#2 NOT WRITTEN' "$T/apply9.out" || fail "the shared issue was not reported as held: $(cat "$T/apply9.out")"
+[ ! -e "$P/apply-preview/2.md" ] || fail "the shared held issue got a preview from the signed page"
+[ ! -e "$T/issues/2.json" ] || fail "the shared held issue was written from the signed page: $(jq -r .body "$T/issues/2.json")"
+# page 0 held by its except note holds every issue its charter and no_ask items reach, even with no record on it
+python3 -I - "$P/decisions.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["pages"].insert(0, {"no": 0, "name": "Program charter", "wave": 0, "lanes": [], "intro": "The program's standing rules."})
+d["charter"] = [{"id": "C-01", "topic": "Merge order", "question": "One merge at a time?", "options": [{"id": "A", "text": "Yes."}, {"id": "B", "text": "No."}],
+  "recommend": {"id": "A", "why": "Serial merges keep the trunk green."}, "applies_to": [1], "buttons": ["Option A", "Option B"], "writes_back": {"*": "## Decision\n\nOwner, {date}, page 0: option {option}, {option_text}\n"}}]
+d["no_ask"] = [{"issue": 3, "decision": "Settled by the merge rule.", "rule": "R-01"}]
+json.dump(d, open(sys.argv[1], "w"), indent=1)
+PY
+cp -r "$P/answers" "$T/ans9"
+jq -n '{"__id":"choice-C-01","page":"decisions","page_no":0,"id":"C-01","kind":"charter","issue":[1],"choice":"A","note":"","at":"2026-01-09T10:00:00.000Z","by":"u_example"}' > "$T/ans9/decisions/choice-C-01.json"
+jq -n '{"__id":"signoff-P0","page":"decisions","page_no":0,"name":"Program charter","head":"abc1234","choices":{"C-01":"A"},"notes":{},"except":"Hold the charter","changed":1,"at":"2026-01-09T10:01:00.000Z","by":"u_example"}' > "$T/ans9/decisions/signoff-P0.json"
+rm -rf "$T/issues" "$P/apply-preview"; mkdir -p "$T/issues"
+if PATH="$G:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans9" --apply > "$T/apply10.out" 2>&1; then fail "a held page 0 exited 0"; fi
+grep -q 'page 0 HELD by its except note' "$T/apply10.out" || fail "held page 0 not reported: $(cat "$T/apply10.out")"
+for n in 1 3; do grep -q "#$n NOT WRITTEN" "$T/apply10.out" || fail "issue #$n reached by held page 0 was not held: $(cat "$T/apply10.out")"; [ ! -e "$T/issues/$n.json" ] || fail "issue #$n was written under a held page 0"; [ ! -e "$P/apply-preview/$n.md" ] || fail "issue #$n got a preview under a held page 0"; done
+[ -e "$T/issues/2.json" ] || fail "issue #2, untouched by page 0, was not written"
+jq '.except_resolved=true' "$T/ans9/decisions/signoff-P0.json" > "$T/c.json" && mv "$T/c.json" "$T/ans9/decisions/signoff-P0.json"
+PATH="$G:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans9" --apply > "$T/apply11.out" 2>&1 || fail "apply after page 0 except_resolved: $(cat "$T/apply11.out")"
+grep -q 'pages signed 0,1;' "$T/apply11.out" || fail "page 0 did not release: $(head -1 "$T/apply11.out")"
+jq -r .body "$T/issues/3.json" | grep -q 'Settled by the merge rule.' || fail "no_ask issue not written after release: $(jq -r .body "$T/issues/3.json")"
+jq -r .body "$T/issues/1.json" | grep -q 'page 0: option A, Yes.' || fail "charter text not written after release: $(jq -r .body "$T/issues/1.json")"
+ok "apply holds an issue shared with a held page, and every issue a held page 0 reaches, until released"
+
 if [ -d "$PWD/node_modules/puppeteer" ]; then
   node "$HERE/render-check.cjs" "$B/decisions.html" > "$T/render.out" 2>&1 || fail "render-check: $(cat "$T/render.out")"
   grep -q '"items":3,"toc":2,"pages":2' "$T/render.out" || fail "render-check: $(cat "$T/render.out")"
