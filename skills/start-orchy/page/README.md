@@ -48,12 +48,12 @@ apply-receipts.json written by --apply only
 
 **Top level:** `generated` (date), `repo_head` (short sha), `pages`, `records`, `charter`, `standing_rules`, `holds`, `no_ask` and an optional `counts`. Any other key is ignored.
 
-**`pages[]`:** `no` (int, never reused), `name`, `wave`, `lanes` [str], `intro` and optionally `issues` [int]. Pages render in array order. Page 0 is the charter page. It shows the charter items, `standing_rules`, `holds` and `no_ask`. Apply writes page 0 from the charter and `no_ask` only, so a record on page 0 is never written.
+**`pages[]`:** `no` (int, never reused), `name`, `wave`, `lanes` [str], `intro`, optionally `issues` [int], and `added_at` (ISO UTC, stamped by add-page.py; the snapshot shows how long an unsigned page has waited). Pages render in array order. Page 0 is the charter page. It shows the charter items, `standing_rules`, `holds` and `no_ask`. Apply writes page 0 from the charter and `no_ask` only, so a record on page 0 is never written.
 
 **`records[]`**, common keys:
 - `id` (unique, `P<page>-NN` by convention), `issue` [int] (may be empty), `page` (the page name), `page_no`, `kind`, `title`, `lane` (free text).
 - `rule_or_precedent` (shown as "Basis"), `buttons`, `shots` (refs, below), `writes_back`.
-- Optional: `surface` (shown as "Where"), `hold` (a merge-hold id), `reply` {`at`, `note`, `answer`, `then`}, `premise`, `links` [{`href`, `label`}].
+- Optional: `category` (`copy`, `layout`, `a11y`, `risk`, `architecture`, `policy`, `ci-cost`, `scope`, `other`; the owner record scores agreement per category), `surface` (shown as "Where"), `hold` (a merge-hold id), `reply` {`at`, `note`, `answer`, `then`}, `premise`, `links` [{`href`, `label`}].
 
 | `kind` | Adds | `writes_back` templates |
 |---|---|---|
@@ -121,6 +121,8 @@ Other keys are ignored. A ref shows a row when any of these hold:
 - A doc's id is its `__id` or its file name. A single `.json` answers file holds an array, `{"docs": [...]}` or a map, each doc with `__id`.
 
 **apply-receipts.json:** `{"<issue>": {"at", "lane", "pages": [no], "note"?: "unchanged"}}`.
+
+**Owner record** (`--apply` only): `${ORCHY_PROFILE_DIR:-~/.agents/orchy/profile}/<owner>-<repo>.jsonl`, outside every repository, append-only, the last row per record wins, and a row equal to the record's live one is not appended again. One row per signed, unheld record: `{repo, page, record, kind, category, recommended, chosen, agreed, explicit, via_recommend_all, note, signed_at}`. Only what the signoff snapshotted counts; a manual check and a held record write nothing. `recommended` is `recommend.id` for a visual or charter item, `approve` or `accept` otherwise; `explicit` is false when the snapshot was null (the default, signed untouched); `agreed` is null for a `read`; a `via_recommend_all` row is never scored as agreement.
 
 ## Sequence
 
