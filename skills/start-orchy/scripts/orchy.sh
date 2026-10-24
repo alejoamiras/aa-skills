@@ -45,6 +45,8 @@ case "$cmd" in help|-h|--help) usage 0;; home) echo "$H"; exit 0;; esac
 cfg() { jq -r "$1" "$CFG"; }
 lcl() { [ -f "$LOCAL" ] && jq -r "$1" "$LOCAL" || echo ""; }
 TRUNK=$(cfg '.trunk // "main"')
+case "$cmd" in wt-new|launch|resume|arm-merge)
+  [ "$(cfg '.mode // empty')" = triage ] && { echo "refused: orchy.json mode is triage (labels, comments and pages only; no worktree, lead or merge)" >&2; exit 1; };; esac
 # A lead runs the hook its settings file names, so nobody but the owner may write here. chmod tightens a fresh or loose
 # home (a umask would also reach wt-new's product checkout), but cannot undo what another user planted while it was loose.
 under=0; ds=("$H"); [ "$(dirname "$H")" = "$CAP" ] && under=1 && ds+=("$CAP")
@@ -164,6 +166,12 @@ launch|resume)
   k=$1; w=$2; a=$3; sid=${4:-}
   [[ "$k" =~ ^[A-Za-z0-9._-]+$ && "$w" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "refused: key and slug are [A-Za-z0-9._-]" >&2; exit 1; }
   refuse_account "$a" || exit 1; cap_root_ok || exit 1
+  # Close-outs run one at a time: each merges the trunk's plan index and lessons, and two in flight would each miss the other's.
+  if [[ "$k" == *-closeout ]]; then
+    open=$(gh pr list --repo "$REPO" --state open --json headRefName --jq '.[].headRefName' 2>/dev/null) || { echo "refused: cannot list open PRs to serialize close-outs" >&2; exit 1; }
+    other=$(grep -E -- '-closeout$' <<<"$open" | grep -vxF -- "$w-closeout" | head -1)
+    [ -z "$other" ] || { echo "refused: close-out PR $other is still open; close-outs run one at a time" >&2; exit 1; }
+  fi
   [ "$cmd" = resume ] && [ -z "$sid" ] && { echo "usage: resume <key> <slug> <account> <session-id>" >&2; exit 1; }
   p="$H/prompts/$k.md"; [ -f "$p" ] || { echo "orchy: no prompt $p" >&2; exit 1; }
   "$0" check-text "$p" || exit 1
@@ -182,6 +190,8 @@ launch|resume)
   # Nothing in here touches the network; the lead starts with fd 9 closed, so no descendant ever holds the lock.
   exec 9>"$CAP/.spawn.lock"; flock -w 30 9 || { echo "refused: spawn lock busy for 30 s" >&2; exit 1; }
   if [ -f "$H/leads/$k.started" ]; then read -r pid st _ < "$H/leads/$k.started"; alive "$pid" "$st" && { echo "refused: lead $k is alive (pid $pid)" >&2; exit 1; }; fi
+  if [[ "$k" == *-closeout ]]; then other=$(lead_rows | awk -v k="$k" '$1 ~ /-closeout$/ && $1 != k {print $1; exit}')
+    [ -z "$other" ] || { echo "refused: close-out lead $other is alive; close-outs run one at a time" >&2; exit 1; }; fi
   [ "$force" = 1 ] || refuse_cap "$a" "$weight" || exit 1
   # a killed run may end mid-line: the newline keeps the marker a line of its own
   printf '\n%s\n' "$(jq -nc --arg k "$k" --arg l "$w" --arg c "$cmd" --arg t "$(now)" '{type: "orchy_invocation", key: $k, lane: $l, cmd: $c, at: $t}')" >> "$L"
@@ -245,6 +255,13 @@ snapshot)
   echo "-- trunk"; if t=$(trunk_state); then f=$(tail -n +2 <<<"$t" | paste -sd, -); echo "$TRUNK ${t:0:8}: ${f:+RED $f}${f:-no failed trunk check}"; else echo "(trunk checks unreadable)"; fi
   echo "-- open PRs"; gh pr list --repo "$REPO" --state open --json number,title,headRefOid,mergeable,mergeStateStatus,isDraft,baseRefName --jq '.[]|"#\(.number) \(.headRefOid[0:8]) \(.mergeable) \(.mergeStateStatus) draft=\(.isDraft) -> \(.baseRefName) \(.title)"' 2>/dev/null || echo "(gh pr list failed)"
   echo "-- worktrees"; git -C "$ROOT" worktree list | tail -n +2
+  echo "-- untriaged issues"
+  if [ ! -f "$H/triaged.txt" ]; then echo "(no triaged.txt: write every triaged issue number into it, one per line)"
+  elif iss=$(gh issue list --repo "$REPO" --state open --limit 1000 --json number,title --jq '.[] | "\(.number)\t\(.title)"' 2>/dev/null); then
+    awk -F'\t' 'FILENAME == ARGV[1] {t[$1]=1; next} $1 != "" && !($1 in t) {print "#" $1 " " substr($2, 1, 100)}' <(grep -oE '^[0-9]+' "$H/triaged.txt") <(printf '%s\n' "$iss")
+  else echo "(gh issue list failed)"; fi
+  echo "-- unsigned pages"; [ -f "$H/page/unsigned.json" ] && jq -r --argjson now "$(date +%s)" --slurpfile u "$H/page/unsigned.json" '.pages[] | select(.no as $n | $u[0] | index($n)) |
+    "page \(.no) \(.name): " + (if .added_at then (($now - (.added_at | fromdateiso8601)) | "waiting \(. / 86400 | floor)d\(. % 86400 / 3600 | floor)h") else "age unknown" end)' "$H/page/decisions.json" 2>/dev/null
   echo "-- headroom"; claude-usage 2>/dev/null | head -12;;
 wait)
   LIMIT=${1:-1500}

@@ -78,7 +78,9 @@ for s in rows:
         errs.append(f"row {sid}: an option {s['option']} row's id must end with -{s['option'].lower()}")
 if errs: sys.exit("refused, nothing written:\n- " + "\n- ".join(errs))
 for r in recs: r.setdefault("page", page["name"]); r.setdefault("shots", [])
-stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+now = datetime.datetime.now(datetime.timezone.utc)
+page.setdefault("added_at", now.strftime("%Y-%m-%dT%H:%M:%SZ"))   # snapshot shows how long a page has waited for the owner
+stamp = now.strftime("%Y%m%d-%H%M%S")
 for f in (DP, MP):
     if os.path.exists(f): shutil.copy2(f, f"{f}.bak-p{no}-{stamp}")
 d["pages"].append(page); d["records"] += recs; mrows += rows

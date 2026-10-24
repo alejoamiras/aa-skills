@@ -167,6 +167,24 @@ if "$ORCHY" lock >/dev/null 2>&1; then fail "lock did not refuse a live holder";
 touch "$ORCHY_HOME/orchestrator.lock.takeover"
 kill $hp; wait $hp 2>/dev/null || true; "$ORCHY" lock | grep -q '^locked' || fail "lock did not replace a stale holder"; "$ORCHY" unlock >/dev/null
 for f in "$T"/cap/*/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/null || true; done; for f in "$MOCK_DIR"/gc.*; do kill "$(cat "$f")" 2>/dev/null || true; done
+# triage mode refuses worktrees, leads and merges in one guard
+cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak"; jq '.mode="triage"' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"
+for c in "wt-new z" "launch x-plan x acct-e" "arm-merge 9 $SHA lane-9 r9.md"; do
+  o=$("$ORCHY" $c 2>&1 || true); grep -q 'mode is triage' <<<"$o" || fail "triage mode allowed $c: $o"; done
+cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"
+# intake and page age: untriaged open issues, unsigned pages with how long they have waited
+o=$("$ORCHY" snapshot 2>&1); grep -q '^(no triaged.txt' <<<"$o" || fail "snapshot without triaged.txt: $o"
+jq -n '[{number:1,title:"old"},{number:2,title:"new one"}]' > "$MOCK_DIR/issues.json"; printf '1\n' > "$ORCHY_HOME/triaged.txt"
+jq -n --arg t "$(date -u -d '50 hours ago' +%FT%TZ)" '{pages:[{no:3,name:"Copy",added_at:$t},{no:4,name:"Old"},{no:5,name:"Signed",added_at:$t}]}' > "$ORCHY_HOME/page/decisions.json"; echo '[3,4]' > "$ORCHY_HOME/page/unsigned.json"
+o=$("$ORCHY" snapshot 2>&1); grep -q '^#2 new one$' <<<"$o" && ! grep -q '^#1 ' <<<"$o" || fail "untriaged issues: $o"
+grep -q '^page 3 Copy: waiting 2d2h$' <<<"$o" && grep -q '^page 4 Old: age unknown$' <<<"$o" && ! grep -q '^page 5 ' <<<"$o" || fail "unsigned page ages: $o"
+# close-outs run one at a time: an open close-out PR of another lane, or a live close-out lead, refuses the next
+for k in x-closeout x2-closeout; do cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/$k.md"; done
+jq -n '[{headRefName:"q-closeout"},{headRefName:"x-closeout"}]' > "$MOCK_DIR/open.json"
+o=$("$ORCHY" launch x-closeout x acct-e 2>&1 || true); grep -q 'close-out PR q-closeout is still open' <<<"$o" || fail "a second close-out launched beside an open one: $o"
+jq -n '[{headRefName:"x-closeout"}]' > "$MOCK_DIR/open.json"; "$ORCHY" launch x-closeout x acct-e >/dev/null || fail "a lane's own open close-out PR blocked its close-out lead"
+o=$("$ORCHY" launch x2-closeout x acct-f 2>&1 || true); grep -q 'close-out lead x-closeout is alive' <<<"$o" || fail "two close-out leads ran at once: $o"
+rm -f "$MOCK_DIR/open.json"
 # receipt: a session counts its last (running-total) result once; a killed run adds deduped, unpriced usage; only closed issues count
 HR="$T/cap/rcpt"; mkdir -p "$HR"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HR/"; cp -r "$HERE/tests/mocks/orchy/receipt/." "$HR/"
 jq -n '{closingIssuesReferences:[{number:3},{number:4}]}' > "$MOCK_DIR/pr-21.json"; jq -n '{state:"CLOSED"}' > "$MOCK_DIR/issue-3.json"; jq -n '{state:"OPEN"}' > "$MOCK_DIR/issue-4.json"

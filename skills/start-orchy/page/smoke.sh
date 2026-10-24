@@ -30,6 +30,7 @@ ok "check-brief.py: $(cat "$T/brief.out")"
 python3 -I "$HERE/add-page.py" "$HERE/fixtures/page-2.json" > "$T/add.out" || fail "add-page.py page 2"
 ok "add-page.py: $(cat "$T/add.out")"
 ls "$P"/decisions.json.bak-p2-* "$P"/shots/manifest.json.bak-p2-* >/dev/null || fail "add-page.py made no backups"
+jq -e '.pages[] | select(.no == 2) | .added_at | fromdateiso8601' "$P/decisions.json" >/dev/null || fail "add-page.py did not stamp added_at"
 sum=$(cksum < "$P/decisions.json")
 if python3 -I "$HERE/add-page.py" "$HERE/fixtures/page-2.json" 2> "$T/re.err"; then fail "add-page.py re-added page 2"; fi
 grep -q 'exists already' "$T/re.err" || fail "re-add refused for the wrong reason: $(cat "$T/re.err")"
