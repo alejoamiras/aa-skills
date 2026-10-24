@@ -94,6 +94,8 @@ jq -n '{body:"body", commits:[{messageHeadline:"feat: x", messageBody:"ran with 
 printf 'diff --git a/x b/x\n+++ b/x\n+ok\n' > "$MOCK_DIR/diff-7.txt"; printf 'x\n' > "$MOCK_DIR/files-7.txt"
 o=$("$ORCHY" scan 7); grep -q 'leaks=1' <<<"$o" || fail "scan missed an account assignment in a commit message: $o"
 if MOCK_GH_FAIL=diff "$ORCHY" scan 7 >/dev/null 2>&1; then fail "scan reported success on a gh failure"; fi
+jq -n '{title:"fix: retry on acct-b", body:"body", commits:[]}' > "$MOCK_DIR/pr-8.json"; cp "$MOCK_DIR/diff-7.txt" "$MOCK_DIR/diff-8.txt"; cp "$MOCK_DIR/files-7.txt" "$MOCK_DIR/files-8.txt"
+o=$("$ORCHY" scan 8); grep -q 'leaks=1' <<<"$o" || fail "scan missed a locally banned name in a PR title: $o"
 # watch-merge: pin validation, strict report parsing, pinned merge, head-moved exit
 SHA=1111111111111111111111111111111111111111
 mkpr() { jq -n --arg s "$1" --arg st "${2:-OPEN}" '{state:$st,isDraft:false,baseRefName:"dev",headRefOid:$s,mergeable:"MERGEABLE",mergeStateStatus:"CLEAN",body:"",commits:[]}' > "$MOCK_DIR/pr-9.json"; }

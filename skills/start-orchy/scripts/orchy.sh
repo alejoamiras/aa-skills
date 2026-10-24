@@ -19,7 +19,7 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   session-id <key>             the session id of a lead's latest run
 #   snapshot                     the tick's facts: reports, leads, watchers, PRs, worktrees, load, headroom
 #   wait [seconds]               block until a report, lead, watcher or open-PR state changes (default 1500)
-#   scan <pr>                    gate-weakening and leak scan of a PR's diff, body and commit messages
+#   scan <pr>                    gate-weakening and leak scan of a PR's diff, title, body and commit messages (plus the local ban)
 #   watch-merge <pr> <full-sha> <lane> <report> [archive-name]   merge on the standing policy, then tear the lane down
 #   arm-merge  <pr> <full-sha> <lane> <report> [archive-name] [delay-s]   watch-merge detached (nohup, .out + .pid)
 #   disarm [<pr>]                stop one merge watcher, or every one
@@ -247,10 +247,12 @@ scan)
   need gh; n=$1
   d=$(gh pr diff "$n" --repo "$REPO") || { echo "SCAN FAILED: gh pr diff #$n"; exit 2; }
   files=$(gh pr diff "$n" --repo "$REPO" --name-only) || { echo "SCAN FAILED: gh pr diff --name-only #$n"; exit 2; }
-  meta=$(gh pr view "$n" --repo "$REPO" --json body,commits --jq '.body, (.commits[].messageHeadline), (.commits[].messageBody)') || { echo "SCAN FAILED: gh pr view #$n"; exit 2; }
+  meta=$(gh pr view "$n" --repo "$REPO" --json title,body,commits --jq '.title, .body, (.commits[].messageHeadline), (.commits[].messageBody)') || { echo "SCAN FAILED: gh pr view #$n"; exit 2; }
+  # the local ban (roster names, page ids) never sits in the committed config, so it joins the leak pattern here
+  leakre=$(cfg '.scan.leak'); ban=$(lcl '.prompt_ban // empty'); [ -n "$ban" ] && leakre="($leakre)|($ban)"
   gf=$(echo "$files" | grep -E "$(cfg '.scan.gate_files')" || true)
   add=$(echo "$d" | grep -E '^\+' | grep -v '^+++' | grep -E "$(cfg '.scan.weakening')" || true)
-  leak=$( (echo "$d" | grep -E '^\+'; echo "$meta") | grep -E "$(cfg '.scan.leak')" || true)
+  leak=$( (echo "$d" | grep -E '^\+'; echo "$meta") | grep -E "$leakre" || true)
   echo "#$n files=$(echo "$files" | grep -c .) gatefiles=$(echo -n "$gf" | grep -c .) added=$(echo -n "$add" | grep -c .) leaks=$(echo -n "$leak" | grep -c .)"
   [ -n "$gf" ] && echo "$gf" | sed 's/^/  GATE FILE: /'
   [ -n "$add" ] && echo "$add" | cut -c1-200 | sed 's/^/  ADDED: /'
