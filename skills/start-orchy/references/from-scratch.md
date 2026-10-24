@@ -7,8 +7,10 @@
 Proceed only when all of these hold; otherwise refuse and say what the owner can do instead.
 
 - Phase 0 step 1's tool checks pass (`gh auth status`, `claude-usage`, `codex login status`, `agent-worktree`, `jq`, `bun`), plus `gitleaks` and `actionlint`: nothing is created on GitHub for a program that cannot run.
-- The folder is not `$HOME`.
-- `ls -A` lists nothing, or only `.git`; then `git rev-parse --verify -q HEAD` finds no commit and `git remote` prints nothing.
+- The folder is not `$HOME`, compared physically (`pwd -P` against `cd "$HOME" && pwd -P`).
+- `ls -A` lists nothing, or only `.git`:
+  - with nothing, `git rev-parse --show-toplevel` fails: an empty subfolder of another repository is that repository's;
+  - with `.git`, it is a real directory (`[ -d .git ] && [ ! -L .git ]`), `git rev-parse --show-toplevel` prints this folder's `pwd -P`, and `git for-each-ref` and `git remote` print nothing: no branch, tag or remote, so no history on any branch.
 - The token carries the classic scopes `repo` and `workflow` (pushing `.github/workflows/` needs `workflow`):
 
   ```sh
@@ -33,12 +35,23 @@ Then one `AskUserQuestion`, recommended answer first:
 - **Accounts, caps, never-open files and a standing rule**: Phase 0 step 3's questions.
 - **The public description**: one or two sentences restated from what to build by SKILL.md § Asks, shown in full for the owner's OK or correction. The README, `package.json`'s `description` and `gh repo create --description` carry exactly this text.
 
+Before any file is written, the signed description passes the checks `ask public` would run, since `orchy.sh` cannot run until step 8 (`S` is this skill's directory; the owner's words go through a pipe, never a file):
+
+```sh
+bash "$S/scripts/overlap.sh" <(jq -nc --arg t "<what to build>" '{id: "ask0", text: $t}') <(printf '%s\n' "<description>")   # 0: no six-word copy
+printf '%s\n' "<description>" | grep -E "$(jq -r .scan.leak "$S/examples/orchy.example.json")"                             # 1: no path or link
+printf '%s\n' "<description>" | gitleaks stdin --no-banner --redact --exit-code 3                                          # 0: no secret
+```
+
+Any other result goes back to the owner with a new wording.
+
 ## 3. Scaffold
 
-1. `git init -b main` (skipped when `.git` exists).
+1. `git init -b main`, or, when the empty `.git` exists, `git symbolic-ref HEAD refs/heads/main`.
 2. `bunfig.toml` with `[install] minimumReleaseAge = 604800` before anything installs: my-stack's step 1 installs before its step 3 sets the age.
-3. my-stack § Scaffolding a New Repo, steps 1–7, 10 and 11. Steps 8 (run isolation), 9 (frontend) and 12 (infrastructure) only when the description needs them; otherwise each becomes an ask after step 8 here.
-4. One PR-gate workflow named after the package, with no `changes` filter while there is one package: orchy's merge watcher counts only a completed, successful check, so a skipped required check would block every PR.
+3. my-stack § Scaffolding a New Repo, steps 1–7, 10 and 11, in this folder: step 1 without its `mkdir`, `cd` and `git init`, and step 3 completing the `bunfig.toml` written above. Steps 8 (run isolation), 9 (frontend) and 12 (infrastructure) only when the description needs them; otherwise each becomes an ask after step 8 here.
+4. One test colocated with the entry module that asserts one real behavior of it: `bun test` exits 1 when it finds no test.
+5. One PR-gate workflow named after the package, with no `changes` filter while there is one package: orchy's merge watcher counts only a completed, successful check, so a skipped required check would block every PR.
 
    ```yaml
    name: <package>
@@ -69,7 +82,7 @@ Then one `AskUserQuestion`, recommended answer first:
          - uses: docker://rhysd/actionlint:1.7.12
    ```
 
-5. The secret scan, on pushes to `main` and on pull requests:
+6. The secret scan, on pushes to `main` and on pull requests:
 
    ```yaml
    name: gitleaks
@@ -104,8 +117,8 @@ The local gates green (`bun run lint`, `bun test`, `actionlint`); `gitleaks dir 
 
 ## 6. Prove the gate on `main`
 
-1. Note the time, then `gh workflow run <package>.yml --ref main`, retried up to five times 10 s apart while GitHub registers the new workflow.
-2. The run is the first `gh run list --workflow <package>.yml --event workflow_dispatch --json databaseId,createdAt` entry created after that time.
+1. Note the time to the second, then `gh workflow run <package>.yml --ref main`, retried up to five times 10 s apart while GitHub registers the new workflow.
+2. The run is the newest `gh run list --workflow <package>.yml --event workflow_dispatch --branch main --json databaseId,createdAt,headSha` entry whose `headSha` is the scaffold commit and whose `createdAt` is at or after that time, polled up to 60 s while it registers. Any such run proves the same commit's jobs, so a retried dispatch is harmless.
 3. `gh run watch <id> --exit-status`; a red or missing run stops with its link.
 4. Its job names (`gh run view <id> --json jobs --jq '.jobs[].name'`) are the required checks: the same jobs run on `pull_request`.
 

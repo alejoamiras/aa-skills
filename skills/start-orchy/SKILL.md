@@ -7,7 +7,7 @@ description: Runs a repository as an always-on program from the repo's root fold
 
 Four roles. The **owner** asks, decides and signs; everything else is unattended. The **orchestrator** (this session) takes the owner's asks, reads state, spawns, merges, builds pages and reports; it never ends the program by itself (Phase 4). **Leads** are headless `claude-usage run … -p` sessions, one per lane arc, each in its own worktree, each with a brief and a prompt, reporting through one file. **Watchers** are detached scripts (`nohup`, a `.pid`) that merge or wait so the orchestrator never sleeps.
 
-Run it from the repository's root: `cd` there, then `/start-orchy`. Everything it writes lives in `$ORCHY_HOME` (`~/.cache/orchy/<owner>-<repo>`), never in the repo. The shell half is `~/.claude/skills/start-orchy/scripts/orchy.sh` (`ORCHY` below; `ORCHY help` lists the subcommands), the brief and prompt templates are `templates/`, the decision-page toolchain is `page/` (its README is the data model), and the invariants with their evidence are `references/house-rules.md`: read it once before Phase 2.
+Run it from the repository's root: `cd` there, then `/start-orchy`. Everything it writes lives in `$ORCHY_HOME` (`~/.cache/orchy/<owner>-<repo>`), never in the repo, except the first commit of a repository it creates from scratch. The shell half is `~/.claude/skills/start-orchy/scripts/orchy.sh` (`ORCHY` below; `ORCHY help` lists the subcommands), the brief and prompt templates are `templates/`, the decision-page toolchain is `page/` (its README is the data model), and the invariants with their evidence are `references/house-rules.md`: read it once before Phase 2.
 
 ## Phase 0: bootstrap (the first run in a repo; ≤ 5 questions)
 
