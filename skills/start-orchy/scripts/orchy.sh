@@ -23,6 +23,7 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   watch-merge <pr> <full-sha> <lane> <report> [archive-name]   merge on the standing policy, then tear the lane down
 #   arm-merge  <pr> <full-sha> <lane> <report> [archive-name] [delay-s]   watch-merge detached (nohup, .out + .pid)
 #   disarm [<pr>]                stop one merge watcher, or every one
+#   receipt [<lane>]             per lane: API-equivalent dollars, tokens, wall-clock, PRs merged, issues closed, failed arcs, Codex rounds
 #   teardown <slug>              remove a lane worktree whose HEAD is exactly a merged PR's head and whose tree is clean
 # End
 need() { command -v "$1" >/dev/null 2>&1 || { echo "orchy: $1 not found" >&2; exit 1; }; }
@@ -178,7 +179,7 @@ stop)
   read -r pid st _ _ _ _ pg < "$f"; alive "$pid" "$st" || { echo "$k: not alive"; exit 0; }
   # Claude Code starts each Bash-tool shell as its own session leader, so a group kill alone misses a hung tool process:
   # collect the whole tree first, while every child still points at its parent.
-  mapfile -t tree < <(ps -eo pid=,ppid= | awk -v r="$pid" '{p[$1]=$2} END {s[r]=1; do {c=0; for (x in p) if (!(x in s) && (p[x] in s)) {s[x]=1; c=1}} while (c); for (x in s) print x}')
+  mapfile -t tree < <(ps -eo pid=,ppid= | awk -v r="$pid" '{p[$1]=$2} END {s[r]=1; c=1; while (c) {c=0; for (x in p) if (!(x in s) && (p[x] in s)) {s[x]=1; c=1}}; for (x in s) print x}')
   ids=(); for q in "${tree[@]}"; do ids+=("$q:$(pstart "$q")"); done
   [ "${pg:-?}" = "$pid" ] && kill -TERM -- "-$pg" 2>/dev/null
   for e in "${ids[@]}"; do kill -TERM "${e%%:*}" 2>/dev/null; done
@@ -338,5 +339,85 @@ teardown)
   pr=$(gh pr list --repo "$REPO" --head "$b" --state merged --json number,headRefOid,baseRefName --jq ".[] | select(.headRefOid==\"$head\" and .baseRefName==\"$TRUNK\") | .number" | head -1)
   [ -n "$pr" ] || { echo "$s: HEAD $head is not the head of a PR merged into $TRUNK from $b; refusing"; exit 2; }
   (cd "$ROOT" && git worktree remove --force "$W" && git branch -D "$b" >/dev/null && agent-worktree done "$q" --forget >/dev/null 2>&1; git worktree prune); echo "$s: hand-removed (branch $b at $head = merged PR #$pr)";;
+receipt)
+  need gh; python3 -I - "$H" "$REPO" "${1:-}" <<'PY'
+import sys, os, re, json, glob, subprocess, datetime
+H, repo, want = sys.argv[1:4]
+# keys are <lane>-plan, <lane>-a<n>, <lane>-closeout; only logs written before invocation markers need the name
+legacy_lane = lambda k: re.sub(r"-(plan|a\d+|closeout|shots[\w-]*)$", "", k)
+KINDS = (("in", "input_tokens", "inputTokens"), ("out", "output_tokens", "outputTokens"),
+         ("cache-read", "cache_read_input_tokens", "cacheReadInputTokens"), ("cache-write", "cache_creation_input_tokens", "cacheCreationInputTokens"))
+segs = []
+for path in sorted(glob.glob(f"{H}/leads/*.log")):
+    key = os.path.basename(path)[:-4]; seg = None
+    def new(lane, k, at): s = {"lane": lane, "key": k, "at": at, "sid": None, "result": None, "after": {}, "mtime": os.path.getmtime(path)}; segs.append(s); return s
+    for line in open(path, errors="replace"):
+        try: e = json.loads(line)
+        except ValueError: continue
+        if not isinstance(e, dict): continue
+        t = e.get("type")
+        if t == "orchy_invocation": seg = new(e.get("lane") or legacy_lane(key), e.get("key") or key, e.get("at") or ""); continue
+        if t == "system" and e.get("subtype") == "init":
+            if seg is None or (seg["sid"] and not seg["at"]): seg = new(legacy_lane(key), key, "")
+            seg["sid"] = seg["sid"] or e.get("session_id"); continue
+        if seg is None: seg = new(legacy_lane(key), key, "")
+        if t == "result": seg["result"] = e; seg["after"] = {}
+        elif t == "assistant" and isinstance(e.get("message"), dict) and e["message"].get("usage"):
+            seg["after"][e["message"].get("id") or id(e)] = e["message"]["usage"]   # a message repeats per content block: keep the last
+# On --resume, total_cost_usd and modelUsage are the session's running totals: each session counts its last result once,
+# plus the unpriced usage of runs killed after it.
+lanes, by_sid = {}, {}
+for i, s in enumerate(segs): s["sid"] = s["sid"] or f"unknown-{i}"
+for s in sorted(segs, key=lambda s: s["at"]): by_sid.setdefault(s["sid"], []).append(s)
+for sid, ss in by_sid.items():
+    L = lanes.setdefault(ss[0]["lane"], {"cost": 0.0, "tok": {k[0]: 0 for k in KINDS}, "partial": 0, "sessions": 0, "keys": set(), "start": None, "end": 0})
+    L["sessions"] += 1
+    done = [j for j, s in enumerate(ss) if s["result"]]
+    if done:
+        r = ss[done[-1]]["result"]; L["cost"] += float(r.get("total_cost_usd") or 0)
+        for mu in (r.get("modelUsage") or {}).values():
+            for name, _, camel in KINDS: L["tok"][name] += int(mu.get(camel) or 0)
+    for s in ss[(done[-1] + 1) if done else 0:]:
+        L["partial"] += sum(int(u.get(snake) or 0) for u in s["after"].values() for _, snake, _ in KINDS)
+    for s in ss:
+        L["keys"].add(s["key"]); L["end"] = max(L["end"], s["mtime"])
+        if s["at"] and (L["start"] is None or s["at"] < L["start"]): L["start"] = s["at"]
+def gh(*a):
+    p = subprocess.run(["gh", *a, "--repo", repo], capture_output=True, text=True)
+    if p.returncode: raise RuntimeError(p.stderr.strip()[:120])
+    return p.stdout.split()
+tot = {"cost": 0.0, "partial": 0}
+for lane in sorted(lanes):
+    if want and lane != want: continue
+    L = lanes[lane]; prs, failed, rounds = [], 0, 0
+    for k in sorted(L["keys"]):
+        try: rep = open(f"{H}/reports/{k}.md", errors="replace").read()
+        except OSError: continue
+        prs += [int(n) for n in re.findall(r"^PR #(\d+) ", rep, re.M)]
+        failed += len(re.findall(r"^ARC_FAILED:", rep, re.M)); rounds += sum(int(n) for n in re.findall(r"^CODEX: converged in (\d+) round", rep, re.M))
+    prs = sorted(set(prs)); merged = []
+    for n in prs:
+        try: out = open(f"{H}/watch/merge-{n}.out", errors="replace").read()
+        except OSError: continue
+        if re.search(rf"^#{n} MERGED [0-9a-f]+", out, re.M): merged.append(n)
+    try:
+        refs = sorted({int(i) for n in merged for i in gh("pr", "view", str(n), "--json", "closingIssuesReferences", "--jq", ".closingIssuesReferences[].number")})
+        closed = [i for i in refs if gh("issue", "view", str(i), "--json", "state", "--jq", ".state") == ["CLOSED"]]
+        issues = f"{len(closed)}" + (f" ({' '.join(f'#{i}' for i in closed)})" if closed else "")
+    except RuntimeError as err: issues = f"? (gh: {err})"
+    wall = "?"
+    if L["start"]:
+        secs = L["end"] - datetime.datetime.strptime(L["start"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()
+        wall = f"{int(secs // 3600)}h{int(secs % 3600 // 60):02d}m"
+    tok = " ".join(f"{k} {v}" for k, v in L["tok"].items())
+    part = f" + {L['partial']} unpriced tokens from killed runs" if L["partial"] else ""
+    print(f"{lane}: ${L['cost']:.2f} API-equivalent{part}; {L['sessions']} session(s); tokens {tok}; wall {wall}; "
+          f"PRs {' '.join(f'#{n}' for n in prs) or '-'} (merged {' '.join(f'#{n}' for n in merged) or '-'}); issues closed {issues}; "
+          f"failed arcs {failed}; Codex rounds {rounds}")
+    tot["cost"] += L["cost"]; tot["partial"] += L["partial"]
+if not want and len(lanes) > 1: print(f"total: ${tot['cost']:.2f} API-equivalent" + (f" + {tot['partial']} unpriced tokens" if tot["partial"] else ""))
+if want and want not in lanes: print(f"no lead logs for lane {want}", file=sys.stderr); sys.exit(1)
+PY
+  ;;
 *) echo "orchy: unknown subcommand $cmd" >&2; usage 1;;
 esac

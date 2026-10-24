@@ -1,0 +1,3 @@
+claude-usage: acct — 80% left
+{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-0000000000a3"}
+{"type":"result","subtype":"success","total_cost_usd":0.25,"modelUsage":{"claude-opus-5-5":{"inputTokens":1,"outputTokens":2,"cacheReadInputTokens":3,"cacheCreationInputTokens":4}}}

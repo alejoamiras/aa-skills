@@ -145,6 +145,16 @@ if "$ORCHY" lock >/dev/null 2>&1; then fail "lock did not refuse a live holder";
 touch "$ORCHY_HOME/orchestrator.lock.takeover"
 kill $hp; wait $hp 2>/dev/null || true; "$ORCHY" lock | grep -q '^locked' || fail "lock did not replace a stale holder"; "$ORCHY" unlock >/dev/null
 for f in "$T"/cap/*/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/null || true; done; for f in "$MOCK_DIR"/gc.*; do kill "$(cat "$f")" 2>/dev/null || true; done
+# receipt: a session counts its last (running-total) result once; a killed run adds deduped, unpriced usage; only closed issues count
+HR="$T/cap/rcpt"; mkdir -p "$HR"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HR/"; cp -r "$HERE/tests/mocks/orchy/receipt/." "$HR/"
+jq -n '{closingIssuesReferences:[{number:3},{number:4}]}' > "$MOCK_DIR/pr-21.json"; jq -n '{state:"CLOSED"}' > "$MOCK_DIR/issue-3.json"; jq -n '{state:"OPEN"}' > "$MOCK_DIR/issue-4.json"
+o=$(ORCHY_HOME="$HR" "$ORCHY" receipt) || fail "receipt: $o"
+grep -qF 'r: $1.50 API-equivalent + 27 unpriced tokens from killed runs; 2 session(s); tokens in 150 out 20 cache-read 1500 cache-write 60;' <<<"$o" || fail "receipt cost or tokens: $o"
+grep -qF 'PRs #21 #22 (merged #21); issues closed 1 (#3); failed arcs 1; Codex rounds 2' <<<"$o" || fail "receipt joins: $o"
+grep -qF 'q: $0.25 API-equivalent; 1 session(s); tokens in 1 out 2 cache-read 3 cache-write 4; wall ?;' <<<"$o" || fail "receipt of a log without markers: $o"
+grep -qF 'total: $1.75 API-equivalent + 27 unpriced tokens' <<<"$o" || fail "receipt total: $o"
+[ "$(ORCHY_HOME="$HR" "$ORCHY" receipt q | wc -l)" = 1 ] || fail "receipt <lane> printed other lanes"
+if ORCHY_HOME="$HR" "$ORCHY" receipt nope >/dev/null 2>&1; then fail "receipt of an unknown lane succeeded"; fi
 # the page toolchain's own smoke
 [ -x "$K/page/smoke.sh" ] || fail "page/smoke.sh missing"; bash "$K/page/smoke.sh" > "$T/page.log" 2>&1 || { tail -n 20 "$T/page.log"; fail "page smoke"; }
 # no project names, home paths or roster names anywhere in the skill
