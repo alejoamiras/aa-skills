@@ -95,6 +95,6 @@ A finding becomes a change only once its path is written (initial conditions, ac
 - Leads and their reviewers run as the owner's user, so the brief's never-open line, not the OS, keeps them out of the ask ledger.
 - `ask file` that times out after GitHub accepted the issue, or a crash between the create and the `filed` row, leaves an issue the ledger does not know: reconcile by hand, never retry.
 - `seen/` advances when a `wait` reports a change, not when the orchestrator handles it: a session that dies in between loses that event to every later `wait`, and only a resume's reread (`updated:>=`) finds it again.
-- A from-scratch run interrupted after it captured `ask1` and before `origin` exists is not resumed: the guard refuses the half-made folder, and the owner finishes by hand or starts over.
+- A from-scratch run interrupted after it captured `ask1` and before `origin` exists is not resumed: step 3 refuses the name's existing home or ledger and the guard refuses a folder with scaffold files; the owner finishes by hand, removes that home and ledger, or picks another name.
 - A private repository on a free plan cannot have a ruleset, so only orchy's merge policy enforces its recorded checks; anyone with push rights can land on `main` unchecked.
 - The close-out guard reads open PRs before taking the spawn lock: a close-out lead that opens its PR and exits inside that window is seen by neither check, and a second close-out can start. Closing it needs a network call under the lock.

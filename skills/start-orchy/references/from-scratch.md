@@ -1,6 +1,6 @@
 # From scratch: an empty folder becomes a repository
 
-`/start-orchy` in an empty folder runs this procedure, in the owner's session, by the orchestrator itself (never a lead). It hands over to Phase 0 step 2 with a repository on GitHub, a green gate on `main`, and what to build captured as `ask1`. Every step stops on failure and names the step and the reason; nothing here retries a create or a push. A run interrupted after step 3 is not resumed: the folder is no longer empty and has no `origin`, so the guard refuses it, and the owner decides whether to finish by hand or start over in a fresh folder.
+`/start-orchy` in an empty folder runs this procedure, in the owner's session, by the orchestrator itself (never a lead). It hands over to Phase 0 step 2 with a repository on GitHub, a green gate on `main`, and what to build captured as `ask1`. Every step stops on failure and names the step and the reason; nothing here retries a create or a push. A run interrupted once step 3 has captured the ask is not resumed: step 3 refuses a home or ledger that already exists for the name, the guard refuses a folder with scaffold files, and the owner finishes by hand, removes that home and ledger, or picks another name.
 
 ## 1. Guard
 
@@ -37,11 +37,11 @@ Then one `AskUserQuestion`, recommended answer first:
 
 ## 3. Capture the ask, before any scaffold file
 
-`orchy.sh` runs before the repository exists when every call carries `ORCHY_REPO=<owner>/<name>` (until step 6 adds `origin`):
+`orchy.sh` runs before the repository exists when every call carries `ORCHY_REPO=<owner>/<name>` (until step 6 adds `origin`). First, the directory `ORCHY home` prints must not exist: an earlier run for this name got that far, so stop as the header says.
 
 1. `git init -b main`, or, when the empty `.git` exists, `git symbolic-ref HEAD refs/heads/main`.
 2. The home `ORCHY home` prints, made with mode 700, holding `orchy.json` from `examples/orchy.example.json` without its `bootstrap` and `approved_at` keys (Phase 0 step 4 writes them), with `repo` and `trunk: "main"`, and `local.json` per Phase 0 step 4 from step 2's answers, `prompt_ban` included.
-3. `ORCHY ask add <what to build, the owner's words>` prints `ask1`; `ORCHY ask public ask1 <the signed description>` runs the same `check-public` every handoff does. A refusal goes back to the owner with a new wording; nothing is written into the folder until the wording passes.
+3. `ORCHY ask list --all` prints nothing (an ask there is an earlier run's: stop as the header says); then `ORCHY ask add <what to build, the owner's words>` prints `ask1`, and `ORCHY ask public ask1 <the signed description>` runs the same `check-public` every handoff does. A refusal goes back to the owner with a new wording; nothing is written into the folder until the wording passes.
 
 ## 4. Scaffold
 
@@ -89,6 +89,7 @@ Then one `AskUserQuestion`, recommended answer first:
      pull_request:
    permissions:
      contents: read
+     pull-requests: read
    jobs:
      scan:
        runs-on: ubuntu-latest
@@ -102,7 +103,7 @@ Then one `AskUserQuestion`, recommended answer first:
              GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
    ```
 
-   The action needs a license on an org-owned repository: there, run a pinned gitleaks release, checked against its published checksums, with `gitleaks git --redact --no-banner`. Locally, `gitleaks git --pre-commit --staged --redact --no-banner` is the first line of `.husky/pre-commit`.
+   On a pull request the action lists its commits through the API, which `pull-requests: read` allows; without it every PR scan fails with a 403 before scanning. The action needs a license on an org-owned repository: there, run a pinned gitleaks release, checked against its published checksums, with `gitleaks git --redact --no-banner`. Locally, `gitleaks git --pre-commit --staged --redact --no-banner` is the first line of `.husky/pre-commit`.
 
 ## 5. First commit
 
