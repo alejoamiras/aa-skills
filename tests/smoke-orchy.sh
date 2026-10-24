@@ -4,7 +4,7 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd); K="$HERE/skills/start-orchy"; ORCHY="$K/scripts/orchy.sh"
 T=$(mktemp -d -t orchy-smoke-XXXX); trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
-export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_CAPACITY_ROOT="$T/cap" ORCHY_HOME="$T/cap/home" ORCHY_REPO=example/app ORCHY_WATCH_SLEEP=1 ORCHY_PROFILE_DIR="$T/profile" ORCHY_ASKS_DIR="$T/asks"; mkdir -p "$MOCK_DIR"
+export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_CAPACITY_ROOT="$T/cap" ORCHY_HOME="$T/cap/home" ORCHY_REPO=example/app ORCHY_WATCH_SLEEP=1 ORCHY_PROFILE_DIR="$T/profile" ORCHY_ASKS_DIR="$T/asks" ORCHY_GITLEAKS=fake-gitleaks; mkdir -p "$MOCK_DIR"
 # a real local origin with a dev branch, so wt-new's fetch and reset work
 git init -q --bare "$T/origin.git"; git init -q -b dev "$T/repo"; git -C "$T/repo" remote add origin "$T/origin.git"
 (cd "$T/repo" && git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -q --allow-empty -m init && git push -q origin dev)
@@ -250,8 +250,9 @@ printf 'You are a subagent. Don'"'"'t run memo.\nRead your brief.\n' > "$T/boile
 # check-public: leak, sensitive word, a planted secret (assembled here, so this file carries none), and failing closed
 printf 'see %s/someone/x\n' "/ho""me" > "$T/p1"; printf 'a vulnerability in login\n' > "$T/p2"; printf 'clean text\n' > "$T/p0"
 printf 'aws_access_key_id = %s\naws_secret_access_key = %s\n' "AKIA""QYLPMN5HHHFPZAM2" "wJalrXUtnFEMI/K7MDENG/bPxRfiCY""EXAMPLEKEYzz" > "$T/p3"
-"$ORCHY" check-public "$T/p0" >/dev/null || fail "check-public refused clean text"
-for n in 1 2 3; do if "$ORCHY" check-public "$T/p$n" >/dev/null 2>&1; then fail "check-public accepted p$n: $(cat "$T/p$n")"; fi; done
+ORCHY_GITLEAKS=gitleaks "$ORCHY" check-public "$T/p0" >/dev/null || fail "check-public refused clean text"
+for n in 1 2; do if "$ORCHY" check-public "$T/p$n" >/dev/null 2>&1; then fail "check-public accepted p$n: $(cat "$T/p$n")"; fi; done
+o=$(ORCHY_GITLEAKS=gitleaks "$ORCHY" check-public "$T/p3" 2>&1 || true); grep -q 'SECRET' <<<"$o" || fail "the real gitleaks missed the planted secret: $o"
 "$ORCHY" check-public --no-sensitive "$T/p2" >/dev/null || fail "--no-sensitive still applied the sensitive pattern"
 o=$(ORCHY_GITLEAKS=no-such-gitleaks "$ORCHY" check-public "$T/p0" 2>&1; echo "rc=$?"); grep -q 'rc=2' <<<"$o" || fail "check-public without gitleaks did not refuse: $o"
 # ask file: every refusal leaves no create call; an exact title, a failed search and a failed create file nothing; one lock spans it all
@@ -268,6 +269,48 @@ o=$(A drop "$f" "never mind" 2>&1 || true); wait "$fp"
 grep -q "$f filed as #77" "$T/file.out" || fail "file: $(cat "$T/file.out")"; grep -q "$f is filed" <<<"$o" || fail "a drop during the create was not refused after it: $o"
 [ "$(A show "$f" | sed '/^-- history/,$d' | jq -r '"\(.state) \(.issue)"')" = "filed 77" ] || fail "filed state"
 rm -f "$MOCK_DIR/issues.json"
+# asks in lanes: the lane brief carries them; close-lane reads each report's last ASKS: line in lane order
+"$ORCHY" render lane-brief.md LANE=cl ISSUES=none ASKS="ask9: Add a greeting helper" TIER=light SCOPE=s DECISIONS=none OUT=none VERIFY=none ARCS=a1 OTHER_LEADS=none | grep -qx 'ask9: Add a greeting helper' || fail "lane brief does not render ASKS"
+c=(); for i in 1 2 3 4 5; do c[i]=$(A add "close-lane case $i"); A public "${c[i]}" "Close-lane requirement number $i" >/dev/null; A lane "${c[i]}" cl "a repo change" >/dev/null || fail "lane ${c[i]}"; done
+A drop "${c[4]}" "withdrawn" >/dev/null
+RP="$ORCHY_HOME/reports"; mkdir -p "$RP"
+printf 'LEAD_DONE\nASKS: delivered %s %s\n' "${c[1]}" "${c[2]}" > "$RP/cl-plan.md"
+printf 'LEAD_DONE\nPR #31 add it ready checks: green\nASKS: delivered %s %s; left out %s the API it needs is missing\n' "${c[1]}" "${c[5]}" "${c[2]}" > "$RP/cl-a1.md"
+printf 'LEAD_DONE\nPR #32 retry ready checks: green\nASKS: left out %s not needed\n' "${c[5]}" > "$RP/cl-arc1.md"
+printf 'LEAD_DONE\nPR #40 other ready checks: green\nASKS: delivered %s\n' "${c[3]}" > "$RP/cl-a11y-a1.md"
+mkdir -p .claude/worktrees/cl; o=$(A close-lane cl 2>&1 || true); grep -q 'still has its worktree' <<<"$o" || fail "close-lane with the worktree present: $o"; rmdir .claude/worktrees/cl
+A close-lane cl > "$T/cl.out" || fail "close-lane: $(cat "$T/cl.out")"
+st() { A show "$1" | sed '/^-- history/,$d' | jq -r '"\(.state) \(.notes[-1])"'; }
+[ "$(st "${c[1]}")" = "done delivered in cl PR #31" ] || fail "delivered ask: $(st "${c[1]}")"
+[ "$(st "${c[2]}")" = "open lane cl closed without delivering it: the API it needs is missing" ] || fail "a later left-out did not win: $(st "${c[2]}")"
+[ "$(st "${c[3]}")" = "open lane cl closed without delivering it: not reported" ] || fail "an unreported ask (another lane's report ignored): $(st "${c[3]}")"
+[ "$(st "${c[4]}")" = "dropped withdrawn" ] || fail "a dropped ask was touched: $(st "${c[4]}")"
+[ "$(st "${c[5]}")" = "open lane cl closed without delivering it: conflicting reports a1/arc1" ] || fail "a1/arc1 conflict: $(st "${c[5]}")"
+o=$(A lane "${c[3]}" cl "again" 2>&1 || true); grep -q 'lane cl is closed' <<<"$o" || fail "ask lane reused a closed slug: $o"
+o=$("$ORCHY" wt-new cl 2>&1 || true); grep -q 'never reused' <<<"$o" || fail "wt-new recreated a closed lane: $o"
+# snapshot names asks by id and state only, flags an ask whose lane is gone, and lists no untriaged issue for an empty backlog
+g=$(A add "my sister Ana wants the gone lane"); A public "$g" "Gone-lane requirement" >/dev/null; A lane "$g" gone-1 "a repo change" >/dev/null
+echo '[]' > "$MOCK_DIR/issues.json"; : > "$ORCHY_HOME/triaged.txt"; "$ORCHY" snapshot > "$T/snap.out" 2>&1
+sed -n '/^-- asks/,/^--/p' "$T/snap.out" | grep -q "^$g lane gone-1 .*lane closed: run ask close-lane gone-1" || fail "snapshot asks: $(sed -n '/^-- asks/,/^--/p' "$T/snap.out")"
+grep -q 'Ana\|close-lane case' "$T/snap.out" && fail "snapshot printed an ask's text"
+if sed -n '/^-- untriaged/,/^--/p' "$T/snap.out" | grep -q '^#'; then fail "untriaged issues listed for an empty backlog"; fi
+r=$(A add "receipt case"); A public "$r" "Receipt requirement" >/dev/null; A lane "$r" r "a repo change" >/dev/null; A "done" "$r" "delivered" >/dev/null
+o=$(ORCHY_HOME="$HR" "$ORCHY" receipt r); grep -qF "asks done 1 ($r)" <<<"$o" || fail "receipt asks: $o"
+# launch and say: an ask reaches a lead only as its stored wording, laned there, not held, never copied from the owner
+l=$(A add "Please add the greeting on the home page because my landlord asked twice"); A public "$l" "Show a greeting on the home page" >/dev/null; A lane "$l" x "a repo change" >/dev/null
+lt() { printf 'You are a subagent.\n%s\n' "$1" > "$ORCHY_HOME/prompts/x-lt.md"; "$ORCHY" launch x-lt x acct-a 2>&1 || true; }
+o=$(lt "$l: Show a greeting"); grep -q 'not its stored public wording' <<<"$o" || fail "launch with a reworded ask line: $o"
+o=$(lt "$l: Show a greeting on the home page, a vulnerability fix"); grep -q 'SENSITIVE' <<<"$o" || fail "launch with a sensitive ask line: $o"
+o=$(lt "$r: Receipt requirement"); grep -q "$r is not laned to x" <<<"$o" || fail "launch with another lane's ask: $o"
+o=$(lt "Context: on the home page because my landlord asked twice"); grep -q 'copies the owner' <<<"$o" || fail "launch with a copied sentence: $o"
+printf 'Lane x for acct-a\n' > "$ORCHY_HOME/briefs/x.md"; o=$(lt "$l: Show a greeting on the home page"); grep -q 'banned text' <<<"$o" || fail "launch with a banned lane brief: $o"; rm "$ORCHY_HOME/briefs/x.md"
+o=$(lt "$l: Show a greeting on the home page"); grep -qE 'refused: (the|.* is not laned|.*copies)|SENSITIVE|LEAK' <<<"$o" && fail "launch refused a clean ask line: $o"
+printf 'You are a subagent.\n' > "$ORCHY_HOME/prompts/x-say.md"; MOCK_LEAD_SECS=30 "$ORCHY" launch --force-cap x-say x acct-b >/dev/null || fail "launch x-say"
+o=$("$ORCHY" say x-say "remember: home page because my landlord asked twice" 2>&1 || true); grep -q 'copies the owner' <<<"$o" || fail "say queued a copied sentence: $o"
+o=$("$ORCHY" say x-say "$(cat "$T/p3")" 2>&1 || true); grep -q 'SECRET' <<<"$o" || fail "say queued a secret: $o"
+o=$("$ORCHY" say x-say "$l: Show a greeting" 2>&1 || true); grep -q 'not its stored public wording' <<<"$o" || fail "say queued a reworded ask: $o"
+"$ORCHY" say x-say "fix the review finding in $l first" | grep -q queued || fail "say refused an ordinary note naming a finding"
+"$ORCHY" stop x-say >/dev/null
 # the page toolchain's own smoke
 [ -x "$K/page/smoke.sh" ] || fail "page/smoke.sh missing"; bash "$K/page/smoke.sh" > "$T/page.log" 2>&1 || { tail -n 20 "$T/page.log"; fail "page smoke"; }
 # no project names, home paths or roster names anywhere in the skill

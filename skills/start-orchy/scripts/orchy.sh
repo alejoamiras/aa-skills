@@ -140,7 +140,7 @@ FOLD='reduce (inputs | fromjson? | select(type == "object" and (.id | type) == "
         | if $r.state == "lane" then .lane = $r.lane elif $r.state == "open" or $r.state == "dropped" then .lane = null else . end
         | if $r.state == "filed" then .issue = $r.issue else . end
       else . end))'
-fold() { jq -Rn "$FOLD" "$LEDGER"; }
+fold() { if [ -f "$LEDGER" ]; then jq -Rn "$FOLD" "$LEDGER"; else echo '{}'; fi; }
 ask_get() { fold | jq -c --arg id "$1" '.[$id] // empty'; }
 ask_moves() { case "$1>$2" in open\>lane|open\>done|open\>dropped|open\>filed|lane\>done|lane\>open|lane\>dropped|lane\>filed|done\>open|dropped\>open) return 0;; esac; return 1; }
 ASK_HOLD='[.notes[] | select(test("^(waiting:|answered:|wording ok)"))][-1] // "" | select(startswith("waiting:"))'
@@ -148,6 +148,19 @@ ask_ready() { # ask_ready <fold-json> <id>: a handoff needs the stored restateme
   local w; [ -n "$(jq -r '.public // empty' <<<"$1")" ] || { echo "refused: $2 has no public wording; ask public $2 first" >&2; return 1; }
   # only control notes decide a hold, so an ordinary note never clears one
   w=$(jq -r "$ASK_HOLD" <<<"$1"); [ -z "$w" ] || { echo "refused: $2 is $w; record 'answered: …' or 'wording ok' with ask note first" >&2; return 1; }
+}
+ask_lines() { # ask_lines <slug|-> [--no-sensitive] <file>...: each `askN: ` line is that ask's stored wording, laned here (anywhere for -), not held
+  local s=$1 m id t a rc=0 tf nosens=(); shift; [ "${1:-}" = --no-sensitive ] && { nosens=(--no-sensitive); shift; }
+  tf=$(mktemp "$H/scratch/asklines.XXXXXX"); grep -hE '\bask[0-9]+\b' "$@" > "$tf"
+  if [ -s "$tf" ]; then "$0" check-public "${nosens[@]}" "$tf" || rc=1; fi
+  while IFS= read -r m; do   # one ask per line: the wording runs to the end of it
+    id=${m%%: *}; t=${m#*: }; t=${t%"${t##*[![:space:]]}"}; a=$(ask_get "$id")
+    [ -n "$a" ] || { echo "refused: $id is not in the ask ledger" >&2; rc=1; continue; }
+    [ "$(jq -r '.public // empty' <<<"$a")" = "$t" ] || { echo "refused: the $id line is not its stored public wording (ask show $id)" >&2; rc=1; }
+    jq -e --arg s "$s" '.state == "lane" and ($s == "-" or .lane == $s)' <<<"$a" >/dev/null || { echo "refused: $id is not laned$([ "$s" = - ] || echo " to $s")" >&2; rc=1; }
+    ask_ready "$a" "$id" || rc=1
+  done < <(grep -ohE '\bask[0-9]+: .*' "$tf")
+  rm -f "$tf"; return $rc
 }
 lane_reported() { # a lane's reports outlive its worktree: their slug never names a new lane
   local f b; for f in "$H/reports/$1"-*.md; do [ -f "$f" ] || continue; b=$(basename "$f" .md); [[ "${b#"$1"-}" =~ ^(plan|a[0-9]+|arc[0-9]+|closeout)$ ]] && return 0; done; return 1
@@ -212,7 +225,7 @@ check-public)
   exit $rc;;
 ask)
   need flock; ledger_ok || exit 1; sub=${1:-}; shift || true
-  case "$sub" in add|list) ;; public|said|note|done|drop|reopen|show|lane|file)
+  case "$sub" in add|list|close-lane) ;; public|said|note|done|drop|reopen|show|lane|file)
     [[ "${1:-}" =~ ^ask[0-9]+$ ]] || { echo "usage: ask $sub <askN> ..." >&2; exit 1; }; id=$1; shift;;
     *) echo "usage: ask add|public|said|note|lane|done|drop|reopen|list|show|file ... (orchy.sh help)" >&2; exit 1;; esac
   row() { jq -nc --arg id "$id" --arg at "$(now)" "$@"; }
@@ -286,6 +299,43 @@ ask)
       [ -n "$n" ] || { echo "AMBIGUOUS: gh issue create printed no issue number ($url). Reconcile $id by hand; never retry" >&2; return 1; }
       append_row "$(row --argjson n "$n" '{id: $id, at: $at, state: "filed", issue: $n}')" && echo "$id filed as #$n"; }
     with_ledger ask_file;;
+  close-lane)
+    s=${1:-}; [[ "$s" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || { echo "usage: ask close-lane <slug>" >&2; exit 1; }
+    [ ! -d "$WT_ROOT/$s" ] || { echo "refused: lane $s still has its worktree; close-lane runs after teardown" >&2; exit 1; }
+    k=$(lead_rows | awk -v s="$s" '{x = substr($1, length(s) + 2)} index($1, s "-") == 1 && x ~ /^(plan|a[0-9]+|arc[0-9]+|closeout)$/ {print $1; exit}')
+    [ -z "$k" ] || { echo "refused: lead $k of lane $s is alive" >&2; exit 1; }
+    # Each report's last ASKS: line, in lane order (plan, then a<n>/arc<n> by n, then closeout); the latest mention wins.
+    # a<n> and arc<n> (a fresh retry beside an auto-continued arc) that disagree on an ask leave it unresolved.
+    rd="$H/reports"; ns=$(for f in "$rd/$s"-a*.md; do [ -f "$f" ] && basename "$f" .md; done | sed -nE "s/^$(printf '%s' "$s" | sed 's/[.]/\\./g')-(a|arc)([0-9]+)$/\2/p" | sort -nu)
+    mentions() { [ -f "$rd/$1.md" ] || return 0
+      { grep -E '^ASKS:' "$rd/$1.md" | tail -n 1; grep -oE '^PR #[0-9]+' "$rd/$1.md" | tail -n 1; } | awk '
+        /^PR #/ { pr = substr($2, 2); next }
+        { sub(/^ASKS:[ \t]*/, ""); n = split($0, seg, /;[ \t]*/)
+          for (i = 1; i <= n; i++) { k = split(seg[i], w, /[ \t]+/)
+            if (w[1] == "delivered") { for (j = 2; j <= k; j++) if (w[j] ~ /^ask[0-9]+$/) out[++m] = w[j] "\tD" }
+            else if (w[1] == "left" && w[2] == "out" && w[3] ~ /^ask[0-9]+$/) { r = seg[i]; sub(/^left[ \t]+out[ \t]+ask[0-9]+[ \t]*/, "", r); out[++m] = w[3] "\tL\t" (r == "" ? "no reason given" : r) } } }
+        END { for (i = 1; i <= m; i++) { split(out[i], f, "\t"); print out[i] (f[2] == "D" ? "\t" (pr == "" ? "?" : pr) : "") } }'; }
+    declare -A res=()
+    while IFS=$'\t' read -r i kd x; do res[$i]="$kd"$'\t'"$x"; done < <(mentions "$s-plan")
+    for n in $ns; do
+      declare -A a1=() a2=()
+      while IFS=$'\t' read -r i kd x; do a1[$i]="$kd"$'\t'"$x"; done < <(mentions "$s-a$n")
+      while IFS=$'\t' read -r i kd x; do a2[$i]="$kd"$'\t'"$x"; done < <(mentions "$s-arc$n")
+      for i in "${!a1[@]}" "${!a2[@]}"; do
+        if [ -n "${a1[$i]:-}" ] && [ -n "${a2[$i]:-}" ] && [ "${a1[$i]%%$'\t'*}" != "${a2[$i]%%$'\t'*}" ]; then res[$i]="C"$'\t'"conflicting reports a$n/arc$n"
+        else res[$i]=${a2[$i]:-${a1[$i]}}; fi
+      done; unset a1 a2
+    done
+    while IFS=$'\t' read -r i kd x; do res[$i]="$kd"$'\t'"$x"; done < <(mentions "$s-closeout")
+    ask_close() { local id kd x; for id in $(fold | jq -r --arg s "$s" 'map(select(.state == "lane" and .lane == $s)) | .[].id'); do
+        kd=${res[$id]:-}; x=${kd#*$'\t'}; kd=${kd%%$'\t'*}
+        case "$kd" in
+        D) append_row "$(row --arg t "delivered in $s PR #$x" '{id: $id, at: $at, state: "done", note: $t}')" && echo "$id done (PR #$x)";;
+        *) case "$kd" in L|C) ;; *) x="not reported";; esac
+           append_row "$(row --arg t "lane $s closed without delivering it: $x" '{id: $id, at: $at, state: "open", note: $t}')" && echo "$id reopened: $x";;
+        esac
+      done; }
+    with_ledger ask_close;;
   esac;;
 wt-new)
   need agent-worktree; install=$(cfg '.install // empty'); rc=0
@@ -293,6 +343,7 @@ wt-new)
   for s in "$@"; do
     out="$H/wt/$s.out"; w="$WT_ROOT/$s"
     [ -d "$w" ] && { echo "$s: worktree exists at $w; refusing"; rc=1; continue; }
+    lane_reported "$s" && { echo "$s: lane $s has reports from an earlier run; a closed lane's slug is never reused"; rc=1; continue; }
     { echo "== $(now) new $s"; } >> "$out"
     # never pipe `agent-worktree new` into head: SIGPIPE kills it after the branch exists and before the directory does
     if ! (cd "$ROOT" && agent-worktree new "$s" --no-start) >> "$out" 2>&1; then echo "$s: agent-worktree new failed (see $out)"; rc=1; continue; fi
@@ -317,7 +368,12 @@ launch|resume)
   fi
   [ "$cmd" = resume ] && [ -z "$sid" ] && { echo "usage: resume <key> <slug> <account> <session-id>" >&2; exit 1; }
   p="$H/prompts/$k.md"; [ -f "$p" ] || { echo "orchy: no prompt $p" >&2; exit 1; }
-  "$0" check-text "$p" || exit 1
+  # Everything the lead reads passes the ban and the copy check; the owner's words reach it only as stored askN lines.
+  reads=("$p"); for b in _common _planner _implementer "$w"; do [ -f "$H/briefs/$b.md" ] && reads+=("$H/briefs/$b.md"); done
+  "$0" check-text "${reads[@]}" || exit 1
+  "$0" check-private "${reads[@]}" || exit 1
+  lb=(); [ -f "$H/briefs/$w.md" ] && lb=("$H/briefs/$w.md")
+  ask_lines "$w" "$p" "${lb[@]}" || exit 1
   d="$WT_ROOT/$w"; [ -d "$d" ] || { echo "orchy: no worktree $d" >&2; exit 3; }
   model=$(cfg '.leads.model // "opus"'); l1=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo "?")
   case "$(cfg '.leads.permission_mode // "auto"')" in
@@ -372,7 +428,9 @@ say)
   [[ "$k" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] && [ -n "$t" ] || { echo "usage: say <key> <text>" >&2; exit 1; }
   [ -f "$H/leads/$k.started" ] && read -r pid st _ < "$H/leads/$k.started" && alive "$pid" "$st" || { echo "refused: no live lead $k; fold the note into its next prompt" >&2; exit 1; }
   # leads quote their instructions into committed plans, so a note passes the same ban as a prompt
-  tf="$H/scratch/say.$$"; printf '%s\n' "$t" > "$tf"; "$0" check-text "$tf"; rc=$?; rm -f "$tf"; [ "$rc" = 0 ] || exit 1
+  # the sensitive pattern stays off: notes routinely name review findings
+  tf="$H/scratch/say.$$"; printf '%s\n' "$t" > "$tf"
+  { "$0" check-text "$tf" && "$0" check-public --no-sensitive "$tf" && ask_lines - --no-sensitive "$tf"; }; rc=$?; rm -f "$tf"; [ "$rc" = 0 ] || exit 1
   line=$(jq -nc --arg t "$(now)" --arg x "$t" '{at: $t, text: $x}')
   [ "$(printf '%s' "$line" | wc -c)" -le 3072 ] || { echo "refused: a note is at most 3 KiB once serialized; put the detail in a file under the lane's scratch dir and name it" >&2; exit 1; }
   ( flock -w 5 8 || exit 1; printf '%s\n' "$line" >&8 ) 8>>"$H/inbox/$k.jsonl" || { echo "refused: inbox lock busy" >&2; exit 1; }
@@ -401,6 +459,16 @@ snapshot)
   echo "-- inbox"; for f in "$H"/inbox/*.jsonl; do [ -f "$f" ] || continue
     c=$(cat "${f%.jsonl}.cursor" 2>/dev/null); [[ "$c" =~ ^[0-9]{1,15}$ ]] && c=$((10#$c)) || c=0
     n=$(tail -c +"$((c + 1))" "$f" | grep -c ''); [ "$n" -gt 0 ] && echo "$(basename "$f" .jsonl): $n undelivered"; done
+  # ids and states only: the owner's words stay in the ledger (ask show)
+  echo "-- asks"; live=$(lead_rows | cut -d' ' -f1)
+  fold | jq -r --argjson now "$(date +%s)" 'map(select(.state == "open" or .state == "lane")) | sort_by(.id | ltrimstr("ask") | tonumber? // 0) | .[]
+    | ($now - (.at | fromdateiso8601? // $now)) as $s
+    | "\(.id) \(.state) \(.lane // "-") \(if $s < 3600 then "\($s / 60 | floor)m" else "\($s / 3600 | floor)h" end)"
+      + (if .public then "" else " no-public-wording" end) + (if ([ '"$ASK_HOLD"' ] | length) > 0 then " waiting" else "" end)' |
+  while read -r i st l rest; do
+    if [ "$st" = lane ] && [ ! -d "$WT_ROOT/$l" ] && ! grep -qE "^$l-(plan|a[0-9]+|arc[0-9]+|closeout)$" <<<"$live"; then rest="$rest lane closed: run ask close-lane $l"; fi
+    echo "$i $st $l $rest"
+  done
   echo "-- watchers"; for f in "$H"/watch/*.pid; do [ -f "$f" ] || continue; n=$(basename "$f" .pid); if watcher_alive "$f"; then echo "alive $n pid $(cut -d' ' -f1 "$f")"; else echo "ended $n: $(tail -n 1 "$H/watch/$n.out" 2>/dev/null | cut -c1-120)"; fi; done
   echo "-- trunk"; if t=$(trunk_state); then f=$(tail -n +2 <<<"$t" | paste -sd, -); echo "$TRUNK ${t:0:8}: ${f:+RED }${f:-no failed trunk check}"; else echo "(trunk checks unreadable)"; fi
   echo "-- open PRs"; gh pr list --repo "$REPO" --state open --json number,title,headRefOid,mergeable,mergeStateStatus,isDraft,baseRefName --jq '.[]|"#\(.number) \(.headRefOid[0:8]) \(.mergeable) \(.mergeStateStatus) draft=\(.isDraft) -> \(.baseRefName) \(.title)"' 2>/dev/null || echo "(gh pr list failed)"
@@ -544,9 +612,10 @@ teardown)
   [ -n "$pr" ] || { echo "$s: HEAD $head is not the head of a PR merged into $TRUNK from $b; refusing"; exit 2; }
   (cd "$ROOT" && git worktree remove --force "$W" && git branch -D "$b" >/dev/null && agent-worktree done "$q" --forget >/dev/null 2>&1; git worktree prune); echo "$s: hand-removed (branch $b at $head = merged PR #$pr)";;
 receipt)
-  need gh; python3 -I - "$H" "$REPO" "${1:-}" <<'PY'
+  need gh; python3 -I - "$H" "$REPO" "${1:-}" "$(fold | jq -c 'map_values({state, lane})')" <<'PY'
 import sys, os, re, json, glob, subprocess, datetime
 H, repo, want = sys.argv[1:4]
+asks = json.loads(sys.argv[4] or "{}")   # ask id -> {state, lane}; never the owner's words
 # keys are <lane>-plan, <lane>-a<n>, <lane>-closeout; only logs written before invocation markers need the name
 legacy_lane = lambda k: re.sub(r"-(plan|a\d+|closeout|shots[\w-]*)$", "", k)
 KINDS = (("in", "input_tokens", "inputTokens"), ("out", "output_tokens", "outputTokens"),
@@ -616,10 +685,11 @@ for lane in sorted(lanes):
         secs = L["end"] - datetime.datetime.strptime(L["start"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()
         wall = f"{int(secs // 3600)}h{int(secs % 3600 // 60):02d}m"
     tok = " ".join(f"{k} {v}" for k, v in L["tok"].items())
+    done_asks = sorted((i for i, a in asks.items() if a.get("state") == "done" and a.get("lane") == lane), key=lambda i: int(i[3:]) if i[3:].isdigit() else 0)
     part = f" + {L['partial']} unpriced tokens from killed runs" if L["partial"] else ""
     print(f"{lane}: ${L['cost']:.2f} API-equivalent{part}; {L['sessions']} session(s); tokens {tok}; wall {wall}; "
           f"PRs {' '.join(f'#{n}' for n in prs) or '-'} (merged {' '.join(f'#{n}' for n in merged) or '-'}); issues closed {issues}; "
-          f"failed arcs {failed}; Codex rounds {rounds}")
+          f"failed arcs {failed}; Codex rounds {rounds}; asks done {len(done_asks)}" + (f" ({' '.join(done_asks)})" if done_asks else ""))
     tot["cost"] += L["cost"]; tot["partial"] += L["partial"]
 if not want and len(lanes) > 1: print(f"total: ${tot['cost']:.2f} API-equivalent" + (f" + {tot['partial']} unpriced tokens" if tot["partial"] else ""))
 rec_file = os.path.join(os.environ.get("ORCHY_PROFILE_DIR") or os.path.expanduser("~/.agents/orchy/profile"), repo.replace("/", "-") + ".jsonl")

@@ -158,6 +158,26 @@ if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans4" > "$T/
 grep -q 'P1-01.recorded' "$T/apply7.out" || fail "sensitive field not named: $(cat "$T/apply7.out")"
 if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans1" --page 1 > /dev/null 2>&1; then fail "--page still accepted"; fi
 ok "apply holds a post-signing change, an except note (until except_resolved) and a sensitive field; --page is refused"
+# the owner's words reach an issue only as a public wording, only where they contribute, and a wording may not copy them
+cp -r "$P/answers" "$T/ans12"; jq '.notes["P1-01"]="My partner hates the green one so go with B"' "$T/ans12/decisions/signoff-P1.json" > "$T/c.json" && mv "$T/c.json" "$T/ans12/decisions/signoff-P1.json"
+if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans12" > "$T/apply13.out" 2>&1; then fail "a contributing owner note without a public wording passed"; fi
+grep 'need a public wording' "$T/apply13.out" | grep -q 'P1-01' || fail "unworded owner note not named: $(cat "$T/apply13.out")"
+echo '{"P1-01":"my partner hates the green one so go with B"}' > "$P/public-notes.json"
+if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans12" > "$T/apply14.out" 2>&1; then fail "a wording copying the owner's note passed"; fi
+grep -q "copy six consecutive words" "$T/apply14.out" || fail "copying wording not refused: $(cat "$T/apply14.out")"
+echo '{"P1-01":"Option B reads better against the header."}' > "$P/public-notes.json"; rm -rf "$P/apply-preview"
+PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans12" > "$T/apply15.out" 2>&1 || fail "apply with a public wording: $(cat "$T/apply15.out")"
+if ! grep -q 'Option B reads better' "$P/apply-preview/1.md" || grep -q partner "$P/apply-preview/1.md"; then fail "the preview does not carry only the wording: $(cat "$P/apply-preview/1.md")"; fi
+rm "$P/public-notes.json"
+# a check result edited after signing under the same choice still contributes, so it holds like any other owner text
+cp "$P/decisions.json" "$T/decisions.bak"
+jq '(.records[] | select(.id == "P1-02")) |= (.check = "Open the app and tap Save" | .writes_back.on_result = "## Decision\n\nOwner, {date}: {result}. Next: {next_step}.\n")' "$T/decisions.bak" > "$P/decisions.json"
+cp -r "$P/answers" "$T/ans13"; jq '.choices["P1-02"]="done"' "$T/ans13/decisions/signoff-P1.json" > "$T/c.json" && mv "$T/c.json" "$T/ans13/decisions/signoff-P1.json"
+jq -n '{"__id":"choice-P1-02","page":"decisions","page_no":1,"id":"P1-02","kind":"approve","issue":[2],"choice":"done","result":"works on my sister phone","at":"2026-01-07T10:00:00.000Z","by":"u_example"}' > "$T/ans13/decisions/choice-P1-02.json"
+if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans13" > "$T/apply16.out" 2>&1; then fail "a post-signing result without a wording passed"; fi
+grep 'need a public wording' "$T/apply16.out" | grep -q 'P1-02.result' || fail "post-signing result not held: $(cat "$T/apply16.out")"
+cp "$T/decisions.bak" "$P/decisions.json"
+ok "owner text reaches an issue only as a non-copying public wording, wherever it contributes, post-signing edits included"
 
 # an issue shared by a held page and a signed page is not written and gets no preview, while the signed page's other issues are
 cp -r "$P/answers" "$T/ans8"; jq '.except="Hold page 1"' "$T/ans8/decisions/signoff-P1.json" > "$T/c.json" && mv "$T/c.json" "$T/ans8/decisions/signoff-P1.json"
