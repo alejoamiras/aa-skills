@@ -30,7 +30,7 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   wait [seconds]               block until a report, lead or watcher changes, or (every wait.poll_sec, default 120) open PRs, open issues or the trunk head (default 1500)
 #   scan <pr>                    gate-weakening and leak scan of a PR's diff, title, body and commit messages (plus the local ban)
 #   watch-merge <pr> <full-sha> <lane> <report> [archive-name]   merge on the standing policy, then tear the lane down
-#   arm-merge  <pr> <full-sha> <lane> <report> [archive-name] [delay-s]   watch-merge detached (nohup, .out + .pid)
+#   arm-merge  <pr> <full-sha> <lane> <report-name> [archive-name] [delay-s]   watch-merge detached (nohup, .out + .pid)
 #   disarm [<pr>]                stop one merge watcher, or every one
 #   receipt [<lane>]             per lane: API-equivalent dollars, tokens, wall-clock, PRs merged, issues closed, failed arcs, Codex rounds
 #   teardown <slug>              remove a lane worktree whose HEAD is exactly a merged PR's head and whose tree is clean
@@ -633,6 +633,8 @@ watch-merge)
   if [ $on_trunk = 1 ]; then "$0" teardown "$LANE" 2>&1 | tail -3; else echo "archived plan not on $TRUNK yet; teardown skipped"; fi;;
 arm-merge)
   N=$1; sha_ok "$2" || { echo "refused: pin must be the full 40-hex head sha"; exit 4; }
+  # the watcher reads reports/<name> and waits silently for its LEAD_DONE, so a report it cannot find would idle for hours
+  [ -f "$H/reports/${4:-}" ] || { echo "refused: no report $H/reports/${4:-}; pass its file name under reports/"; exit 4; }
   delay=${6:-0}; args=("$1" "$2" "$3" "$4"); [ -n "${5:-}" ] && args+=("$5")
   watcher_alive "$H/watch/merge-$N.pid" && { echo "refused: merge-$N is already armed (pid $(cut -d' ' -f1 "$H/watch/merge-$N.pid"))"; exit 1; }
   ( cd "$ROOT" && exec env ORCHY_ROOT="$ROOT" ORCHY_HOME="$H" setsid nohup bash -c "sleep $delay; exec bash '$(realpath "$0")' watch-merge $(printf '%q ' "${args[@]}")" ) > "$H/watch/merge-$N.out" 2>&1 &
