@@ -1,6 +1,6 @@
 # start-orchy
 
-One Claude Code session runs a repository as an always-on program, and is where the owner asks for anything about it: a question is answered, a change becomes a lane, "file it" becomes an issue. It triages the open issues into lanes too, gives each lane its own git worktree and a headless lead on one of the owner's other `claude-usage` accounts, merges converged PRs on a fixed policy, and turns every product decision into a page with pictures that the owner signs. It watches PRs, issues and the trunk every two minutes, ticks every 35 minutes while there is work, and idles without inventing any when there is none.
+One Claude Code session runs a repository as an always-on program, and is where the owner asks for anything about it: a question is answered, a change becomes a lane, "file it" becomes an issue. It triages the open issues into lanes too, gives each lane its own git worktree and a headless lead on one of the owner's other `claude-usage` accounts, merges converged PRs on a fixed policy, and turns every product decision into a page with pictures that the owner signs. It watches PRs, issues and the trunk every two minutes, ticks every 35 minutes while there is work, and idles without inventing any when there is none. Started in an empty folder, it first creates the repository, private by default, with a scaffold, a secret scan and a CI gate it proves green on `main`, and what to build becomes the first ask.
 
 What makes it safe to leave running:
 

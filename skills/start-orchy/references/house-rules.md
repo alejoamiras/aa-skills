@@ -69,6 +69,13 @@ A finding becomes a change only once its path is written (initial conditions, ac
 - **The Monitor polls GitHub every `wait.poll_sec` (120 s)** and on each wait's first tick, so a burst of local events cannot starve it: open PRs, open issues by `updatedAt` (comments and edits count) and the trunk head, three reads of about 90 calls an hour, each under `timeout 30`. A failed read keeps its last value and never hides another source's change; each source's last reported value lives in `$ORCHY_HOME/seen/`, so a change between two waits fires at the next, and a source with no recorded value takes its first successful read as a change. A page signature is invisible to the shell: the loop or the owner's word finds it.
 - **The seat is for a coordinator to find.** `orchestrator.lock` holds `pid pstart time session address`: the session id and `uds:<messaging socket>`, never the messaging token. Ownership is pid plus start time, never the session string; a coordinator checks both before it sends anything. `unlock` removes the seat only when this session holds it or its holder is gone.
 
+## From scratch
+
+- **Only an empty folder becomes a repository**: not `$HOME`, not a folder with files, not a `.git` with history or a remote. orchy never moves or deletes the owner's files to make room.
+- **The token is checked before anything is created**: the classic scopes `repo` and `workflow`, read from `X-OAuth-Scopes`; a missing header stops, since a fine-grained token's permissions cannot be read there. The owner runs the refresh.
+- **Nothing reaches GitHub unscanned or unasked**: the minimum package age is set before the first install, gitleaks reads the tree and the history before the first push, and the name, the visibility (private first) and the public description are the owner's signed answers. That first push is the only direct push to a trunk orchy makes; a failed create is never retried.
+- **The recorded checks are the jobs of one proven run**: a dispatched run on `main`, identified by time, green, whose job names become `merge.required_checks`. A public repository gets a ruleset requiring a PR and those checks, with no review, since the watcher cannot give one. *Why: without it GitHub enforces nothing orchy records.*
+
 ## The orchestrator's own hygiene
 
 - **Never `pkill -f <name>`**: it matches the orchestrator's own command line and other agents' runs. Kill by pid from the `.started` or `.pid` file; a watcher that matched its own command line never fired.
@@ -88,4 +95,5 @@ A finding becomes a change only once its path is written (initial conditions, ac
 - Leads and their reviewers run as the owner's user, so the brief's never-open line, not the OS, keeps them out of the ask ledger.
 - `ask file` that times out after GitHub accepted the issue, or a crash between the create and the `filed` row, leaves an issue the ledger does not know: reconcile by hand, never retry.
 - `seen/` advances when a `wait` reports a change, not when the orchestrator handles it: a session that dies in between loses that event to every later `wait`, and only a resume's reread (`updated:>=`) finds it again.
+- A private repository on a free plan cannot have a ruleset, so only orchy's merge policy enforces its recorded checks; anyone with push rights can land on `main` unchecked.
 - The close-out guard reads open PRs before taking the spawn lock: a close-out lead that opens its PR and exits inside that window is seen by neither check, and a second close-out can start. Closing it needs a network call under the lock.
