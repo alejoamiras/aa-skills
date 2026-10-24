@@ -13,6 +13,7 @@ case "$1 $2" in
 "issue view") f="$MOCK_DIR/issue-$3.json"; [ -f "$f" ] || { echo "no such issue" >&2; exit 1; }; jq -r "$jqexpr" "$f";;
 "pr list") if printf '%s\n' "$@" | grep -qx -- merged; then jq -r "$jqexpr" "$MOCK_DIR/merged.json"; elif [ -f "$MOCK_DIR/open.json" ]; then jq -r "$jqexpr" "$MOCK_DIR/open.json"; fi;;
 "issue list") [ "${MOCK_GH_FAIL:-}" = search ] && printf '%s\n' "$@" | grep -qx -- --search && { echo "HTTP 502" >&2; exit 1; }
+  [ -e "$MOCK_DIR/fail-issues" ] && { echo "HTTP 502" >&2; exit 1; }
   [ -f "$MOCK_DIR/issues.json" ] || exit 1; jq -r "$jqexpr" "$MOCK_DIR/issues.json";;
 "issue create") sleep "${MOCK_GH_DELAY:-0}"; [ "${MOCK_GH_FAIL:-}" = create ] && { echo "HTTP 500" >&2; exit 1; }
   echo "$*" >> "$MOCK_DIR/created.log"; echo "https://github.com/example/app/issues/${MOCK_ISSUE_NUMBER:-77}";;

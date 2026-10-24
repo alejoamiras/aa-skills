@@ -311,6 +311,35 @@ o=$("$ORCHY" say x-say "$(cat "$T/p3")" 2>&1 || true); grep -q 'SECRET' <<<"$o" 
 o=$("$ORCHY" say x-say "$l: Show a greeting" 2>&1 || true); grep -q 'not its stored public wording' <<<"$o" || fail "say queued a reworded ask: $o"
 "$ORCHY" say x-say "fix the review finding in $l first" | grep -q queued || fail "say refused an ordinary note naming a finding"
 "$ORCHY" stop x-say >/dev/null
+# the seat: session id and messaging address recorded, the token never; pid and start time alone decide ownership
+L="$ORCHY_HOME/orchestrator.lock"; TOK="tok-$RANDOM$RANDOM"
+CLAUDE_CODE_SESSION_ID=sess-0001 CLAUDE_CODE_MESSAGING_SOCKET="$T/m.sock" CLAUDE_CODE_MESSAGING_TOKEN="$TOK" "$ORCHY" lock >/dev/null || fail "lock with the session env"
+read -r _ _ _ s4 s5 < "$L"; [ "$s4 $s5" = "sess-0001 uds:$T/m.sock" ] || fail "seat fields: $(cat "$L")"
+grep -rqF -- "$TOK" "$ORCHY_HOME" && fail "the messaging token reached the home"
+"$ORCHY" unlock | grep -qx unlocked || fail "the holder could not unlock its seat"
+seat() { printf '%s %s 2026-01-01T00:00:00Z %s uds:%s\n' "$1" "$(awk '{print $22}' "/proc/$1/stat")" "$2" "$T/o.sock" > "$L"; }
+sleep 60 & sa=$!; seat "$sa" sess-other
+o=$("$ORCHY" lock 2>&1 || true); grep -q 'session sess-other' <<<"$o" || fail "a refused lock does not name the holder's session: $o"
+o=$("$ORCHY" unlock 2>&1; echo "rc=$?"); grep -q 'rc=2' <<<"$o" || fail "unlock removed a live other session's seat: $o"
+kill "$sa"; wait "$sa" 2>/dev/null || true; sleep 60 & sb=$!; seat "$sb" sess-contender
+o=$("$ORCHY" unlock 2>&1; echo "rc=$?"); grep -q 'rc=2' <<<"$o" || fail "unlock removed a contender's fresh seat: $o"
+seat "$sb" sess-0001; o=$(CLAUDE_CODE_SESSION_ID=sess-0001 "$ORCHY" unlock 2>&1; echo "rc=$?"); grep -q 'rc=2' <<<"$o" || fail "a matching session string unlocked another process's seat: $o"
+kill "$sb"; wait "$sb" 2>/dev/null || true; "$ORCHY" unlock | grep -qx unlocked || fail "a dead holder's seat was not released"
+# wait, in fast motion (1 s ticks and polls), in a home of its own so no lead or report moves under it
+HW="$T/cap/hw"; mkdir -p "$HW"; jq '.wait.poll_sec=1' "$ORCHY_HOME/orchy.json" > "$HW/orchy.json"; cp "$ORCHY_HOME/local.json" "$HW/"
+jq -n '[{number:1,updatedAt:"2026-01-01T00:00:00Z"}]' > "$MOCK_DIR/issues.json"; jq -n '{sha:"1111111111111111111111111111111111111111"}' > "$MOCK_DIR/trunk.json"; rm -f "$MOCK_DIR/open.json"
+w() { ORCHY_HOME="$HW" ORCHY_WAIT_TICK=1 "$ORCHY" wait "$1" > "$T/w.out" 2>&1 & wp=$!; sleep 1.5; }
+w 20; jq '. + [{number:2,updatedAt:"2026-01-02T00:00:00Z"}]' "$MOCK_DIR/issues.json" > "$T/i.json" && mv "$T/i.json" "$MOCK_DIR/issues.json"; wait "$wp"
+grep -q 'CHANGED (issues)' "$T/w.out" || fail "wait missed a new issue: $(cat "$T/w.out")"
+w 20; jq -n '{sha:"2222222222222222222222222222222222222222"}' > "$MOCK_DIR/trunk.json"; jq '.[0].updatedAt="2026-01-03T00:00:00Z"' "$MOCK_DIR/issues.json" > "$T/i.json" && mv "$T/i.json" "$MOCK_DIR/issues.json"; wait "$wp"
+[ "$(grep -cE '^CHANGED \((trunk|issues)\)' "$T/w.out")" = 2 ] || fail "wait did not report both sources that moved in one poll: $(cat "$T/w.out")"
+touch "$MOCK_DIR/fail-issues"; w 20; jq -n '{sha:"3333333333333333333333333333333333333333"}' > "$MOCK_DIR/trunk.json"; wait "$wp"
+grep -q 'CHANGED (trunk)' "$T/w.out" || fail "a failing issue read hid a trunk move: $(cat "$T/w.out")"
+w 20; rm "$MOCK_DIR/fail-issues"; wait "$wp"; grep -q 'CHANGED (issues)' "$T/w.out" || fail "an issue read that recovered was taken as the baseline: $(cat "$T/w.out")"
+touch "$MOCK_DIR/fail-issues"; ORCHY_HOME="$HW" ORCHY_WAIT_TICK=1 "$ORCHY" wait 2 > "$T/w.out" 2>&1; rm "$MOCK_DIR/fail-issues"
+grep -q 'TIMEOUT after 2s, no change; unreadable: issues' "$T/w.out" || fail "a timeout did not name the unreadable source: $(cat "$T/w.out")"
+o=$(ORCHY_HOME="$HW" ORCHY_WAIT_TICK=1 "$ORCHY" wait 2 2>&1); [ "$o" = "TIMEOUT after 2s, no change" ] || fail "a quiet wait did not time out cleanly: $o"
+rm -f "$MOCK_DIR/issues.json" "$MOCK_DIR/trunk.json"
 # the page toolchain's own smoke
 [ -x "$K/page/smoke.sh" ] || fail "page/smoke.sh missing"; bash "$K/page/smoke.sh" > "$T/page.log" 2>&1 || { tail -n 20 "$T/page.log"; fail "page smoke"; }
 # no project names, home paths or roster names anywhere in the skill

@@ -26,7 +26,7 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   say <key> <text>             queue a steering note; a live lead gets it after its next tool call (inbox-hook.sh)
 #   session-id <key>             the session id of a lead's latest run
 #   snapshot                     the tick's facts: reports, leads, watchers, PRs, worktrees, load, headroom
-#   wait [seconds]               block until a report, lead, watcher or open-PR state changes (default 1500)
+#   wait [seconds]               block until a report, lead or watcher changes, or (every wait.poll_sec, default 120) open PRs, open issues or the trunk head (default 1500)
 #   scan <pr>                    gate-weakening and leak scan of a PR's diff, title, body and commit messages (plus the local ban)
 #   watch-merge <pr> <full-sha> <lane> <report> [archive-name]   merge on the standing policy, then tear the lane down
 #   arm-merge  <pr> <full-sha> <lane> <report> [archive-name] [delay-s]   watch-merge detached (nohup, .out + .pid)
@@ -120,8 +120,10 @@ trunk_state() { # the trunk head's sha, then one line per trunk check that concl
   while IFS= read -r n; do awk -F'\t' -v n="$n" '$1==n' <<<"$runs" | tail -1 | grep -qE $'\tcompleted\t(failure|timed_out)$' && echo "$n"; done < <(cfg '(.merge.trunk_checks // .merge.required_checks)[]')
   return 0
 }
-session_pid() { # the nearest `claude` ancestor is the orchestrator session; without one (a test, a plain shell) the caller's parent
-  local p=$PPID c; while [ "$p" -gt 1 ] 2>/dev/null; do c=$(ps -o comm= -p "$p" 2>/dev/null); [ "$c" = claude ] && { echo "$p"; return; }; p=$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null || echo 1); done; echo "$PPID"
+session_pid() { # the orchestrator session: $CLAUDE_PID while it is a live claude, else the nearest `claude` ancestor, else (a test, a plain shell) the caller's parent
+  local p=${CLAUDE_PID:-} c
+  if [[ "$p" =~ ^[0-9]+$ ]] && [ "$(ps -o comm= -p "$p" 2>/dev/null)" = claude ]; then echo "$p"; return; fi
+  p=$PPID; while [ "$p" -gt 1 ] 2>/dev/null; do c=$(ps -o comm= -p "$p" 2>/dev/null); [ "$c" = claude ] && { echo "$p"; return; }; p=$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null || echo 1); done; echo "$PPID"
 }
 ledger_ok() { # owner-only and never a symlink: it holds the owner's verbatim words
   mkdir -p "$ASKS_DIR" && chmod 700 "$ASKS_DIR" || return 1
@@ -176,15 +178,27 @@ config) cfg "$1";;
 local) lcl "$1";;
 lock)
   f="$H/orchestrator.lock"; me=$(session_pid)
+  # The seat names the session and its messaging address so a coordinator can find it; pid and start time stay the only
+  # ownership test, and the messaging token is never read.
+  sess=${CLAUDE_CODE_SESSION_ID:-${ORCHY_SESSION:--}}; addr=-; [ -n "${CLAUDE_CODE_MESSAGING_SOCKET:-}" ] && addr="uds:$CLAUDE_CODE_MESSAGING_SOCKET"
   for try in 1 2 3; do
-    if ( set -o noclobber; echo "$me $(pstart "$me") $(now) ${ORCHY_SESSION:-}" > "$f" ) 2>/dev/null; then echo "locked $REPO for session pid $me"; exit 0; fi
-    read -r p st t _ < "$f" 2>/dev/null || { sleep 1; continue; }
+    if ( set -o noclobber; echo "$me $(pstart "$me") $(now) $sess $addr" > "$f" ) 2>/dev/null; then echo "locked $REPO for session pid $me ($sess)"; exit 0; fi
+    read -r p st t hs _ < "$f" 2>/dev/null || { sleep 1; continue; }
     [ "$p" = "$me" ] && { echo "already locked by this session (pid $me)"; exit 0; }
-    if [ -d "/proc/$p" ] && [ "$(pstart "$p")" = "$st" ]; then echo "refused: another orchestrator holds $REPO (pid $p since $t)"; exit 2; fi
+    if [ -d "/proc/$p" ] && [ "$(pstart "$p")" = "$st" ]; then echo "refused: another orchestrator holds $REPO (pid $p, session ${hs:--}, since $t)"; exit 2; fi
     # a stale holder: one contender at a time replaces it (the flock dies with its holder), so two contenders cannot unlink each other's fresh lock
     ( flock -w 5 9 || exit 1; read -r p2 _ < "$f" 2>/dev/null; [ "$p2" = "$p" ] && rm -f "$f"; exit 0 ) 9>"$f.takeover" || sleep 1
   done; echo "lock: could not claim $f"; exit 2;;
-unlock) rm -f "$H/orchestrator.lock"; echo "unlocked";;
+unlock)
+  # Under the takeover lock, so the seat read is the seat removed: never a live other session's, never a contender's fresh one.
+  need flock; f="$H/orchestrator.lock"; me=$(session_pid)
+  ( flock -w 5 9 || { echo "refused: the seat's takeover lock is busy"; exit 2; }
+    [ -f "$f" ] || { echo "unlocked (no seat was held)"; exit 0; }
+    read -r p st _ < "$f" 2>/dev/null; mine=0; gone=1
+    [ "$p" = "$me" ] && [ "$st" = "$(pstart "$me")" ] && mine=1
+    [ -n "$p" ] && [ -d "/proc/$p" ] && [ "$(pstart "$p")" = "$st" ] && gone=0
+    if [ $mine = 1 ] || [ $gone = 1 ]; then rm -f "$f"; echo "unlocked"; exit 0; fi
+    echo "refused: pid $p holds the seat and is alive; it is not this session"; exit 2 ) 9>"$f.takeover";;
 render)
   t=$1; shift; [ -f "$t" ] || t="$(dirname "$0")/../templates/$t"
   [ -f "$t" ] || { echo "orchy: no template $1" >&2; exit 1; }
@@ -488,18 +502,33 @@ wait)
     lead_rows | awk '{print "alive", $1}'
     for f in "$H"/watch/*.pid; do watcher_alive "$f" && echo "watcher $(basename "$f" .pid)"; done
   }
-  prs() { gh pr list --repo "$REPO" --state open --json number,headRefOid,mergeable,isDraft --jq '.[]|"\(.number) \(.headRefOid[0:8]) \(.mergeable) \(.isDraft)"' 2>/dev/null; }
-  a=$(snap); pa=$(prs) || pa=unread; t0=$(date +%s); n=0
+  # GitHub every poll_sec, in three independent reads: one that fails keeps its last value and never hides another's change.
+  read_src() { local o; case $1 in
+    prs) o=$(timeout 30 gh pr list --repo "$REPO" --state open --limit 1000 --json number,headRefOid,mergeable,isDraft --jq '.[]|"\(.number) \(.headRefOid[0:8]) \(.mergeable) \(.isDraft)"' 2>/dev/null) || return 1;;
+    issues) o=$(timeout 30 gh issue list --repo "$REPO" --state open --limit 1000 --json number,updatedAt --jq '.[]|"\(.number) \(.updatedAt)"' 2>/dev/null) || return 1;;
+    trunk) o=$(timeout 30 gh api "repos/$REPO/commits/$TRUNK" --jq .sha 2>/dev/null) && sha_ok "$o" || return 1;;
+    esac; sort <<<"$o"; }
+  tick=${ORCHY_WAIT_TICK:-20}; every=$(( $(cfg '.wait.poll_sec // 120') / tick )); [ "$every" -ge 1 ] || every=1
+  declare -A last=() new=() unread=(); srcs=(prs issues trunk)
+  # a source unread at the start has no baseline: its first successful read is a change, not the new normal
+  for s in "${srcs[@]}"; do if v=$(read_src "$s"); then last[$s]=$v; else unread[$s]=1; fi; done
+  a=$(snap); t0=$(date +%s); n=0
   while :; do
-    sleep 20; n=$((n+1)); b=$(snap)
+    sleep "$tick"; n=$((n+1)); b=$(snap)
     if [ "$a" != "$b" ]; then echo "CHANGED (reports/leads/watchers):"; diff <(echo "$a") <(echo "$b") | grep '^[<>]' | head -20; exit 0; fi
-    if [ $((n % 6)) -eq 0 ] && pb=$(prs); then
-      [ "$pa" = unread ] && pa=$pb
-      # GitHub answers UNKNOWN while it recomputes mergeability; that is not a change
-      pa=$(awk 'NR==FNR{m[$1]=$3; next} ($1 in m) && $3=="UNKNOWN"{$3=m[$1]} {print}' <(echo "$pb") <(echo "$pa")); pb=$(awk 'NR==FNR{m[$1]=$3; next} ($1 in m) && $3=="UNKNOWN"{$3=m[$1]} {print}' <(echo "$pa") <(echo "$pb"))
-      [ "$pa" != "$pb" ] && { echo "CHANGED (PRs):"; diff <(echo "$pa") <(echo "$pb") | grep '^[<>]'; exit 0; }
+    if [ $((n % every)) -eq 0 ]; then
+      changed=()
+      for s in "${srcs[@]}"; do
+        v=$(read_src "$s") || { unread[$s]=1; continue; }; unset "unread[$s]"
+        # GitHub answers UNKNOWN while it recomputes mergeability; that is not a change
+        [ "$s" = prs ] && [ -n "${last[$s]+x}" ] && v=$(awk 'NR==FNR{m[$1]=$3; next} ($1 in m) && $3=="UNKNOWN"{$3=m[$1]} {print}' <(echo "${last[$s]}") <(echo "$v"))
+        if [ -z "${last[$s]+x}" ] || [ "$v" != "${last[$s]}" ]; then changed+=("$s"); new[$s]=$v; fi
+      done
+      if [ ${#changed[@]} -gt 0 ]; then
+        for s in "${changed[@]}"; do echo "CHANGED ($s):"; diff <(echo "${last[$s]:-}") <(echo "${new[$s]}") | grep '^[<>]' | head -20; done; exit 0
+      fi
     fi
-    [ $(( $(date +%s) - t0 )) -ge "$LIMIT" ] && { echo "TIMEOUT after ${LIMIT}s, no change"; exit 0; }
+    if [ $(( $(date +%s) - t0 )) -ge "$LIMIT" ]; then u="${!unread[*]}"; echo "TIMEOUT after ${LIMIT}s, no change${u:+; unreadable: $u}"; exit 0; fi
   done;;
 scan)
   need gh; n=$1
