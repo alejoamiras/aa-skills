@@ -36,7 +36,7 @@ o=$("$ORCHY" launch x-a2 x acct-a 2>&1 || true); grep -q 'cap 2' <<<"$o" || fail
 [ "$("$ORCHY" snapshot 2>/dev/null | grep -c '^alive x-')" = 3 ] || fail "snapshot does not list the three live leads"
 [ "$("$ORCHY" session-id x-plan)" = 00000000-0000-4000-8000-000000000001 ] || fail "session-id"
 # launch: its own process group, auto mode by default, the hook settings and the two writable dirs, banner kept out of the JSON log
-read -r lp _ _ _ _ _ lg < "$ORCHY_HOME/leads/x-plan.started"; [ "$lp" = "$lg" ] || fail "lead pid $lp is not its own group leader ($lg)"
+read -r lp _ _ _ _ _ lg _ < "$ORCHY_HOME/leads/x-plan.started"; [ "$lp" = "$lg" ] || fail "lead pid $lp is not its own group leader ($lg)"
 [ "$(stat -c %a "$ORCHY_HOME")" = 700 ] || fail "home is not mode 700"
 grep -q -- '--permission-mode auto --permission-prompts none' "$MOCK_DIR/cu.log" || fail "auto mode flags missing: $(head -1 "$MOCK_DIR/cu.log")"
 grep -q -- "--settings $ORCHY_HOME/leads/x-plan.settings.json --add-dir $ORCHY_HOME/reports --add-dir $ORCHY_HOME/scratch/x" "$MOCK_DIR/cu.log" || fail "settings or add-dir flags missing"
@@ -232,7 +232,7 @@ A reopen ask2 "lane closed" >/dev/null || fail "reopen ask2"
 A note ask3 "waiting: wording" >/dev/null; A public ask3 "Tidy the README" >/dev/null
 o=$(A lane ask3 docs-1 "a repo change" 2>&1 || true); grep -q 'waiting: wording' <<<"$o" || fail "lane ignored the wording gate: $o"
 A note ask3 "wording ok" >/dev/null; A public ask3 "Tidy the README intro" | grep -q "OK again" || fail "a new wording kept the old OK"
-A note ask3 "queued behind the docs lane" >/dev/null; A list | grep -q '^ask3 .*\[waiting\]' || fail "an ordinary note cleared the hold in list: $(A list)"
+A note ask3 "wording okay? queued behind the docs lane" >/dev/null; A list | grep -q '^ask3 .*\[waiting\]' || fail "an ordinary note cleared the hold in list: $(A list)"
 o=$(A lane ask3 docs-1 "a repo change" 2>&1 || true); grep -q 'waiting: wording (changed)' <<<"$o" || fail "a replaced wording skipped the gate: $o"
 A note ask3 "wording ok" >/dev/null; A lane ask3 docs-1 "a repo change" >/dev/null || fail "lane after the OK"
 printf '{"id":"ask4","at":"2026-01-01T00:00:00Z","no' >> "$LG"
@@ -256,6 +256,10 @@ for n in 1 2; do if "$ORCHY" check-public "$T/p$n" >/dev/null 2>&1; then fail "c
 o=$(ORCHY_GITLEAKS=gitleaks "$ORCHY" check-public "$T/p3" 2>&1 || true); grep -q 'SECRET' <<<"$o" || fail "the real gitleaks missed the planted secret: $o"
 "$ORCHY" check-public --no-sensitive "$T/p2" >/dev/null || fail "--no-sensitive still applied the sensitive pattern"
 o=$(ORCHY_GITLEAKS=no-such-gitleaks "$ORCHY" check-public "$T/p0" 2>&1; echo "rc=$?"); grep -q 'rc=2' <<<"$o" || fail "check-public without gitleaks did not refuse: $o"
+cp "$ORCHY_HOME/local.json" "$T/local.bak"; echo '{' > "$ORCHY_HOME/local.json"
+o=$("$ORCHY" check-public "$T/p0" 2>&1; echo "rc=$?"); grep -q 'rc=2' <<<"$o" || fail "check-public with a broken local.json did not refuse: $o"; cp "$T/local.bak" "$ORCHY_HOME/local.json"
+mkdir "$T/lk"; cp "$LG" "$T/lk/l.jsonl"; chmod 000 "$T/lk"; o=$(bash "$K/scripts/overlap.sh" "$T/lk/l.jsonl" "$T/p0" 2>&1; echo "rc=$?"); chmod 700 "$T/lk"
+grep -q 'rc=2' <<<"$o" || fail "the copy check read a ledger behind a locked dir as absent: $o"
 # ask file: every refusal leaves no create call; an exact title, a failed search and a failed create file nothing; one lock spans it all
 f=$(A add "File the flaky login test"); A public "$f" "The login test fails intermittently" >/dev/null
 printf '## Problem\nThe login test fails about one run in ten.\n' > "$T/body.md"; jq -n '[{number:9,title:"Flaky login test"}]' > "$MOCK_DIR/issues.json"; : > "$MOCK_DIR/created.log"
@@ -310,6 +314,7 @@ printf 'You are a subagent.\n' > "$ORCHY_HOME/prompts/x-say.md"; MOCK_LEAD_SECS=
 o=$("$ORCHY" say x-say "remember: home page because my landlord asked twice" 2>&1 || true); grep -q 'copies the owner' <<<"$o" || fail "say queued a copied sentence: $o"
 o=$("$ORCHY" say x-say "$(cat "$T/p3")" 2>&1 || true); grep -q 'SECRET' <<<"$o" || fail "say queued a secret: $o"
 o=$("$ORCHY" say x-say "$l: Show a greeting" 2>&1 || true); grep -q 'not its stored public wording' <<<"$o" || fail "say queued a reworded ask: $o"
+o=$("$ORCHY" say x-say "$g: Gone-lane requirement" 2>&1 || true); grep -q "$g is not laned to x" <<<"$o" || fail "say queued another lane's ask: $o"
 "$ORCHY" say x-say "fix the review finding in $l first" | grep -q queued || fail "say refused an ordinary note naming a finding"
 "$ORCHY" stop x-say >/dev/null
 # the seat: session id and messaging address recorded, the token never; pid and start time alone decide ownership

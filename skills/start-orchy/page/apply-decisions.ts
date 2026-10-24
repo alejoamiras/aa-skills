@@ -4,7 +4,7 @@
 // A signed page writes the choices its signoff doc snapshotted; a later change to a choice holds that record until the page is signed again.
 // Reads $ORCHY_HOME/page/{decisions.json,lanes.json,public-notes.json}; a dry-run (no --apply) never calls gh.
 // --apply also records each signed record against its recommendation in ${ORCHY_PROFILE_DIR:-~/.agents/orchy/profile}/<owner>-<repo>.jsonl.
-import { readdirSync, readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync, statSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 if (!process.env.ORCHY_HOME) { console.error("ORCHY_HOME is not set: export the orchestrator's state dir (the page data lives in $ORCHY_HOME/page)"); process.exit(2); }
@@ -44,6 +44,8 @@ const pubKey = (id: string, k: string) => k === "note" ? id : `${id}.${k}`;
     const dir = mkdtempSync(join(O, ".outbound-")), files = outbound.map(([, t], i) => { const f = join(dir, `${i}.txt`); writeFileSync(f, t + "\n"); return f; });
     // the owner's words: the ask ledger plus the raw page text, read before any wording replaces it
     const asks = join(process.env.ORCHY_ASKS_DIR ?? join(homedir(), ".agents/orchy/asks"), `${REPO.replace("/", "-")}.jsonl`);
+    // existsSync reads an unsearchable directory as absence; only ENOENT is
+    try { statSync(asks, { throwIfNoEntry: false }); } catch { console.error("refused: the ask ledger cannot be read, so the copy check cannot run"); process.exit(2); }
     const raw = docs.flatMap(d => [...["note", "result", "next_step", "except"].map(k => d[k]), ...Object.values(d.notes && typeof d.notes === "object" ? d.notes : {})]).filter((t): t is string => typeof t === "string" && t !== "");
     const ledger = join(dir, "owner.jsonl");
     writeFileSync(ledger, (existsSync(asks) ? readFileSync(asks, "utf8").replace(/\n?$/, "\n") : "") + raw.map(t => JSON.stringify({ id: "page", text: t })).join("\n") + "\n");
@@ -179,7 +181,7 @@ for (const p of pagesToWrite) {
       if (a.choice === "read") { manual.push(`${r.id} (#${r.issue.join(", #")}) READ OPTION: the owner left it to the orchestrator; note: ${a.note || "(none)"}`); continue; }
       text = a.choice === "asis" ? fill(wb.on_as_is, { date, note: a.note || "(none)" }) : fill(wb.on_choice, { date, option: a.choice, option_text: wb.options?.[a.choice] ?? "", note: a.note || "(none)" });
     }
-    if (a?.note && r.kind === "approve" && a.choice !== "change") text = text.trimEnd() + `\n\nOwner note: ${a.note}\n`;
+    if (a?.note && r.kind === "approve" && a.choice !== "change") { own(r.id, "note", a.note); text = text.trimEnd() + `\n\nOwner note: ${a.note}\n`; }
     for (const n of r.issue) push(n, p.no, order++, text);
   }
 }

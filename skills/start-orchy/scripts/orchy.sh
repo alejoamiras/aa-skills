@@ -146,21 +146,22 @@ FOLD='reduce (inputs | fromjson? | select(type == "object" and (.id | type) == "
 fold() { if [ -f "$LEDGER" ]; then jq -Rn "$FOLD" "$LEDGER"; else echo '{}'; fi; }
 ask_get() { fold | jq -c --arg id "$1" '.[$id] // empty'; }
 ask_moves() { case "$1>$2" in open\>lane|open\>done|open\>dropped|open\>filed|lane\>done|lane\>open|lane\>dropped|lane\>filed|done\>open|dropped\>open) return 0;; esac; return 1; }
-ASK_HOLD='[.notes[] | select(test("^(waiting:|answered:|wording ok)"))][-1] // "" | select(startswith("waiting:"))'
+ASK_HOLD='[.notes[] | select(test("^(waiting:|answered:)") or . == "wording ok")][-1] // "" | select(startswith("waiting:"))'
 ask_ready() { # ask_ready <fold-json> <id>: a handoff needs the stored restatement and no open owner question
   local w; [ -n "$(jq -r '.public // empty' <<<"$1")" ] || { echo "refused: $2 has no public wording; ask public $2 first" >&2; return 1; }
   # only control notes decide a hold, so an ordinary note never clears one
   w=$(jq -r "$ASK_HOLD" <<<"$1"); [ -z "$w" ] || { echo "refused: $2 is $w; record 'answered: …' or 'wording ok' with ask note first" >&2; return 1; }
 }
-ask_lines() { # ask_lines <slug|-> [--no-sensitive] <file>...: each `askN: ` line is that ask's stored wording, laned here (anywhere for -), not held
+ask_lines() { # ask_lines <slug> [--no-sensitive] <file>...: each `askN: ` line is that ask's stored wording, laned to <slug>, not held
   local s=$1 m id t a rc=0 tf nosens=(); shift; [ "${1:-}" = --no-sensitive ] && { nosens=(--no-sensitive); shift; }
   tf=$(mktemp "$H/scratch/asklines.XXXXXX"); grep -hE '\bask[0-9]+\b' "$@" > "$tf"
+  [ $? -le 1 ] || { echo "refused: cannot read the ask lines of $*" >&2; rm -f "$tf"; return 1; }
   if [ -s "$tf" ]; then "$0" check-public "${nosens[@]}" "$tf" || rc=1; fi
   while IFS= read -r m; do   # one ask per line: the wording runs to the end of it
     id=${m%%: *}; t=${m#*: }; t=${t%"${t##*[![:space:]]}"}; a=$(ask_get "$id")
     [ -n "$a" ] || { echo "refused: $id is not in the ask ledger" >&2; rc=1; continue; }
     [ "$(jq -r '.public // empty' <<<"$a")" = "$t" ] || { echo "refused: the $id line is not its stored public wording (ask show $id)" >&2; rc=1; }
-    jq -e --arg s "$s" '.state == "lane" and ($s == "-" or .lane == $s)' <<<"$a" >/dev/null || { echo "refused: $id is not laned$([ "$s" = - ] || echo " to $s")" >&2; rc=1; }
+    jq -e --arg s "$s" '.state == "lane" and .lane == $s' <<<"$a" >/dev/null || { echo "refused: $id is not laned to $s" >&2; rc=1; }
     ask_ready "$a" "$id" || rc=1
   done < <(grep -ohE '\bask[0-9]+: .*' "$tf")
   rm -f "$tf"; return $rc
@@ -185,10 +186,10 @@ lock)
   for try in 1 2 3; do
     if ( set -o noclobber; echo "$me $(pstart "$me") $(now) $sess $addr" > "$f" ) 2>/dev/null; then echo "locked $REPO for session pid $me ($sess)"; exit 0; fi
     read -r p st t hs _ < "$f" 2>/dev/null || { sleep 1; continue; }
-    [ "$p" = "$me" ] && { echo "already locked by this session (pid $me)"; exit 0; }
+    [ "$p" = "$me" ] && [ "$st" = "$(pstart "$me")" ] && { echo "already locked by this session (pid $me)"; exit 0; }
     if [ -d "/proc/$p" ] && [ "$(pstart "$p")" = "$st" ]; then echo "refused: another orchestrator holds $REPO (pid $p, session ${hs:--}, since $t)"; exit 2; fi
     # a stale holder: one contender at a time replaces it (the flock dies with its holder), so two contenders cannot unlink each other's fresh lock
-    ( flock -w 5 9 || exit 1; read -r p2 _ < "$f" 2>/dev/null; [ "$p2" = "$p" ] && rm -f "$f"; exit 0 ) 9>"$f.takeover" || sleep 1
+    ( flock -w 5 9 || exit 1; read -r p2 st2 _ < "$f" 2>/dev/null; [ "$p2" = "$p" ] && [ "$st2" = "$st" ] && rm -f "$f"; exit 0 ) 9>"$f.takeover" || sleep 1
   done; echo "lock: could not claim $f"; exit 2;;
 unlock)
   # Under the takeover lock, so the seat read is the seat removed: never a live other session's, never a contender's fresh one.
@@ -218,16 +219,19 @@ check-text)
   ban=$(lcl '.prompt_ban // empty'); [ -n "$ban" ] || { echo "orchy: local.json has no prompt_ban" >&2; exit 2; }
   grep -qE "$ban" /dev/null 2>/dev/null; [ $? -le 1 ] || { echo "orchy: prompt_ban is not a valid regex" >&2; exit 2; }
   rc=0; for f in "$@"; do [ -r "$f" ] || { echo "orchy: cannot read $f" >&2; rc=2; continue; }
-    hits=$(grep -nE "$ban" "$f" | head -5); [ -z "$hits" ] || { echo "orchy: $f carries banned text:"; echo "$hits" | cut -c1-160; rc=1; }; done; exit $rc;;
+    hits=$(grep -nE "$ban" "$f"); [ $? -le 1 ] || { echo "orchy: cannot scan $f" >&2; rc=2; continue; }
+    [ -z "$hits" ] || { echo "orchy: $f carries banned text:"; head -5 <<<"$hits" | cut -c1-160; rc=1; }; done; exit $rc;;
 check-private) [ $# -gt 0 ] || { echo "usage: check-private <file>..." >&2; exit 2; }; bash "$OVERLAP" "$LEDGER" "$@";;
 check-public)
   # Fails closed: a check that cannot run refuses (exit 2), unlike scan, which reports what it could read.
   sens=1; [ "${1:-}" = --no-sensitive ] && { sens=0; shift; }
   f=${1:-}; [ -r "$f" ] || { echo "usage: check-public [--no-sensitive] <file>" >&2; exit 2; }
   bash "$OVERLAP" "$LEDGER" "$f"; rc=$?; [ "$rc" -le 1 ] || { echo "refused: the copy check could not run" >&2; exit 2; }
-  leakre=$(cfg '.scan.leak // empty'); ban=$(lcl '.prompt_ban // empty'); [ -n "$ban" ] && leakre="${leakre:+($leakre)|}($ban)"
+  # a policy file that cannot be parsed refuses: an empty pattern would pass everything
+  if ! leakre=$(cfg '.scan.leak // empty') || ! ban=$(jq -r '.prompt_ban // empty' "$LOCAL"); then echo "refused: orchy.json or local.json cannot be read" >&2; exit 2; fi
+  [ -n "$ban" ] && leakre="${leakre:+($leakre)|}($ban)"
   [ -n "$leakre" ] || { echo "refused: neither scan.leak nor prompt_ban is set" >&2; exit 2; }
-  sre=$(jq -r '.site.sensitive // empty' "$H/page/decisions.json" 2>/dev/null)
+  sre=; [ ! -e "$H/page/decisions.json" ] || sre=$(jq -r '.site.sensitive // empty' "$H/page/decisions.json") || { echo "refused: decisions.json cannot be read" >&2; exit 2; }
   : "${sre:=\\bfindings?\\b|advisor(y|ies)|GHSA|vulnerab|exploit|\\battack|confidential}"   # apply-decisions.ts's default
   for kind in LEAK SENSITIVE; do
     if [ $kind = LEAK ]; then hits=$(grep -nE -- "$leakre" "$f"); r=$?; else [ $sens = 1 ] || continue; hits=$(grep -niE -- "$sre" "$f"); r=$?; fi
@@ -255,11 +259,10 @@ ask)
     tf=$(mktemp "$H/scratch/public.XXXXXX"); printf '%s\n' "$t" > "$tf"; "$0" check-public "$tf"; rc=$?; rm -f "$tf"; [ "$rc" = 0 ] || exit 1
     ask_public() { local a st; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
       st=$(jq -r .state <<<"$a"); case "$st" in open|lane) ;; *) echo "refused: $id is $st" >&2; return 1;; esac
-      append_row "$(row --arg t "$t" '{id: $id, at: $at, public: $t}')" || return 1
-      # the owner's OK covered the wording they saw, never its replacement
+      # the owner's OK covered the wording they saw, never its replacement; one row, so no reader sees it unheld
       if jq -e 'any(.notes[]; startswith("waiting: wording"))' <<<"$a" >/dev/null; then
-        append_row "$(row '{id: $id, at: $at, note: "waiting: wording (changed)"}')" || return 1; echo "$id public wording stored; it needs the owner's OK again"
-      else echo "$id public wording stored"; fi; }
+        append_row "$(row --arg t "$t" '{id: $id, at: $at, public: $t, note: "waiting: wording (changed)"}')" || return 1; echo "$id public wording stored; it needs the owner's OK again"
+      else append_row "$(row --arg t "$t" '{id: $id, at: $at, public: $t}')" || return 1; echo "$id public wording stored"; fi; }
     with_ledger ask_public;;
   said|note)
     t="$*"; [ -n "$t" ] || { echo "usage: ask $sub <askN> <text>" >&2; exit 1; }
@@ -300,14 +303,18 @@ ask)
     ask_file() { local a st tf rc found ex url n; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
       st=$(jq -r .state <<<"$a"); ask_moves "$st" filed || { echo "refused: $id is $st; file does not apply" >&2; return 1; }
       ask_ready "$a" "$id" || return 1
-      tf=$(mktemp "$H/scratch/file.XXXXXX"); { printf '%s\n\n' "$title"; cat "$bf"; } > "$tf"; "$0" check-public "$tf"; rc=$?; rm -f "$tf"
+      # the body that is checked is the body that is filed: a snapshot, never the caller's file
+      bs=$(mktemp "$H/scratch/file-body.XXXXXX") || return 1
+      trap 'rm -f "$bs"' EXIT   # bs is not local: the trap runs as the subshell exits
+      cat "$bf" > "$bs" || { echo "refused: cannot snapshot $bf; nothing filed" >&2; return 1; }
+      tf=$(mktemp "$H/scratch/file.XXXXXX"); { printf '%s\n\n' "$title"; cat "$bs"; } > "$tf"; "$0" check-public "$tf"; rc=$?; rm -f "$tf"
       [ "$rc" = 0 ] || { echo "refused: the title or body failed check-public; nothing filed" >&2; return 1; }
       found=$(timeout 30 gh issue list --repo "$REPO" --state all --limit 50 --search "$title in:title" --json number,title --jq '.[] | "\(.number)\t\(.title)"') \
         || { echo "refused: the duplicate search failed; nothing filed" >&2; return 1; }
       ex=$(awk -F'\t' -v t="$title" 'tolower($2) == tolower(t) {print "#" $1; exit}' <<<"$found")
       [ -z "$ex" ] || { echo "refused: issue $ex already has this exact title" >&2; return 1; }
       [ -z "$found" ] || { echo "similar titles:"; head -5 <<<"$found" | sed 's/^/  #/'; }
-      url=$(timeout 30 gh issue create --repo "$REPO" --title "$title" --body-file "$bf"); rc=$?
+      url=$(timeout 30 gh issue create --repo "$REPO" --title "$title" --body-file "$bs"); rc=$?
       [ "$rc" != 124 ] || { echo "AMBIGUOUS: gh issue create timed out; GitHub may have filed it. Reconcile $id by hand; never retry" >&2; return 1; }
       [ "$rc" = 0 ] || { echo "refused: gh issue create failed; the ledger is unchanged" >&2; return 1; }
       n=$(grep -oE '/issues/[0-9]+' <<<"$url" | tail -1 | cut -d/ -f3)
@@ -416,7 +423,7 @@ launch|resume)
   ( cd "$d" && exec 9>&- env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 setsid nohup claude-usage run "=$a" "${extra[@]}" -p "$(cat "$p")" --model "$model" "${perm[@]}" \
       --settings "$S" "${dirs[@]}" --verbose --output-format stream-json >> "$L" 2>> "$H/leads/$k.err" ) &
   pid=$!
-  record() { printf '%s %s %s %s %s %s %s\n' "$pid" "$(pstart "$pid")" "$a" "$(now)" "$weight" "prompts/$k.md" "$1" > "$H/leads/$k.started.tmp" && mv "$H/leads/$k.started.tmp" "$H/leads/$k.started"; }
+  record() { printf '%s %s %s %s %s %s %s %s\n' "$pid" "$(pstart "$pid")" "$a" "$(now)" "$weight" "prompts/$k.md" "$1" "$w" > "$H/leads/$k.started.tmp" && mv "$H/leads/$k.started.tmp" "$H/leads/$k.started"; }
   # recorded at once (exec keeps the pid and its start time), so a launcher killed during the wait still leaves the lead counted and stoppable
   record "?"
   for _ in 1 2 3 4 5 6 7 8 9 10; do alive "$pid" && break; sleep 0.2; done
@@ -425,7 +432,7 @@ launch|resume)
   echo "$k ${cmd}d on $a pid $pid pgid ${pg:-?} ($weight, $(cfg '.leads.permission_mode // "auto"'), load1 $l1)";;
 stop)
   k=$1; f="$H/leads/$k.started"; [ -f "$f" ] || { echo "$k: no lead record"; exit 1; }
-  read -r pid st _ _ _ _ pg < "$f"; alive "$pid" "$st" || { echo "$k: not alive"; exit 0; }
+  read -r pid st _ _ _ _ pg _ < "$f"; alive "$pid" "$st" || { echo "$k: not alive"; exit 0; }
   # Claude Code starts each Bash-tool shell as its own session leader, so a group kill alone misses a hung tool process:
   # collect the whole tree first, while every child still points at its parent.
   mapfile -t tree < <(ps -eo pid=,ppid= | awk -v r="$pid" '{p[$1]=$2} END {s[r]=1; c=1; while (c) {c=0; for (x in p) if (!(x in s) && (p[x] in s)) {s[x]=1; c=1}}; for (x in s) print x}')
@@ -441,11 +448,11 @@ stop)
 say)
   need flock; k=$1; shift; t="$*"
   [[ "$k" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] && [ -n "$t" ] || { echo "usage: say <key> <text>" >&2; exit 1; }
-  [ -f "$H/leads/$k.started" ] && read -r pid st _ < "$H/leads/$k.started" && alive "$pid" "$st" || { echo "refused: no live lead $k; fold the note into its next prompt" >&2; exit 1; }
+  [ -f "$H/leads/$k.started" ] && read -r pid st _ _ _ _ _ lane _ < "$H/leads/$k.started" && alive "$pid" "$st" || { echo "refused: no live lead $k; fold the note into its next prompt" >&2; exit 1; }
   # leads quote their instructions into committed plans, so a note passes the same ban as a prompt
   # the sensitive pattern stays off: notes routinely name review findings
   tf="$H/scratch/say.$$"; printf '%s\n' "$t" > "$tf"
-  { "$0" check-text "$tf" && "$0" check-public --no-sensitive "$tf" && ask_lines - --no-sensitive "$tf"; }; rc=$?; rm -f "$tf"; [ "$rc" = 0 ] || exit 1
+  { "$0" check-text "$tf" && "$0" check-public --no-sensitive "$tf" && ask_lines "${lane:-?}" --no-sensitive "$tf"; }; rc=$?; rm -f "$tf"; [ "$rc" = 0 ] || exit 1
   line=$(jq -nc --arg t "$(now)" --arg x "$t" '{at: $t, text: $x}')
   [ "$(printf '%s' "$line" | wc -c)" -le 3072 ] || { echo "refused: a note is at most 3 KiB once serialized; put the detail in a file under the lane's scratch dir and name it" >&2; exit 1; }
   ( flock -w 5 8 || exit 1; printf '%s\n' "$line" >&8 ) 8>>"$H/inbox/$k.jsonl" || { echo "refused: inbox lock busy" >&2; exit 1; }

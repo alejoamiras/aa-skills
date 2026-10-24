@@ -7,7 +7,10 @@
 set -u
 L=${1:?usage: overlap.sh <ledger> <file>...}; shift
 for f in "$@"; do [ -r "$f" ] || { echo "overlap: cannot read $f" >&2; exit 2; }; done
-[ -e "$L" ] || exit 0
+if [ ! -e "$L" ]; then   # absent only when the nearest existing ancestor is searchable: -e is also false behind a locked dir
+  a=$(dirname -- "$L"); while [ ! -e "$a" ]; do a=$(dirname -- "$a"); done
+  [ -d "$a" ] && [ -x "$a" ] || { echo "overlap: cannot tell whether $L exists" >&2; exit 2; }; exit 0
+fi
 [ -r "$L" ] || { echo "overlap: cannot read $L" >&2; exit 2; }
 src=$(jq -Rr 'fromjson? | (.text // empty), (.said // empty) | strings | gsub("[\r\n]+"; " ")' "$L") || { echo "overlap: cannot parse $L" >&2; exit 2; }
 [ -n "$src" ] || exit 0

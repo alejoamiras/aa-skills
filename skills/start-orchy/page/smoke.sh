@@ -172,10 +172,11 @@ rm "$P/public-notes.json"
 # a check result edited after signing under the same choice still contributes, so it holds like any other owner text
 cp "$P/decisions.json" "$T/decisions.bak"
 jq '(.records[] | select(.id == "P1-02")) |= (.check = "Open the app and tap Save" | .writes_back.on_result = "## Decision\n\nOwner, {date}: {result}. Next: {next_step}.\n")' "$T/decisions.bak" > "$P/decisions.json"
-cp -r "$P/answers" "$T/ans13"; jq '.choices["P1-02"]="done"' "$T/ans13/decisions/signoff-P1.json" > "$T/c.json" && mv "$T/c.json" "$T/ans13/decisions/signoff-P1.json"
+cp -r "$P/answers" "$T/ans13"; jq '.choices["P1-02"]="done" | .notes["P1-02"]="ask my sister first"' "$T/ans13/decisions/signoff-P1.json" > "$T/c.json" && mv "$T/c.json" "$T/ans13/decisions/signoff-P1.json"
 jq -n '{"__id":"choice-P1-02","page":"decisions","page_no":1,"id":"P1-02","kind":"approve","issue":[2],"choice":"done","result":"works on my sister phone","at":"2026-01-07T10:00:00.000Z","by":"u_example"}' > "$T/ans13/decisions/choice-P1-02.json"
 if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans13" > "$T/apply16.out" 2>&1; then fail "a post-signing result without a wording passed"; fi
 grep 'need a public wording' "$T/apply16.out" | grep -q 'P1-02.result' || fail "post-signing result not held: $(cat "$T/apply16.out")"
+grep 'need a public wording' "$T/apply16.out" | grep -qE 'P1-02(,|$)' || fail "a check's signed note not held: $(cat "$T/apply16.out")"
 cp "$T/decisions.bak" "$P/decisions.json"
 ok "owner text reaches an issue only as a non-copying public wording, wherever it contributes, post-signing edits included"
 
