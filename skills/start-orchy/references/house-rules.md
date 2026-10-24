@@ -73,7 +73,7 @@ A finding becomes a change only once its path is written (initial conditions, ac
 
 - **Only an empty folder becomes a repository**: not `$HOME`, not a folder with files, not a `.git` with history or a remote. orchy never moves or deletes the owner's files to make room.
 - **The token is checked before anything is created**: the classic scopes `repo` and `workflow`, read from `X-OAuth-Scopes`; a missing header stops, since a fine-grained token's permissions cannot be read there. The owner runs the refresh.
-- **Nothing reaches GitHub unscanned or unasked**: the minimum package age is set before the first install, gitleaks reads the tree and the history before the first push, and the name, the visibility (private first) and the public description are the owner's signed answers. That first push is the only direct push to a trunk orchy makes; a failed create is never retried.
+- **Nothing reaches GitHub unscanned or unasked**: the minimum package age is set before the first install, gitleaks reads the tree and the history before the first push, and the name, the visibility (private first) and the public description are the owner's signed answers. What to build becomes `ask1` and its description passes `ask public` before any file is written into the folder. That first push is the only direct push to a trunk orchy makes; a failed create is never retried.
 - **The recorded checks are the jobs of one proven run**: a dispatched run on `main`, identified by time, green, whose job names become `merge.required_checks`. A public repository gets a ruleset requiring a PR and those checks, with no review, since the watcher cannot give one. *Why: without it GitHub enforces nothing orchy records.*
 
 ## The orchestrator's own hygiene
