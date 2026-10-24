@@ -156,7 +156,7 @@ ask_lines() { # ask_lines <slug> [--no-sensitive] <file>...: each `askN: ` line 
   local s=$1 m id t a rc=0 tf lines nosens=(); shift; [ "${1:-}" = --no-sensitive ] && { nosens=(--no-sensitive); shift; }
   tf=$(mktemp "$H/scratch/asklines.XXXXXX"); grep -hE '\bask[0-9]+\b' "$@" > "$tf"
   [ $? -le 1 ] || { echo "refused: cannot read the ask lines of $*" >&2; rm -f "$tf"; return 1; }
-  if [ -s "$tf" ]; then "$0" check-public "${nosens[@]}" "$tf" || rc=1; fi
+  if [ -s "$tf" ]; then "$0" check-public "${nosens[@]}" "$tf" || { echo "refused: a line that names an ask is checked as public text; keep paths and other local detail off it" >&2; rc=1; }; fi
   lines=$(grep -ohE '\bask[0-9]+: .*' "$tf"); [ $? -le 1 ] || { echo "refused: cannot read the ask lines of $*" >&2; rm -f "$tf"; return 1; }
   while IFS= read -r m; do   # one ask per line: the wording runs to the end of it
     [ -n "$m" ] || continue; id=${m%%: *}; t=${m#*: }; t=${t%"${t##*[![:space:]]}"}; a=$(ask_get "$id")
@@ -524,19 +524,21 @@ wait)
     esac; sort <<<"$o"; }
   tick=${ORCHY_WAIT_TICK:-20}; every=$(( $(cfg '.wait.poll_sec // 120') / tick )); [ "$every" -ge 1 ] || every=1
   # Baselines persist in seen/, so what moved while nobody waited (the orchestrator handling the last event) fires at the
-  # first look. A source with no seen file is unknown: its first successful read fires. An exit advances only what it printed.
+  # first look. A source with no seen file is unknown: its first successful read fires. An exit advances only what it printed,
+  # so seen/ only ever holds reported values: a second concurrent wait can report a change twice, never lose one.
   SEEN="$H/seen"; mkdir -p "$SEEN"
   declare -A last=() new=() unread=(); srcs=(prs issues trunk)
   for s in local "${srcs[@]}"; do [ -f "$SEEN/$s" ] && last[$s]=$(cat "$SEEN/$s"); done
   report() { local s l
     for s in "$@"; do l=$s; [ "$s" = local ] && l="reports/leads/watchers"
       echo "CHANGED ($l):" || return 1; diff <(echo "${last[$s]:-}") <(echo "${new[$s]}") | grep '^[<>]' | head -20; done
-    for s in "$@"; do printf '%s\n' "${new[$s]}" > "$SEEN/.$s.tmp" && mv "$SEEN/.$s.tmp" "$SEEN/$s" || return 1; done; }
+    for s in "$@"; do printf '%s\n' "${new[$s]}" > "$SEEN/.$s.$$" && mv "$SEEN/.$s.$$" "$SEEN/$s" || return 1; done; }
   t0=$(date +%s); n=0
   while :; do
     sleep "$tick"; n=$((n+1)); changed=()
     new[local]=$(snap); { [ -n "${last[local]+x}" ] && [ "${new[local]}" = "${last[local]}" ]; } || changed+=(local)
-    if [ $((n % every)) -eq 0 ]; then
+    # the first tick polls too: local events re-arm the wait, and a burst of them must not starve GitHub
+    if [ "$n" = 1 ] || [ $((n % every)) -eq 0 ]; then
       for s in "${srcs[@]}"; do
         v=$(read_src "$s") || { unread[$s]=1; continue; }; unset "unread[$s]"
         # GitHub answers UNKNOWN while it recomputes mergeability; that is not a change

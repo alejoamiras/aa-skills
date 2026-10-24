@@ -41,9 +41,12 @@ const pubKey = (id: string, k: string) => k === "note" ? id : `${id}.${k}`;
 {
   const outbound = [...Object.entries(publicNotes), ...docs.filter(d => typeof d.recorded === "string" && d.recorded).map(d => [`${String(d.__id ?? d.id)}.recorded`, d.recorded as string])];
   if (outbound.length) {
-    const dir = mkdtempSync(join(O, ".outbound-")), files = outbound.map(([, t], i) => { const f = join(dir, `${i}.txt`); writeFileSync(f, t + "\n"); return f; });
+    // the scratch copy holds the owner's words, so it lives beside the ledger, where leads never look, even if a kill skips rmSync
+    const asksDir = process.env.ORCHY_ASKS_DIR ?? join(homedir(), ".agents/orchy/asks");
+    mkdirSync(asksDir, { recursive: true, mode: 0o700 });
+    const dir = mkdtempSync(join(asksDir, ".outbound-")), files = outbound.map(([, t], i) => { const f = join(dir, `${i}.txt`); writeFileSync(f, t + "\n"); return f; });
     // the owner's words: the ask ledger plus the raw page text, read before any wording replaces it
-    const asks = join(process.env.ORCHY_ASKS_DIR ?? join(homedir(), ".agents/orchy/asks"), `${REPO.replace("/", "-")}.jsonl`);
+    const asks = join(asksDir, `${REPO.replace("/", "-")}.jsonl`);
     // existsSync reads an unsearchable directory as absence; only ENOENT is
     try { statSync(asks, { throwIfNoEntry: false }); } catch { console.error("refused: the ask ledger cannot be read, so the copy check cannot run"); process.exit(2); }
     const raw = docs.flatMap(d => [...["note", "result", "next_step", "except"].map(k => d[k]), ...Object.values(d.notes && typeof d.notes === "object" ? d.notes : {})]).filter((t): t is string => typeof t === "string" && t !== "");
