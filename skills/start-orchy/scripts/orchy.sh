@@ -15,6 +15,7 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   launch [--light] <key> <slug> <account>            start a headless lead on prompts/<key>.md inside the lane worktree
 #   resume [--light] <key> <slug> <account> <session>  resume a lead's session with prompts/<key>.md
 #   stop <key>                   end a live lead and every process it started
+#   say <key> <text>             queue a steering note; a live lead gets it after its next tool call (inbox-hook.sh)
 #   session-id <key>             the session id of a lead's latest run
 #   snapshot                     the tick's facts: reports, leads, watchers, PRs, worktrees, load, headroom
 #   wait [seconds]               block until a report, lead, watcher or open-PR state changes (default 1500)
@@ -184,13 +185,40 @@ stop)
   for _ in 1 2 3 4 5 6 7 8 9 10; do left=0; for e in "${ids[@]}"; do [ "$(pstart "${e%%:*}")" = "${e#*:}" ] && left=1; done; [ "$left" = 0 ] && break; sleep 0.5; done
   for e in "${ids[@]}"; do [ "$(pstart "${e%%:*}")" = "${e#*:}" ] && kill -KILL "${e%%:*}" 2>/dev/null; done
   echo "$k: stopped pid $pid and ${#ids[@]} process(es) in its tree";;
+say)
+  need flock; k=$1; shift; t="$*"
+  [[ "$k" =~ ^[A-Za-z0-9._-]+$ ]] && [ -n "$t" ] || { echo "usage: say <key> <text>" >&2; exit 1; }
+  [ -f "$H/leads/$k.started" ] && read -r pid st _ < "$H/leads/$k.started" && alive "$pid" "$st" || { echo "refused: no live lead $k; fold the note into its next prompt" >&2; exit 1; }
+  # leads quote their instructions into committed plans, so a note passes the same ban as a prompt
+  tf="$H/scratch/say.$$"; printf '%s\n' "$t" > "$tf"; "$0" check-text "$tf"; rc=$?; rm -f "$tf"; [ "$rc" = 0 ] || exit 1
+  line=$(jq -nc --arg t "$(now)" --arg x "$t" '{at: $t, text: $x}')
+  [ "$(printf '%s' "$line" | wc -c)" -le 3072 ] || { echo "refused: a note is at most 3 KiB once serialized; put the detail in a file under the lane's scratch dir and name it" >&2; exit 1; }
+  ( flock -w 5 8 || exit 1; printf '%s\n' "$line" >&8 ) 8>>"$H/inbox/$k.jsonl" || { echo "refused: inbox lock busy" >&2; exit 1; }
+  echo "queued for $k";;
 session-id) grep -oE '"session_id":"[0-9a-f-]{36}"' "$H/leads/$1.log" 2>/dev/null | tail -1 | cut -d'"' -f4;;
 snapshot)
   need gh
   echo "== $(now) load1 $(cut -d' ' -f1 /proc/loadavg 2>/dev/null) nproc $(nproc 2>/dev/null)"
   echo "-- reports (newest first)"; ls -t "$H"/reports/*.md 2>/dev/null | head -12 | while read -r f; do printf '%s %s %s\n' "$(date -u -r "$f" +%m-%dT%H:%MZ)" "$(basename "$f")" "$(grep -xE 'LEAD_DONE|LEAD_BLOCKED:.*|ARC_FAILED:.*|SHOTS_READY.*|SHOTS_BLOCKED:.*' "$f" | tail -1 | cut -c1-80)"; done
   echo "-- progress"; for f in "$H"/reports/*.progress; do [ -f "$f" ] && printf '%s: %s\n' "$(basename "$f" .progress)" "$(tail -c 200 "$f" | tr '\n' ' ')"; done
-  echo "-- leads"; lead_rows | while read -r k a w p; do echo "alive $k $a $w pid $p"; done
+  echo "-- leads"
+  # Health without sampling: how long the log has been silent, the progress file's age, and what the newest process in the
+  # lead's tree is doing. STALLED? is advisory; the command and its age are the evidence.
+  stall=$(( $(cfg '.leads.stall_after_min // 20') * 60 )); tnow=$(date +%s); ps_rows=$(ps -eo pid=,ppid=,etimes=,args=)
+  lead_rows | while read -r k a w p; do
+    q=$(( tnow - $(stat -c %Y "$H/leads/$k.log" 2>/dev/null || echo "$tnow") ))
+    pf="$H/reports/$k.progress"; pa=$([ -f "$pf" ] && echo "$(( (tnow - $(stat -c %Y "$pf")) / 60 ))m" || echo "-")
+    newest=$(awk -v r="$p" '
+      { pid=$1; par[pid]=$2; et[pid]=$3; sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+[0-9]+[ \t]+/, ""); cmd[pid]=$0 }
+      END { s[r]=1; c=1; while (c) { c=0; for (x in par) if (!(x in s) && (par[x] in s)) { s[x]=1; c=1 } }
+            best=""; for (x in s) if (x != r && (best == "" || et[x] < et[best])) best=x
+            if (best != "") printf "%s (%dm)", substr(cmd[best], 1, 80), et[best] / 60 }' <<<"$ps_rows")
+    flag=""; [ "$q" -gt "$stall" ] && flag="STALLED? "
+    echo "alive $k $a $w pid $p ${flag}quiet $((q / 60))m progress $pa ${newest:+$newest}"
+  done
+  echo "-- inbox"; for f in "$H"/inbox/*.jsonl; do [ -f "$f" ] || continue
+    c=$(cat "${f%.jsonl}.cursor" 2>/dev/null); [[ "$c" =~ ^[0-9]+$ ]] || c=0
+    n=$(tail -c +"$((c + 1))" "$f" | grep -c ''); [ "$n" -gt 0 ] && echo "$(basename "$f" .jsonl): $n undelivered"; done
   echo "-- watchers"; for f in "$H"/watch/*.pid; do [ -f "$f" ] || continue; n=$(basename "$f" .pid); if watcher_alive "$f"; then echo "alive $n pid $(cut -d' ' -f1 "$f")"; else echo "ended $n: $(tail -n 1 "$H/watch/$n.out" 2>/dev/null | cut -c1-120)"; fi; done
   echo "-- open PRs"; gh pr list --repo "$REPO" --state open --json number,title,headRefOid,mergeable,mergeStateStatus,isDraft,baseRefName --jq '.[]|"#\(.number) \(.headRefOid[0:8]) \(.mergeable) \(.mergeStateStatus) draft=\(.isDraft) -> \(.baseRefName) \(.title)"' 2>/dev/null || echo "(gh pr list failed)"
   echo "-- worktrees"; git -C "$ROOT" worktree list | tail -n +2

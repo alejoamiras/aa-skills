@@ -67,6 +67,28 @@ read -r sp _ < "$ORCHY_HOME/leads/x-b1.started"; gc=$(cat "$MOCK_DIR/gc.$sp"); [
 MOCK_SESSION=00000000-0000-4000-8000-000000000002 "$ORCHY" launch x-b1 x acct-b >/dev/null || fail "relaunch after stop"
 [ "$("$ORCHY" session-id x-b1)" = 00000000-0000-4000-8000-000000000002 ] || fail "session-id is not the latest run's"
 [ "$(grep -c orchy_invocation "$ORCHY_HOME/leads/x-b1.log")" = 2 ] || fail "the relaunch did not append to the log"
+# say + inbox-hook: one delivery per note, to the lead's thread only, whole lines, cursor moved only after the write
+IB="$ORCHY_HOME/inbox/x-b1.jsonl"; hook() { bash "$K/scripts/inbox-hook.sh" "$IB"; }; ctx() { jq -r '.hookSpecificOutput.additionalContext'; }
+"$ORCHY" say x-b1 "$(printf 'café\nsecond line')" | grep -q 'queued' || fail "say"
+[ -z "$(hook <<<'{"agent_id":"a1"}')" ] || fail "a subagent's tool call consumed a note"
+o=$("$ORCHY" snapshot 2>&1); grep -q "^x-b1: 1 undelivered" <<<"$o" || fail "snapshot does not count the undelivered note: $o"
+hook <<<'{}' >&- 2>/dev/null; [ ! -f "${IB%.jsonl}.cursor" ] || fail "a failed write advanced the cursor"
+[ "$(hook <<<'{}' | ctx)" = "$(printf 'ORCHY-STEER: café\nsecond line')" ] || fail "the note did not survive the round trip"
+[ -z "$(hook <<<'{}')" ] || fail "a note was delivered twice"
+printf '{"at":"x","text":"partial"}' >> "$IB"; [ -z "$(hook <<<'{}')" ] || fail "a line without its newline was delivered"
+echo >> "$IB"; [ "$(hook <<<'{}' | ctx)" = "ORCHY-STEER: partial" ] || fail "the completed line was not delivered"
+pad=$(head -c 1000 /dev/zero | tr '\0' x); for i in 1 2 3 4 5 6 7 8; do "$ORCHY" say x-b1 "n$i $pad" >/dev/null || fail "say n$i"; done
+for i in 1 2 3 4 5 6 7 8; do ( hook <<<'{}' > "$T/hook.$i" ) & done; wait
+cat "$T"/hook.? | jq -r '.hookSpecificOutput.additionalContext' | grep -o '^ORCHY-STEER: n[0-9]' | sort | uniq -c > "$T/hook.count"
+[ "$(wc -l < "$T/hook.count")" = 8 ] && ! grep -qv '^ *1 ' "$T/hook.count" || fail "parallel hooks did not deliver each note once: $(cat "$T/hook.count")"
+[ "$(cat "$T"/hook.? | grep -c 'additionalContext')" -lt 8 ] || fail "notes that fit in 4 KiB were not delivered together"
+o=$("$ORCHY" say x-zz hi 2>&1 || true); grep -q 'no live lead' <<<"$o" || fail "say queued for a dead key: $o"
+o=$("$ORCHY" say x-b1 "use acct-a" 2>&1 || true); grep -q 'banned text' <<<"$o" || fail "say queued banned text: $o"
+o=$("$ORCHY" say x-b1 "$(head -c 3100 /dev/zero | tr '\0' x)" 2>&1 || true); grep -q 'at most 3 KiB' <<<"$o" || fail "say queued an oversized note: $o"
+# health: quiet time from the log, progress age, the newest process in the tree, STALLED? past leads.stall_after_min
+touch -d '30 minutes ago' "$ORCHY_HOME/leads/x-b1.log"; touch "$ORCHY_HOME/reports/x-b1.progress"
+o=$("$ORCHY" snapshot 2>/dev/null | grep '^alive x-b1 '); grep -qE 'STALLED\? quiet 30m progress 0m sleep' <<<"$o" || fail "lead health line: $o"
+o=$("$ORCHY" snapshot 2>/dev/null | grep '^alive x-c1 \|^alive x-c2 \|^alive x-c3 ' | head -1); grep -q 'STALLED' <<<"$o" && fail "a fresh lead was flagged: $o"
 # scan: a gh failure is loud, never a clean report
 jq -n '{body:"body", commits:[{messageHeadline:"feat: x", messageBody:"ran with CLAUDE_ACCOUNT=acct-a"}]}' > "$MOCK_DIR/pr-7.json"
 printf 'diff --git a/x b/x\n+++ b/x\n+ok\n' > "$MOCK_DIR/diff-7.txt"; printf 'x\n' > "$MOCK_DIR/files-7.txt"
