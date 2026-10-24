@@ -10,7 +10,7 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   config <jq-expr>             read $ORCHY_HOME/orchy.json ('.trunk', '.merge.required_checks[]')
 #   local <jq-expr>              read $ORCHY_HOME/local.json (accounts, caps)
 #   lock | unlock                claim this repo's orchestrator seat (refuses while another session holds it)
-#   render <template> K=V ...    substitute <K> tokens in a template file to stdout; exit 1 on a token left over
+#   render [--keep K,...] <template> K=V ...   substitute <K> tokens to stdout; exit 1 on a token left over that --keep does not name
 #   check-text <file>...         refuse a file carrying a banned string (local.json prompt_ban: roster names, page ids)
 #   check-private <file>...      refuse a file that copies six consecutive words of the owner's verbatim words in the ask ledger
 #   check-public [--no-sensitive] <file>   check-private, then the leak and sensitive patterns and gitleaks; any check error refuses
@@ -203,16 +203,18 @@ unlock)
     if [ $mine = 1 ] || [ $gone = 1 ]; then rm -f "$f"; echo "unlocked"; exit 0; fi
     echo "refused: pid $p holds the seat and is alive; it is not this session"; exit 2 ) 9>"$f.takeover";;
 render)
-  t=$1; shift; [ -f "$t" ] || t="$(dirname "$0")/../templates/$t"
-  [ -f "$t" ] || { echo "orchy: no template $1" >&2; exit 1; }
+  # the shared briefs keep <LANE>, <KEY>, <WORKTREE> and <BRANCH>: each spawn prompt binds them for its lead
+  keep=; [ "${1:-}" = --keep ] && { keep=${2:-}; shift 2; }
+  name=${1:-}; t=$name; shift; [ -f "$t" ] || t="$(dirname "$0")/../templates/$t"
+  [ -f "$t" ] || { echo "orchy: no template $name" >&2; exit 1; }
   # values may carry newlines, '|', '&' or '/': a plain string replace, never sed
-  python3 -I - "$t" "$@" <<'PY'
+  python3 -I - "$t" "$keep" "$@" <<'PY'
 import sys, re
 t = open(sys.argv[1]).read()
-for kv in sys.argv[2:]:
+for kv in sys.argv[3:]:
     k, _, v = kv.partition("="); t = t.replace(f"<{k}>", v)
 sys.stdout.write(t)
-left = sorted(set(re.findall(r"<[A-Z_]{3,}>", t)))
+left = sorted(set(re.findall(r"<[A-Z_]{3,}>", t)) - {f"<{k}>" for k in sys.argv[2].split(",") if k})
 if left: print("orchy: unrendered tokens: " + " ".join(left), file=sys.stderr); sys.exit(1)
 PY
   ;;
@@ -433,7 +435,7 @@ launch|resume)
   for _ in 1 2 3 4 5 6 7 8 9 10; do alive "$pid" && break; sleep 0.2; done
   pg=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' '); record "${pg:-?}"
   exec 9>&-
-  echo "$k ${cmd}d on $a pid $pid pgid ${pg:-?} ($weight, $(cfg '.leads.permission_mode // "auto"'), load1 $l1)";;
+  echo "$k ${cmd%e}ed on $a pid $pid pgid ${pg:-?} ($weight, $(cfg '.leads.permission_mode // "auto"'), load1 $l1)";;
 stop)
   k=$1; f="$H/leads/$k.started"; [ -f "$f" ] || { echo "$k: no lead record"; exit 1; }
   read -r pid st _ _ _ _ pg _ < "$f"; alive "$pid" "$st" || { echo "$k: not alive"; exit 0; }
@@ -514,32 +516,35 @@ wait)
     lead_rows | awk '{print "alive", $1}'
     for f in "$H"/watch/*.pid; do watcher_alive "$f" && echo "watcher $(basename "$f" .pid)"; done
   }
-  # GitHub every poll_sec, in three independent reads: one that fails keeps its last value and never hides another's change.
+  # GitHub every poll_sec, in three independent reads: one that fails keeps its baseline and never hides another's change.
   read_src() { local o; case $1 in
     prs) o=$(timeout 30 gh pr list --repo "$REPO" --state open --limit 1000 --json number,headRefOid,mergeable,isDraft --jq '.[]|"\(.number) \(.headRefOid[0:8]) \(.mergeable) \(.isDraft)"' 2>/dev/null) || return 1;;
     issues) o=$(timeout 30 gh issue list --repo "$REPO" --state open --limit 1000 --json number,updatedAt --jq '.[]|"\(.number) \(.updatedAt)"' 2>/dev/null) || return 1;;
     trunk) o=$(timeout 30 gh api "repos/$REPO/commits/$TRUNK" --jq .sha 2>/dev/null) && sha_ok "$o" || return 1;;
     esac; sort <<<"$o"; }
   tick=${ORCHY_WAIT_TICK:-20}; every=$(( $(cfg '.wait.poll_sec // 120') / tick )); [ "$every" -ge 1 ] || every=1
+  # Baselines persist in seen/, so what moved while nobody waited (the orchestrator handling the last event) fires at the
+  # first look. A source with no seen file is unknown: its first successful read fires. An exit advances only what it printed.
+  SEEN="$H/seen"; mkdir -p "$SEEN"
   declare -A last=() new=() unread=(); srcs=(prs issues trunk)
-  # a source unread at the start has no baseline: its first successful read is a change, not the new normal
-  for s in "${srcs[@]}"; do if v=$(read_src "$s"); then last[$s]=$v; else unread[$s]=1; fi; done
-  a=$(snap); t0=$(date +%s); n=0
+  for s in local "${srcs[@]}"; do [ -f "$SEEN/$s" ] && last[$s]=$(cat "$SEEN/$s"); done
+  report() { local s l
+    for s in "$@"; do l=$s; [ "$s" = local ] && l="reports/leads/watchers"
+      echo "CHANGED ($l):" || return 1; diff <(echo "${last[$s]:-}") <(echo "${new[$s]}") | grep '^[<>]' | head -20; done
+    for s in "$@"; do printf '%s\n' "${new[$s]}" > "$SEEN/.$s.tmp" && mv "$SEEN/.$s.tmp" "$SEEN/$s" || return 1; done; }
+  t0=$(date +%s); n=0
   while :; do
-    sleep "$tick"; n=$((n+1)); b=$(snap)
-    if [ "$a" != "$b" ]; then echo "CHANGED (reports/leads/watchers):"; diff <(echo "$a") <(echo "$b") | grep '^[<>]' | head -20; exit 0; fi
+    sleep "$tick"; n=$((n+1)); changed=()
+    new[local]=$(snap); { [ -n "${last[local]+x}" ] && [ "${new[local]}" = "${last[local]}" ]; } || changed+=(local)
     if [ $((n % every)) -eq 0 ]; then
-      changed=()
       for s in "${srcs[@]}"; do
         v=$(read_src "$s") || { unread[$s]=1; continue; }; unset "unread[$s]"
         # GitHub answers UNKNOWN while it recomputes mergeability; that is not a change
         [ "$s" = prs ] && [ -n "${last[$s]+x}" ] && v=$(awk 'NR==FNR{m[$1]=$3; next} ($1 in m) && $3=="UNKNOWN"{$3=m[$1]} {print}' <(echo "${last[$s]}") <(echo "$v"))
         if [ -z "${last[$s]+x}" ] || [ "$v" != "${last[$s]}" ]; then changed+=("$s"); new[$s]=$v; fi
       done
-      if [ ${#changed[@]} -gt 0 ]; then
-        for s in "${changed[@]}"; do echo "CHANGED ($s):"; diff <(echo "${last[$s]:-}") <(echo "${new[$s]}") | grep '^[<>]' | head -20; done; exit 0
-      fi
     fi
+    if [ ${#changed[@]} -gt 0 ]; then report "${changed[@]}"; exit $?; fi
     if [ $(( $(date +%s) - t0 )) -ge "$LIMIT" ]; then u="${!unread[*]}"; echo "TIMEOUT after ${LIMIT}s, no change${u:+; unreadable: $u}"; exit 0; fi
   done;;
 scan)

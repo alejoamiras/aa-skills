@@ -18,6 +18,7 @@ mkdir -p "$ORCHY_HOME"; jq '.install="true"' "$K/examples/orchy.example.json" > 
 # render: every token substituted; a token left over is exit 1
 out=$("$ORCHY" render common-brief.md REPO=example/app PRODUCT="the app" TRUNK=dev WORKTREE=/w/x BRANCH=worktree-x LANE=x KEY=x-plan PLANS_DIR=plans ARCHIVE_DIR=plans/archive ORCHY_HOME="$ORCHY_HOME" CODEX_EFFORT=high CODEX_MODEL=gpt-6.1-sol CODEX_MODEL_SHORT=sol LEAD_MODEL=opus LEAD_MODEL_NAME="Claude Opus 5.5" QUALITY_BAR=production GATES="lint, test" PROTECTED=main KNOWN_LIMIT_LABEL=known-limit DELEGATIONS="" NEVER_OPEN="")
 grep -q 'example/app backlog program (the app)' <<<"$out" || fail "render substitution"
+"$ORCHY" render --keep LANE,KEY,WORKTREE,BRANCH common-brief.md REPO=example/app PRODUCT=x TRUNK=dev PLANS_DIR=plans ARCHIVE_DIR=plans/archive ORCHY_HOME="$ORCHY_HOME" CODEX_EFFORT=high CODEX_MODEL=m CODEX_MODEL_SHORT=s LEAD_MODEL=opus LEAD_MODEL_NAME=x QUALITY_BAR=p GATES=g PROTECTED=main KNOWN_LIMIT_LABEL=k DELEGATIONS= NEVER_OPEN= | grep -q '<WORKTREE>' || fail "render --keep did not keep the lead-bound tokens"
 if "$ORCHY" render common-brief.md REPO=x >/dev/null 2>&1; then fail "render must fail on a leftover token"; fi
 for t in planner-brief implementer-brief lane-brief plan-spawn arc-spawn closeout-spawn shots-spawn goal tick; do [ -f "$K/templates/$t.md" ] || fail "template $t missing"; done
 for t in goal tick; do "$ORCHY" render "$t.md" REPO=example/app ORCHY_HOME="$ORCHY_HOME" ORCHY_SH="$ORCHY" MERGE_METHOD=squash PROTECTED=main TRUNK=dev CAPS="2 heavy, 3 light" LOAD_MAX=6 BLOCKED_LABEL=blocked:external > "$T/$t.txt" || fail "render $t left a token"; "$ORCHY" check-text "$T/$t.txt" >/dev/null || fail "check-text $t"; done
@@ -336,17 +337,17 @@ kill "$sb"; wait "$sb" 2>/dev/null || true; "$ORCHY" unlock | grep -qx unlocked 
 # wait, in fast motion (1 s ticks and polls), in a home of its own so no lead or report moves under it
 HW="$T/cap/hw"; mkdir -p "$HW"; jq '.wait.poll_sec=1' "$ORCHY_HOME/orchy.json" > "$HW/orchy.json"; cp "$ORCHY_HOME/local.json" "$HW/"
 jq -n '[{number:1,updatedAt:"2026-01-01T00:00:00Z"}]' > "$MOCK_DIR/issues.json"; jq -n '{sha:"1111111111111111111111111111111111111111"}' > "$MOCK_DIR/trunk.json"; rm -f "$MOCK_DIR/open.json"
-w() { ORCHY_HOME="$HW" ORCHY_WAIT_TICK=1 "$ORCHY" wait "$1" > "$T/w.out" 2>&1 & wp=$!; sleep 1.5; }
-w 20; jq '. + [{number:2,updatedAt:"2026-01-02T00:00:00Z"}]' "$MOCK_DIR/issues.json" > "$T/i.json" && mv "$T/i.json" "$MOCK_DIR/issues.json"; wait "$wp"
-grep -q 'CHANGED (issues)' "$T/w.out" || fail "wait missed a new issue: $(cat "$T/w.out")"
-w 20; jq -n '{sha:"2222222222222222222222222222222222222222"}' > "$MOCK_DIR/trunk.json"; jq '.[0].updatedAt="2026-01-03T00:00:00Z"' "$MOCK_DIR/issues.json" > "$T/i.json" && mv "$T/i.json" "$MOCK_DIR/issues.json"; wait "$wp"
-[ "$(grep -cE '^CHANGED \((trunk|issues)\)' "$T/w.out")" = 2 ] || fail "wait did not report both sources that moved in one poll: $(cat "$T/w.out")"
-touch "$MOCK_DIR/fail-issues"; w 20; jq -n '{sha:"3333333333333333333333333333333333333333"}' > "$MOCK_DIR/trunk.json"; wait "$wp"
-grep -q 'CHANGED (trunk)' "$T/w.out" || fail "a failing issue read hid a trunk move: $(cat "$T/w.out")"
-w 20; rm "$MOCK_DIR/fail-issues"; wait "$wp"; grep -q 'CHANGED (issues)' "$T/w.out" || fail "an issue read that recovered was taken as the baseline: $(cat "$T/w.out")"
-touch "$MOCK_DIR/fail-issues"; ORCHY_HOME="$HW" ORCHY_WAIT_TICK=1 "$ORCHY" wait 2 > "$T/w.out" 2>&1; rm "$MOCK_DIR/fail-issues"
-grep -q 'TIMEOUT after 2s, no change; unreadable: issues' "$T/w.out" || fail "a timeout did not name the unreadable source: $(cat "$T/w.out")"
-o=$(ORCHY_HOME="$HW" ORCHY_WAIT_TICK=1 "$ORCHY" wait 2 2>&1); [ "$o" = "TIMEOUT after 2s, no change" ] || fail "a quiet wait did not time out cleanly: $o"
+w() { ORCHY_HOME="$HW" ORCHY_WAIT_TICK=1 "$ORCHY" wait "$1" > "$T/w.out" 2>&1; }
+w 5; [ "$(grep -cE '^CHANGED \((issues|trunk|prs|reports/leads/watchers)\)' "$T/w.out")" = 4 ] || fail "sources with no seen file did not fire on their first read: $(cat "$T/w.out")"
+# between two waits nobody watches: the next wait compares against what the last one reported, so the gap is seen
+jq '. + [{number:2,updatedAt:"2026-01-02T00:00:00Z"}]' "$MOCK_DIR/issues.json" > "$T/i.json" && mv "$T/i.json" "$MOCK_DIR/issues.json"
+w 5; [ "$(grep '^CHANGED' "$T/w.out")" = 'CHANGED (issues):' ] || fail "an issue added between two waits was absorbed: $(cat "$T/w.out")"
+jq -n '{sha:"2222222222222222222222222222222222222222"}' > "$MOCK_DIR/trunk.json"; jq '.[0].updatedAt="2026-01-03T00:00:00Z"' "$MOCK_DIR/issues.json" > "$T/i.json" && mv "$T/i.json" "$MOCK_DIR/issues.json"
+w 5; [ "$(grep -cE '^CHANGED \((trunk|issues)\)' "$T/w.out")" = 2 ] || fail "wait did not report both sources that moved in one poll: $(cat "$T/w.out")"
+w 2; [ "$(cat "$T/w.out")" = "TIMEOUT after 2s, no change" ] || fail "reported changes fired again, or a quiet wait did not time out cleanly: $(cat "$T/w.out")"
+touch "$MOCK_DIR/fail-issues"; jq -n '{sha:"3333333333333333333333333333333333333333"}' > "$MOCK_DIR/trunk.json"
+w 5; grep -q 'CHANGED (trunk)' "$T/w.out" || fail "a failing issue read hid a trunk move: $(cat "$T/w.out")"
+w 2; rm "$MOCK_DIR/fail-issues"; grep -q 'TIMEOUT after 2s, no change; unreadable: issues' "$T/w.out" || fail "a timeout did not name the unreadable source: $(cat "$T/w.out")"
 rm -f "$MOCK_DIR/issues.json" "$MOCK_DIR/trunk.json"
 wait "$pgp" || { tail -n 20 "$T/page.log"; fail "page smoke"; }; pgp=
 # no project names, home paths or roster names anywhere in the skill

@@ -66,7 +66,7 @@ A finding becomes a change only once its path is written (initial conditions, ac
 ## Always on
 
 - **The program never ends by itself.** Idle stops the goal and the loop and keeps the Monitor and the seat; only the owner's word stops everything. Idle never invents work. *Why: the owner wants orchy constantly running, and work it invented would be work nobody asked for.*
-- **The Monitor polls GitHub every `wait.poll_sec` (120 s)**: open PRs, open issues by `updatedAt` (comments and edits count) and the trunk head, three reads of about 90 calls an hour, each under `timeout 30`. A failed read keeps its last value and never hides another source's change; a source unread at the start takes its first successful read as a change. A page signature is invisible to the shell: the loop or the owner's word finds it.
+- **The Monitor polls GitHub every `wait.poll_sec` (120 s)**: open PRs, open issues by `updatedAt` (comments and edits count) and the trunk head, three reads of about 90 calls an hour, each under `timeout 30`. A failed read keeps its last value and never hides another source's change; each source's last reported value lives in `$ORCHY_HOME/seen/`, so a change between two waits fires at the next, and a source with no recorded value takes its first successful read as a change. A page signature is invisible to the shell: the loop or the owner's word finds it.
 - **The seat is for a coordinator to find.** `orchestrator.lock` holds `pid pstart time session address`: the session id and `uds:<messaging socket>`, never the messaging token. Ownership is pid plus start time, never the session string; a coordinator checks both before it sends anything. `unlock` removes the seat only when this session holds it or its holder is gone.
 
 ## The orchestrator's own hygiene
@@ -87,5 +87,5 @@ A finding becomes a change only once its path is written (initial conditions, ac
 - The copy check catches a copied sentence, not a disclosure: a private fact the orchestrator carries into a restatement, paraphrased or in under six words, passes every check. The restatement rule, the wording gate and the owner's reading stop it.
 - Leads and their reviewers run as the owner's user, so the brief's never-open line, not the OS, keeps them out of the ask ledger.
 - `ask file` that times out after GitHub accepted the issue, or a crash between the create and the `filed` row, leaves an issue the ledger does not know: reconcile by hand, never retry.
-- The Monitor's baseline lives only inside one `wait`. A new issue or PR that lands between two waits is seen by the next snapshot; an edit or a comment on an already-triaged issue in that gap is seen only by a resume's reread (`updated:>=`).
+- `seen/` advances when a `wait` reports a change, not when the orchestrator handles it: a session that dies in between loses that event to every later `wait`, and only a resume's reread (`updated:>=`) finds it again.
 - The close-out guard reads open PRs before taking the spawn lock: a close-out lead that opens its PR and exits inside that window is seen by neither check, and a second close-out can start. Closing it needs a network call under the lock.

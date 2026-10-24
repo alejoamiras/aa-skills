@@ -5,7 +5,6 @@ One Claude Code session runs a repository as an always-on program, and is where 
 What makes it safe to leave running:
 
 - **The owner's words stay on the machine.** Each ask is kept in a private local ledger and leaves only as a restatement that carries the behavior and how to check it, never people, places, reasons or quotes; a restatement that dropped anything waits for the owner's OK before any lead or reviewer sees it, and every outbound text passes a copy check and a secret scan.
-
 - **Leads never merge; the orchestrator merges only on a mechanical policy** (pinned head, every required check green, MERGEABLE CLEAN, the lead's own done marker, a gate-weakening scan it reads), and never into a protected branch.
 - **The owner decides what a person sees**, on a decision page with each option's own picture, or by a message quoted on the issue. Nothing visible ships on an audit's approve.
 - **Nothing leaves the machine that maps the owner's accounts**: a prompt that carries a roster name is refused before the launch, and a PR whose diff, body or commit messages carry a home path or an account assignment is flagged before it merges.
