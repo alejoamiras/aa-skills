@@ -106,7 +106,7 @@ Other keys are ignored. A ref shows a row when any of these hold:
 - No text cites context (file names, record ids, "plan", "precedent").
 - No brief record sits on another page.
 
-**lanes.json:** `{"lanes": [{"slug", "wave"?, "arcs": [{"id", "name"?, "issues", "depends_on": [{"decision"|"gate"|"lane"|"issue", "reason"}], "e2e": [str], "visible"}], "no_arc": [{"issue", "reason"}]}], "proposed_order": {"waves": [{"wave", "lanes": [slug]}]}, "unassigned": [{"issue", "reason"}]}`. An issue's `## Pickup` names its lane, arc, wave, prerequisites, merge holds and gates.
+**lanes.json:** `{"lanes": [{"slug", "wave"?, "arcs": [{"id", "name"?, "issues", "asks"?: ["askN"], "depends_on": [{"decision"|"gate"|"lane"|"issue", "reason"}], "e2e": [str], "visible"}], "no_arc": [{"issue", "reason"}]}], "proposed_order": {"waves": [{"wave", "lanes": [slug]}]}, "unassigned": [{"issue", "reason"}]}`. An issue's `## Pickup` names its lane, arc, wave, prerequisites, merge holds and gates. `issues` stays required and may be `[]` for an arc that only delivers asks; apply never reads `asks`.
 
 **Answer docs:**
 
@@ -179,9 +179,10 @@ bun $S/apply-decisions.ts --answers <fresh dir> --apply     # gh issue edit, lan
 - **Visual and charter items** must be chosen before their page can be signed. Everything else on the page is approved by the signature.
 - **`DROP_PAGES`** lists settled pages, because an artifact version holds at most 511 files. Their rows leave the build and their files go to `_drop-files.json`. A file that a kept row still shows is never listed.
 - **`writes_back`:** every record needs the templates for its kind before apply runs. A missing one makes apply throw before anything is written.
-- **Notes** go into public issue bodies. A note matching `site.sensitive` stops apply with exit 4 until `public-notes.json` maps that record id to reviewed wording. Any free text, reviewed wording included, that matches `orchy.json` `scan.leak` or `local.json` `prompt_ban` (a home path, an account name, a page link) also stops apply with exit 4.
-  - The default pattern catches findings, advisories, GHSA, vulnerabilities, exploits, attacks and "confidential".
+- **The owner's text is private.** A field the owner wrote (`note`, signed or snapshotted, `result`, `next_step`) that reaches an issue body (what the signoff selects) stops apply with exit 4 until `public-notes.json` carries its public wording; a field that reaches no issue never holds. Every wording and every `recorded` text then must not copy six consecutive words of the ask ledger or of the owner's raw page text (`scripts/overlap.sh`), and must pass `gitleaks stdin`; either check failing to run refuses with exit 2. Any free text, reviewed wording included, that matches `orchy.json` `scan.leak` or `local.json` `prompt_ban` (a home path, an account name, a page link) also stops apply with exit 4.
+  - `site.sensitive` holds the orchestrator's own `recorded` text; the default pattern catches findings, advisories, GHSA, vulnerabilities, exploits, attacks and "confidential".
   - Add reviewers' names to `site.sensitive`.
+  - A `reply.note` in a page spec quotes the note's public wording, never the raw note: the page's bytes can be forwarded.
 - **Captions and surfaces** describe what the owner sees, never a reviewer, a finding or a defect.
 - **Data safety:** page.js writes record ids, page numbers and issue numbers into the HTML unescaped, and stores answers under `choice-<id>`.
   - So gen.py and add-page.py refuse an id outside `[A-Za-z0-9_.-]` and any number that is not an integer.

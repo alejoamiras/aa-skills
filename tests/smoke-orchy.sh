@@ -18,6 +18,7 @@ out=$("$ORCHY" render common-brief.md REPO=example/app PRODUCT="the app" TRUNK=d
 grep -q 'example/app backlog program (the app)' <<<"$out" || fail "render substitution"
 if "$ORCHY" render common-brief.md REPO=x >/dev/null 2>&1; then fail "render must fail on a leftover token"; fi
 for t in planner-brief implementer-brief lane-brief plan-spawn arc-spawn closeout-spawn shots-spawn goal tick; do [ -f "$K/templates/$t.md" ] || fail "template $t missing"; done
+for t in goal tick; do "$ORCHY" render "$t.md" REPO=example/app ORCHY_HOME="$ORCHY_HOME" ORCHY_SH="$ORCHY" MERGE_METHOD=squash PROTECTED=main TRUNK=dev CAPS="2 heavy, 3 light" LOAD_MAX=6 BLOCKED_LABEL=blocked:external > "$T/$t.txt" || fail "render $t left a token"; "$ORCHY" check-text "$T/$t.txt" >/dev/null || fail "check-text $t"; done
 # every rendered brief passes check-text (no roster name, no account-variable assignment)
 printf '%s\n' "$out" > "$T/brief.md"; "$ORCHY" check-text "$T/brief.md" || fail "rendered common brief fails check-text"
 printf 'run it on acct-a\n' > "$T/bad.md"; if "$ORCHY" check-text "$T/bad.md" >/dev/null 2>&1; then fail "check-text accepted a roster name"; fi
@@ -274,7 +275,7 @@ rm -f "$MOCK_DIR/issues.json"
 c=(); for i in 1 2 3 4 5; do c[i]=$(A add "close-lane case $i"); A public "${c[i]}" "Close-lane requirement number $i" >/dev/null; A lane "${c[i]}" cl "a repo change" >/dev/null || fail "lane ${c[i]}"; done
 A drop "${c[4]}" "withdrawn" >/dev/null
 RP="$ORCHY_HOME/reports"; mkdir -p "$RP"
-printf 'LEAD_DONE\nASKS: delivered %s %s\n' "${c[1]}" "${c[2]}" > "$RP/cl-plan.md"
+printf 'LEAD_DONE\nASKS: delivered %s %s %s\n' "${c[1]}" "${c[2]}" "${c[3]}" > "$RP/cl-plan.md"   # a plan delivers nothing
 printf 'LEAD_DONE\nPR #31 add it ready checks: green\nASKS: delivered %s %s; left out %s the API it needs is missing\n' "${c[1]}" "${c[5]}" "${c[2]}" > "$RP/cl-a1.md"
 printf 'LEAD_DONE\nPR #32 retry ready checks: green\nASKS: left out %s not needed\n' "${c[5]}" > "$RP/cl-arc1.md"
 printf 'LEAD_DONE\nPR #40 other ready checks: green\nASKS: delivered %s\n' "${c[3]}" > "$RP/cl-a11y-a1.md"
@@ -283,7 +284,7 @@ A close-lane cl > "$T/cl.out" || fail "close-lane: $(cat "$T/cl.out")"
 st() { A show "$1" | sed '/^-- history/,$d' | jq -r '"\(.state) \(.notes[-1])"'; }
 [ "$(st "${c[1]}")" = "done delivered in cl PR #31" ] || fail "delivered ask: $(st "${c[1]}")"
 [ "$(st "${c[2]}")" = "open lane cl closed without delivering it: the API it needs is missing" ] || fail "a later left-out did not win: $(st "${c[2]}")"
-[ "$(st "${c[3]}")" = "open lane cl closed without delivering it: not reported" ] || fail "an unreported ask (another lane's report ignored): $(st "${c[3]}")"
+[ "$(st "${c[3]}")" = "open lane cl closed without delivering it: not reported" ] || fail "an unreported ask (the plan's claim and another lane's report ignored): $(st "${c[3]}")"
 [ "$(st "${c[4]}")" = "dropped withdrawn" ] || fail "a dropped ask was touched: $(st "${c[4]}")"
 [ "$(st "${c[5]}")" = "open lane cl closed without delivering it: conflicting reports a1/arc1" ] || fail "a1/arc1 conflict: $(st "${c[5]}")"
 o=$(A lane "${c[3]}" cl "again" 2>&1 || true); grep -q 'lane cl is closed' <<<"$o" || fail "ask lane reused a closed slug: $o"

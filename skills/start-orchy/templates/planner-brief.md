@@ -16,7 +16,7 @@ Files, all under `<WORKTREE>/<PLANS_DIR>/<LANE>/`: `plan.md`, `recon.md`, `OWNER
 
 ## Final report
 
-The common brief's block: `LEAD_DONE` (or `LEAD_BLOCKED`), no PR line, `OWNER_ASKS: <none | path>`, `PLAN: <PLANS_DIR>/<LANE>/plan.md`, then at most ten lines: the arcs and what each closes, every issue claim that did not hold, the panel verdicts (round by round), the open asks, anything the implementer must know. Nothing is approved until the orchestrator says so. A plan whose Codex audit could not run (`CODEX: unavailable`) ends with `LEAD_BLOCKED: codex unavailable`, never `LEAD_DONE`: the orchestrator runs that audit and resumes you.
+The common brief's block: `LEAD_DONE` (or `LEAD_BLOCKED`), no PR line, `OWNER_ASKS: <none | path>`, `ASKS: <none | left out askN <reason>; ...>` (a plan delivers nothing: name only the asks it leaves out), `PLAN: <PLANS_DIR>/<LANE>/plan.md`, then at most ten lines: the arcs and what each closes, every issue claim that did not hold, the panel verdicts (round by round), the open asks, anything the implementer must know. Nothing is approved until the orchestrator says so. A plan whose Codex audit could not run (`CODEX: unavailable`) ends with `LEAD_BLOCKED: codex unavailable`, never `LEAD_DONE`: the orchestrator runs that audit and resumes you.
 
 ## Auto-continue (only when the spawn prompt says `auto-continue`)
 

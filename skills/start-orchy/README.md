@@ -1,8 +1,10 @@
 # start-orchy
 
-One Claude Code session runs a repository's whole backlog as a program: it triages the open issues into lanes, gives each lane its own git worktree and a headless lead on one of the owner's other `claude-usage` accounts, merges converged PRs on a fixed policy, and turns every product decision into a page with pictures that the owner signs. It ticks every 35 minutes and reads only files, so it survives the owner being away.
+One Claude Code session runs a repository as an always-on program, and is where the owner asks for anything about it: a question is answered, a change becomes a lane, "file it" becomes an issue. It triages the open issues into lanes too, gives each lane its own git worktree and a headless lead on one of the owner's other `claude-usage` accounts, merges converged PRs on a fixed policy, and turns every product decision into a page with pictures that the owner signs. It watches PRs, issues and the trunk every two minutes, ticks every 35 minutes while there is work, and idles without inventing any when there is none.
 
 What makes it safe to leave running:
+
+- **The owner's words stay on the machine.** Each ask is kept in a private local ledger and leaves only as a restatement that carries the behavior and how to check it, never people, places, reasons or quotes; a restatement that dropped anything waits for the owner's OK before any lead or reviewer sees it, and every outbound text passes a copy check and a secret scan.
 
 - **Leads never merge; the orchestrator merges only on a mechanical policy** (pinned head, every required check green, MERGEABLE CLEAN, the lead's own done marker, a gate-weakening scan it reads), and never into a protected branch.
 - **The owner decides what a person sees**, on a decision page with each option's own picture, or by a message quoted on the issue. Nothing visible ships on an audit's approve.
