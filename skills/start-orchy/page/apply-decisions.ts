@@ -74,7 +74,7 @@ const ownerRow = (s: Doc, p: any, r: any, a: Doc | undefined, recommended: strin
   if (!(s.choices && typeof s.choices === "object" && r.id in s.choices)) return;
   const chosen: string = a?.choice ?? recommended;
   ownerRows.push({ repo: REPO, page: p.no, record: r.id, kind: r.kind ?? "charter", category: r.category ?? "other", recommended, chosen,
-    agreed: chosen === "read" ? null : agreeOn(chosen), explicit: s.choices[r.id] !== null, via_recommend_all: a?.viaRecommendAll === true, note: a?.note ?? "", signed_at: s.at ?? "" });
+    agreed: chosen === "read" ? null : agreeOn(chosen), explicit: s.choices[r.id] !== null, via_recommend_all: Array.isArray(s.taken_all) ? s.taken_all.includes(r.id) : a?.viaRecommendAll === true, note: a?.note ?? "", signed_at: s.at ?? "" });
 };
 const heldIssues = new Set<number>();
 const heldPages: number[] = [];
@@ -94,8 +94,8 @@ const signed = (s: Doc, id: string): Doc | undefined => {
   if (!(s.choices && typeof s.choices === "object" && id in s.choices)) return live;   // a signoff without a snapshot: the live doc
   const snap = s.choices[id];
   if (snap === null) return undefined;
-  if (live && live.choice !== snap) {
-    manual.push(`${id} changed after page ${s.page_no} was signed (signed ${snap}, now ${live.choice}); held until the page is signed again`);
+  if ((live?.choice ?? null) !== snap) {
+    manual.push(`${id} changed after page ${s.page_no} was signed (signed ${snap}, now ${live?.choice ?? "the default"}); held until the page is signed again`);
     const rec = D.records.find((r: any) => r.id === id) ?? charterById[id]; for (const n of rec?.issue ?? rec?.applies_to ?? []) heldIssues.add(n);
     return HELD;
   }
@@ -161,7 +161,8 @@ function pickup(n: number): string {
   const lines = [`## Pickup`, ``, `Lane \`${a.lane.slug}\`, ${a.arc.id}${a.arc.name ? ` (${a.arc.name})` : ""}; wave ${wave}.`, ``];
   if (pre.length) lines.push(`Prerequisites:`, ...pre, ``);
   if (holds.length) lines.push(`Merge holds: ${holds.join(", ")} (decision page 0).`, ``);
-  if ((a.arc.e2e ?? []).length || a.arc.visible) lines.push(`Gates before the PR opens: ${(a.arc.e2e ?? []).map((g: string) => `\`${g}\``).join(", ")}${a.arc.visible ? "; a visible change ships with its after shot in the PR" : ""}.`);
+  const gates = [(a.arc.e2e ?? []).map((g: string) => `\`${g}\``).join(", "), a.arc.visible ? "a visible change ships with its after shot in the PR" : ""].filter(Boolean);
+  if (gates.length) lines.push(`Gates before the PR opens: ${gates.join("; ")}.`);
   return lines.join("\n") + "\n";
 }
 const sectionsFor = (n: number, withPickup = true) => { const segs = out[n].sort((x, y) => x.page - y.page || x.order - y.order); const [first, ...rest] = segs; return `${MARK}\n${first.text.trimEnd()}\n${rest.map(s => "\n" + s.text.replace(/^## Decision\n+/, "").trimEnd() + "\n").join("")}${withPickup ? "\n" + pickup(n) : ""}`; };
@@ -196,10 +197,12 @@ for (const n of issues) {
 if (APPLY && ownerRows.length) {
   // append-only, last row per record wins; a row equal to the record's live one is not appended again
   const dir = process.env.ORCHY_PROFILE_DIR ?? join(homedir(), ".agents/orchy/profile"), file = join(dir, `${REPO.replace("/", "-")}.jsonl`);
-  const live: Record<string, string> = {};
-  if (existsSync(file)) for (const l of readFileSync(file, "utf8").split("\n")) { try { const o = JSON.parse(l); live[o.record] = l; } catch {} }
+  const live: Record<string, string> = {}, text = existsSync(file) ? readFileSync(file, "utf8") : "";
+  for (const l of text.split("\n")) { try { const o = JSON.parse(l); live[o.record] = l; } catch {} }
   const fresh = ownerRows.map(o => JSON.stringify(o)).filter(l => live[JSON.parse(l).record] !== l);
-  if (fresh.length) { mkdirSync(dir, { recursive: true, mode: 0o700 }); appendFileSync(file, fresh.join("\n") + "\n", { mode: 0o600 }); }
+  // a torn last line would otherwise swallow the first appended row
+  const lead = text && !text.endsWith("\n") ? "\n" : "";
+  if (fresh.length) { mkdirSync(dir, { recursive: true, mode: 0o700 }); appendFileSync(file, lead + fresh.join("\n") + "\n", { mode: 0o600 }); }
 }
 console.log(`${APPLY ? "applied" : "dry-run"}: pages signed ${pagesToWrite.map((p: any) => p.no).join(",") || "none"}; issues ${issues.length}; written ${written}; skipped ${skipped}; previews in ${prevDir}`);
 if (recorded.length) console.log("RECORDED READ OPTIONS (written from their recorded field):\n- " + recorded.join("\n- "));

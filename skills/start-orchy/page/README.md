@@ -113,7 +113,7 @@ Other keys are ignored. A ref shows a row when any of these hold:
 | Doc | Fields |
 |---|---|
 | `choice-<record id>` | `page`, `page_no`, `id`, `kind`, `issue`, `choice`, `note`, `at`, `by`; a check adds `result` and `next_step`; `viaRecommendAll` |
-| `signoff-P<no>` | `page`, `page_no`, `name`, `head`, `choices` {id: choice or null}, `notes`, `except`, `changed`, `at`, `by`; the orchestrator may add `except_resolved: true` |
+| `signoff-P<no>` | `page`, `page_no`, `name`, `head`, `choices` {id: choice or null}, `notes`, `taken_all` [ids whose signed choice came from take-all], `except`, `changed`, `at`, `by`; the orchestrator may add `except_resolved: true` |
 
 - `choice` is an option key, `asis`, `read`, `approve`, `change`, `strike` or `result`.
 - No doc means the default: approve or accept.
@@ -122,7 +122,7 @@ Other keys are ignored. A ref shows a row when any of these hold:
 
 **apply-receipts.json:** `{"<issue>": {"at", "lane", "pages": [no], "note"?: "unchanged"}}`.
 
-**Owner record** (`--apply` only): `${ORCHY_PROFILE_DIR:-~/.agents/orchy/profile}/<owner>-<repo>.jsonl`, outside every repository, append-only, the last row per record wins, and a row equal to the record's live one is not appended again. One row per signed, unheld record: `{repo, page, record, kind, category, recommended, chosen, agreed, explicit, via_recommend_all, note, signed_at}`. Only what the signoff snapshotted counts; a manual check and a held record write nothing. `recommended` is `recommend.id` for a visual or charter item, `approve` or `accept` otherwise; `explicit` is false when the snapshot was null (the default, signed untouched); `agreed` is null for a `read`; a `via_recommend_all` row is never scored as agreement.
+**Owner record** (`--apply` only): `${ORCHY_PROFILE_DIR:-~/.agents/orchy/profile}/<owner>-<repo>.jsonl`, outside every repository, append-only, the last row per record wins, and a row equal to the record's live one is not appended again. One row per signed, unheld record: `{repo, page, record, kind, category, recommended, chosen, agreed, explicit, via_recommend_all, note, signed_at}`. Only what the signoff snapshotted counts; a manual check and a held record write nothing. `recommended` is `recommend.id` for a visual or charter item, `approve` or `accept` otherwise; `explicit` is false when the snapshot was null (the default, signed untouched); `agreed` is null for a `read`; a `via_recommend_all` row (from the signoff's `taken_all`; the live doc only for a signoff written before that field) is never scored as agreement.
 
 ## Sequence
 
@@ -169,7 +169,7 @@ bun $S/apply-decisions.ts --answers <fresh dir> --apply     # gh issue edit, lan
 - Everything from `<!-- orchy:decision -->` to the end of an issue body is replaced on every apply, so nothing goes below that marker by hand.
 - A closed issue gets its Decision without a Pickup.
 - `--apply` adds `<lane_label_prefix><slug>` (creating the label) and removes `owner_decision_label`.
-- Apply writes the choices a signoff snapshotted (`choices`, `notes`), never the live docs alone: a `null` snapshot is the signed default even if a doc appeared later, a choice changed after signing is held, and a signoff whose `except` note is set holds its whole page until `except_resolved: true` is written onto that signoff doc with ArtifactData `update`. An issue that any held page or record contributes to is not written at all (its earlier decisions stay), and apply exits 3 while anything is held.
+- Apply writes the choices a signoff snapshotted (`choices`, `notes`), never the live docs alone: a `null` snapshot is the signed default even if a doc appeared later, a choice changed or deleted after signing is held, and a signoff whose `except` note is set holds its whole page until `except_resolved: true` is written onto that signoff doc with ArtifactData `update`. An issue that any held page or record contributes to is not written at all (its earlier decisions stay), and apply exits 3 while anything is held.
 - `public-notes.json` keys: `<record id>` releases a note, `<record id>.<field>` releases `result`, `next_step`, `recorded` or `except`.
 - `MANUAL` lines list what is still yours: unanswered or held items, read options without `recorded`, held pages and unrecorded checks.
 

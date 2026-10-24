@@ -70,6 +70,7 @@ grep -q '^dry-run: pages signed 1; issues 2; written 0; skipped 0' "$T/apply.out
 V="$P/apply-preview"
 if ! { grep -q '^<!-- orchy:decision -->$' "$V/1.md" && grep -q '\*\*Option B\*\*. The title and the date share one line.' "$V/1.md"; }; then fail "preview 1: $(cat "$V/1.md")"; fi
 if ! { grep -q '^Lane .home-1., arc-1 (home screen polish); wave 1.$' "$V/1.md" && grep -q '^- P1-01: the header pick sets the layout$' "$V/1.md"; }; then fail "pickup 1: $(cat "$V/1.md")"; fi
+grep -qF 'Gates before the PR opens: `tests/e2e/home.spec.ts`; a visible change ships with its after shot in the PR.' "$V/1.md" || fail "pickup gates: $(cat "$V/1.md")"
 grep -q '\*\*approved\*\*' "$V/2.md" || fail "preview 2: $(cat "$V/2.md")"
 if grep -q 'Owner note' "$V/1.md"; then fail "an empty note leaked into preview 1"; fi
 cp "$V/1.md" "$T/1.first"; PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$P/answers/decisions" > /dev/null 2>&1 || fail "apply with the export dir itself"
@@ -105,12 +106,21 @@ R="$ORCHY_PROFILE_DIR/example-app.jsonl"
 [ "$(wc -l < "$R")" = 2 ] || fail "two applies did not leave one owner-record row per record: $(cat "$R")"
 jq -se 'map({(.record): [.chosen, .agreed, .explicit, .via_recommend_all]}) | add == {"P1-01": ["B", true, true, false], "P1-02": ["approve", true, false, false]}' "$R" >/dev/null || fail "owner-record rows: $(cat "$R")"
 ok "apply --apply: marker block below the original body, lane label, receipts, idempotent, one owner-record row per record"
+# take-all provenance is the signoff's, not the live doc's; a torn last line in the owner record swallows no row
+cp -r "$P/answers" "$T/ans10"; jq '.taken_all=["P1-01"]' "$T/ans10/decisions/signoff-P1.json" > "$T/c.json" && mv "$T/c.json" "$T/ans10/decisions/signoff-P1.json"
+mkdir -p "$T/prof2"; printf '{"record":"torn"' > "$T/prof2/example-app.jsonl"
+ORCHY_PROFILE_DIR="$T/prof2" PATH="$G:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans10" --apply > /dev/null 2>&1 || fail "apply with taken_all"
+jq -Rr 'fromjson? | select(.record == "P1-01") | .via_recommend_all' "$T/prof2/example-app.jsonl" | grep -qx true || fail "take-all not read from the signoff, or the torn line ate the row: $(cat "$T/prof2/example-app.jsonl")"
+ok "take-all provenance from the signoff; a torn owner-record line keeps the next row"
 
 # a choice changed after signing is held, never written; an except note holds the page; a sensitive result holds everything
 cp -r "$P/answers" "$T/ans2"; jq '.choice="A"' "$T/ans2/decisions/choice-P1-01.json" > "$T/c.json" && mv "$T/c.json" "$T/ans2/decisions/choice-P1-01.json"
 rm -rf "$P/apply-preview"
 if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans2" > "$T/apply4.out" 2>&1; then fail "apply with a changed choice exited 0"; fi
 grep -q 'P1-01 changed after page 1 was signed (signed B, now A)' "$T/apply4.out" || fail "a changed choice was not held: $(cat "$T/apply4.out")"
+cp -r "$P/answers" "$T/ans5"; rm "$T/ans5/decisions/choice-P1-01.json"
+if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans5" > "$T/apply4b.out" 2>&1; then fail "apply with a signed choice deleted after signing exited 0"; fi
+grep -q 'P1-01 changed after page 1 was signed (signed B, now the default)' "$T/apply4b.out" || fail "a deleted signed choice was not held: $(cat "$T/apply4b.out")"
 [ ! -e "$P/apply-preview/1.md" ] || fail "the held record's issue got a preview"
 grep -q '#1 NOT WRITTEN' "$T/apply4.out" || fail "the held record's issue was not reported as held: $(cat "$T/apply4.out")"
 # an approve record changed to "change" after signing is held, never approved by default, and its issue is not touched
