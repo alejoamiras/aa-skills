@@ -228,9 +228,9 @@ function renderPage(p){
   const btn = document.querySelector(`button.sign[data-page="${p.no}"]`);
   btn.disabled = st.open.length > 0 || !db || !writable || !loaded;
   const ex = document.getElementById(`except-${p.no}`);
-  if (st.s && typeof st.s.except === "string" && document.activeElement !== ex) {
-    // a settled note must not ride along on the next signature, but a note the owner rewrote stays
-    if (!st.s.except_resolved && !ex.value) { ex.value = st.s.except; ex.dataset.filled = st.s.except; }
+  if (st.s && typeof st.s.except === "string") {
+    // a settled note must not ride along on the next signature, even from a focused box; a note the owner rewrote stays
+    if (!st.s.except_resolved && !ex.value && document.activeElement !== ex) { ex.value = st.s.except; ex.dataset.filled = st.s.except; }
     else if (st.s.except_resolved && ex.value === ex.dataset.filled) { ex.value = ""; delete ex.dataset.filled; }
   }
   const box = document.getElementById(`signoff-${p.no}`); box.classList.toggle("done", st.signed);
