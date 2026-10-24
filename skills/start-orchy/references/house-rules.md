@@ -87,5 +87,5 @@ A finding becomes a change only once its path is written (initial conditions, ac
 - The copy check catches a copied sentence, not a disclosure: a private fact the orchestrator carries into a restatement, paraphrased or in under six words, passes every check. The restatement rule, the wording gate and the owner's reading stop it.
 - Leads and their reviewers run as the owner's user, so the brief's never-open line, not the OS, keeps them out of the ask ledger.
 - `ask file` that times out after GitHub accepted the issue, or a crash between the create and the `filed` row, leaves an issue the ledger does not know: reconcile by hand, never retry.
-- The Monitor's baseline lives only inside one `wait`: a change that lands between two waits is seen by the next snapshot or the resume's reread, not by the Monitor.
+- The Monitor's baseline lives only inside one `wait`. A new issue or PR that lands between two waits is seen by the next snapshot; an edit or a comment on an already-triaged issue in that gap is seen only by a resume's reread (`updated:>=`).
 - The close-out guard reads open PRs before taking the spawn lock: a close-out lead that opens its PR and exits inside that window is seen by neither check, and a second close-out can start. Closing it needs a network call under the lock.

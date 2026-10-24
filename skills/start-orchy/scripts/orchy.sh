@@ -153,17 +153,18 @@ ask_ready() { # ask_ready <fold-json> <id>: a handoff needs the stored restateme
   w=$(jq -r "$ASK_HOLD" <<<"$1"); [ -z "$w" ] || { echo "refused: $2 is $w; record 'answered: …' or 'wording ok' with ask note first" >&2; return 1; }
 }
 ask_lines() { # ask_lines <slug> [--no-sensitive] <file>...: each `askN: ` line is that ask's stored wording, laned to <slug>, not held
-  local s=$1 m id t a rc=0 tf nosens=(); shift; [ "${1:-}" = --no-sensitive ] && { nosens=(--no-sensitive); shift; }
+  local s=$1 m id t a rc=0 tf lines nosens=(); shift; [ "${1:-}" = --no-sensitive ] && { nosens=(--no-sensitive); shift; }
   tf=$(mktemp "$H/scratch/asklines.XXXXXX"); grep -hE '\bask[0-9]+\b' "$@" > "$tf"
   [ $? -le 1 ] || { echo "refused: cannot read the ask lines of $*" >&2; rm -f "$tf"; return 1; }
   if [ -s "$tf" ]; then "$0" check-public "${nosens[@]}" "$tf" || rc=1; fi
+  lines=$(grep -ohE '\bask[0-9]+: .*' "$tf"); [ $? -le 1 ] || { echo "refused: cannot read the ask lines of $*" >&2; rm -f "$tf"; return 1; }
   while IFS= read -r m; do   # one ask per line: the wording runs to the end of it
-    id=${m%%: *}; t=${m#*: }; t=${t%"${t##*[![:space:]]}"}; a=$(ask_get "$id")
+    [ -n "$m" ] || continue; id=${m%%: *}; t=${m#*: }; t=${t%"${t##*[![:space:]]}"}; a=$(ask_get "$id")
     [ -n "$a" ] || { echo "refused: $id is not in the ask ledger" >&2; rc=1; continue; }
     [ "$(jq -r '.public // empty' <<<"$a")" = "$t" ] || { echo "refused: the $id line is not its stored public wording (ask show $id)" >&2; rc=1; }
     jq -e --arg s "$s" '.state == "lane" and .lane == $s' <<<"$a" >/dev/null || { echo "refused: $id is not laned to $s" >&2; rc=1; }
     ask_ready "$a" "$id" || rc=1
-  done < <(grep -ohE '\bask[0-9]+: .*' "$tf")
+  done <<<"$lines"
   rm -f "$tf"; return $rc
 }
 lane_reported() { # a lane's reports outlive its worktree: their slug never names a new lane
@@ -231,7 +232,10 @@ check-public)
   if ! leakre=$(cfg '.scan.leak // empty') || ! ban=$(jq -r '.prompt_ban // empty' "$LOCAL"); then echo "refused: orchy.json or local.json cannot be read" >&2; exit 2; fi
   [ -n "$ban" ] && leakre="${leakre:+($leakre)|}($ban)"
   [ -n "$leakre" ] || { echo "refused: neither scan.leak nor prompt_ban is set" >&2; exit 2; }
-  sre=; [ ! -e "$H/page/decisions.json" ] || sre=$(jq -r '.site.sensitive // empty' "$H/page/decisions.json") || { echo "refused: decisions.json cannot be read" >&2; exit 2; }
+  # the default pattern only on confirmed absence: -e is also false behind an unsearchable page/
+  dj="$H/page/decisions.json"; sre=
+  if [ -e "$dj" ]; then sre=$(jq -r '.site.sensitive // empty' "$dj") || { echo "refused: decisions.json cannot be read" >&2; exit 2; }
+  elif [ ! -d "$H/page" ] || [ ! -x "$H/page" ]; then echo "refused: cannot tell whether decisions.json exists" >&2; exit 2; fi
   : "${sre:=\\bfindings?\\b|advisor(y|ies)|GHSA|vulnerab|exploit|\\battack|confidential}"   # apply-decisions.ts's default
   for kind in LEAK SENSITIVE; do
     if [ $kind = LEAK ]; then hits=$(grep -nE -- "$leakre" "$f"); r=$?; else [ $sens = 1 ] || continue; hits=$(grep -niE -- "$sre" "$f"); r=$?; fi
