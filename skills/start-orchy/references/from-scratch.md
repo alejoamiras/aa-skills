@@ -37,10 +37,10 @@ Then one `AskUserQuestion`, recommended answer first:
 
 ## 3. Capture the ask, before any scaffold file
 
-`orchy.sh` runs before the repository exists when every call carries `ORCHY_REPO=<owner>/<name>` (until step 6 adds `origin`). First, the directory `ORCHY home` prints must not exist: an earlier run for this name got that far, so stop as the header says.
+`orchy.sh` runs before the repository exists when every call carries `ORCHY_REPO=<owner>/<name>` (until step 6 adds `origin`):
 
 1. `git init -b main`, or, when the empty `.git` exists, `git symbolic-ref HEAD refs/heads/main`.
-2. The home `ORCHY home` prints, made with mode 700, holding `orchy.json` from `examples/orchy.example.json` without its `bootstrap` and `approved_at` keys (Phase 0 step 4 writes them), with `repo` and `trunk: "main"`, and `local.json` per Phase 0 step 4 from step 2's answers, `prompt_ban` included.
+2. The home `ORCHY home` prints (it needs step 1's `.git`) must not exist yet: an earlier run for this name got that far, so stop as the header says. Make it with mode 700, holding `orchy.json` from `examples/orchy.example.json` without its `bootstrap` and `approved_at` keys (Phase 0 step 4 writes them), with `repo` and `trunk: "main"`, and `local.json` per Phase 0 step 4 from step 2's answers, `prompt_ban` included.
 3. `ORCHY ask list --all` prints nothing (an ask there is an earlier run's: stop as the header says); then `ORCHY ask add <what to build, the owner's words>` prints `ask1`, and `ORCHY ask public ask1 <the signed description>` runs the same `check-public` every handoff does. A refusal goes back to the owner with a new wording; nothing is written into the folder until the wording passes.
 
 ## 4. Scaffold
