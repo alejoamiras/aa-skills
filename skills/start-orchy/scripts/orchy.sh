@@ -353,8 +353,8 @@ watch-merge)
   [ "$m" = "MERGEABLE CLEAN" ] || { echo "TIMEOUT; not merged"; exit 3; }
   read -r state draft base head _ <<<"$(pr_state)"
   [ "$state" = OPEN ] && [ "$draft" = false ] && [ "$base" = "$TRUNK" ] && [ "$head" = "$PIN" ] || { echo "REFUSED at merge time: state=$state draft=$draft base=$base head=$head"; exit 4; }
-  [ "$(cfg '.mode // empty')" = triage ] && { echo "REFUSED: orchy.json mode is triage; not merged"; exit 4; }
   merged=0; for try in 1 2 3; do
+    [ "$(cfg '.mode // empty')" = triage ] && { echo "REFUSED: orchy.json mode is triage; not merged"; exit 4; }
     [ "$try" = 1 ] || trunk_ok || { echo "TRUNK RED at merge time; not merged"; exit 7; }
     out=$(gh pr merge "$N" --repo "$REPO" "--$method" --delete-branch --match-head-commit "$PIN" 2>&1 | tail -1); echo "$out"
     for _ in 1 2 3; do sleep $((WS/10)); s=$(gh pr view "$N" --repo "$REPO" --json state --jq .state 2>/dev/null) && break; done
@@ -384,7 +384,7 @@ teardown)
   need gh; need agent-worktree; s=$1; W="$WT_ROOT/$s"; q="$(basename "$ROOT")/$s"
   [ -d "$W" ] || { echo "$s: no worktree dir"; (cd "$ROOT" && agent-worktree done "$q" --forget 2>&1 | tail -1); exit 0; }
   # the lane's keys are <slug> or <slug>-<suffix> with no dash in the suffix, so lane x never claims lane x-y's leads
-  lead_rows | while read -r k _; do r=${k#"$s"}; [ "$r" != "$k" ] && [[ "$r" =~ ^(-[a-z0-9]+)?$ ]] && echo "$k"; done | grep -q . && { echo "$s: a lead of this lane is alive; refusing"; exit 4; }
+  lead_rows | while read -r k _; do r=${k#"$s"}; [ "$r" != "$k" ] && [[ "$r" =~ ^(-[A-Za-z0-9._]+)?$ ]] && echo "$k"; done | grep -q . && { echo "$s: a lead of this lane is alive; refusing"; exit 4; }
   b=$(git -C "$W" rev-parse --abbrev-ref HEAD); head=$(git -C "$W" rev-parse HEAD); dirty=$(git -C "$W" status --short | wc -l)
   [ "$dirty" = "0" ] || { echo "$s: $dirty uncommitted files; refusing"; exit 3; }
   if out=$(cd "$ROOT" && agent-worktree done "$q" --merged --trunk "$TRUNK" 2>&1); then echo "$out" | tail -2; exit 0; fi

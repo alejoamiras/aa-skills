@@ -227,7 +227,12 @@ function renderPage(p){
   document.getElementById(`sgrid-${p.no}`).innerHTML = its.map(i => { const c = state.choices[i.id]; const v = c ? label(i, c.choice) : defaultLabel(i); return `<div><span class="eyebrow">${i.id}</span><span class="${c||needsChoice(i)?"":"muted"}">${esc(v)}</span></div>`; }).join("");
   const btn = document.querySelector(`button.sign[data-page="${p.no}"]`);
   btn.disabled = st.open.length > 0 || !db || !writable || !loaded;
-  const ex = document.getElementById(`except-${p.no}`); if (st.s && typeof st.s.except === "string" && !st.s.except_resolved && document.activeElement !== ex && !ex.value) ex.value = st.s.except;
+  const ex = document.getElementById(`except-${p.no}`);
+  if (st.s && typeof st.s.except === "string" && document.activeElement !== ex) {
+    // a settled note must not ride along on the next signature, but a note the owner rewrote stays
+    if (!st.s.except_resolved && !ex.value) { ex.value = st.s.except; ex.dataset.filled = st.s.except; }
+    else if (st.s.except_resolved && ex.value === ex.dataset.filled) { ex.value = ""; delete ex.dataset.filled; }
+  }
   const box = document.getElementById(`signoff-${p.no}`); box.classList.toggle("done", st.signed);
   if (st.s) line(`sline-${p.no}`, st.stale ? `Signed ${fmt(st.s.at)}, but an answer changed since. Sign again to update the record.` : st.open.length ? `Signed ${fmt(st.s.at)}, but ${st.open.map(i => i.id).join(", ")} was added since. Choose it, then sign again.` : `Signed ${fmt(st.s.at)}${st.s.except ? " · except: " + st.s.except : ""}.`, st.stale || st.open.length > 0);
   else line(`sline-${p.no}`, st.open.length ? `Choose ${st.open.map(i => i.id).join(", ")} first.` : "Signing approves every item on this page as shown above.");

@@ -1,6 +1,6 @@
 You are a subagent. Don't run memo.
 
-You close lane `<LANE>` in its worktree <WORKTREE>. Arcs merged: <MERGED>. Your brief is <ORCHY_HOME>/briefs/_implementer.md (`<LANE>` = <LANE>, `<KEY>` = <KEY>, `<WORKTREE>` = <WORKTREE>), read in full, then the plan's § Close-out and the arc reports under <ORCHY_HOME>/reports/<LANE>-a*.md (their "Known limits the close-out must file" lines are the list to file, deduped against the plan's).
+You close lane `<LANE>` in its worktree <WORKTREE>. Arcs merged: <MERGED>. Your brief is <ORCHY_HOME>/briefs/_implementer.md (`<LANE>` = <LANE>, `<KEY>` = <KEY>, `<WORKTREE>` = <WORKTREE>), read in full, then the plan's § Close-out and the arc reports <ORCHY_HOME>/reports/<LANE>-a<n>.md and <LANE>-arc<n>.md, <n> digits only (a longer name such as `<LANE>-a11y-a1.md` is another lane's; their "Known limits the close-out must file" lines are the list to file, deduped against the plan's).
 
 First: `git fetch origin <TRUNK> && git checkout -b <LANE>-closeout origin/<TRUNK><INSTALL_STEP>`. Re-verify every fact at your base; the tree wins; a disagreement goes in the ledger.
 

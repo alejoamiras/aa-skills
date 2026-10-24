@@ -142,7 +142,11 @@ o=$("$ORCHY" teardown x 2>&1 || true); grep -q 'lead of this lane is alive' <<<"
 "$ORCHY" wt-new y >/dev/null || fail "wt-new"
 if "$ORCHY" wt-new y >/dev/null 2>&1; then fail "wt-new accepted an existing slug"; fi
 HY=$(git -C .claude/worktrees/y rev-parse HEAD)
-sleep 60 & zp=$!; echo "$zp $(awk '{print $22}' /proc/$zp/stat) acct-z 2026-01-01T00:00:00Z heavy" > "$ORCHY_HOME/leads/y-z-plan.started"
+# a stand-in lead: a script named claude, blocked on a fifo so it has no child to outlive it
+mkdir -p "$T/fake"; mkfifo "$T/fake/fifo"; printf '#!/usr/bin/env bash\nread -rt 60 <> "%s/fake/fifo"\n' "$T" > "$T/fake/claude"; chmod +x "$T/fake/claude"
+"$T/fake/claude" & zp=$!
+echo "$zp $(awk '{print $22}' /proc/$zp/stat) acct-z 2026-01-01T00:00:00Z heavy" > "$ORCHY_HOME/leads/y-z-plan.started"
+o=$("$ORCHY" snapshot 2>&1); grep -q '^alive y-z-plan ' <<<"$o" || fail "the y-z-plan fixture is not a live lead: $o"
 o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1 || true); grep -q 'hand removal is off' <<<"$o" || fail "teardown hand-removed with the switch off, or took lane y-z's lead for lane y's: $o"
 jq '.teardown.hand_remove=true' "$ORCHY_HOME/orchy.json" > "$tmp" && mv "$tmp" "$ORCHY_HOME/orchy.json"
 jq -n --arg h 4444444444444444444444444444444444444444 '[{number:5,headRefOid:$h,baseRefName:"dev"}]' > "$MOCK_DIR/merged.json"
