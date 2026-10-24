@@ -103,7 +103,7 @@ if MOCK_GH_FAIL=diff "$ORCHY" scan 7 >/dev/null 2>&1; then fail "scan reported s
 jq -n '{title:"fix: retry on acct-b", body:"body", commits:[]}' > "$MOCK_DIR/pr-8.json"; cp "$MOCK_DIR/diff-7.txt" "$MOCK_DIR/diff-8.txt"; cp "$MOCK_DIR/files-7.txt" "$MOCK_DIR/files-8.txt"
 o=$("$ORCHY" scan 8); grep -q 'leaks=1' <<<"$o" || fail "scan missed a locally banned name in a PR title: $o"
 # watch-merge: pin validation, strict report parsing, pinned merge, head-moved exit
-SHA=1111111111111111111111111111111111111111
+SHA=1111111111111111111111111111111111111111; TS=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; jq -n --arg s "$TS" '{sha:$s}' > "$MOCK_DIR/trunk.json"
 mkpr() { jq -n --arg s "$1" --arg st "${2:-OPEN}" '{state:$st,isDraft:false,baseRefName:"dev",headRefOid:$s,mergeable:"MERGEABLE",mergeStateStatus:"CLEAN",body:"",commits:[]}' > "$MOCK_DIR/pr-9.json"; }
 mkpr "$SHA"; jq -n '{check_runs:[{id:1,name:"quality-status",status:"completed",conclusion:"failure"},{id:2,name:"quality-status",status:"completed",conclusion:"success"},{id:3,name:"e2e-status",status:"completed",conclusion:"success"}]}' > "$MOCK_DIR/checks.json"; jq -n '{statuses:[]}' > "$MOCK_DIR/status.json"
 if "$ORCHY" watch-merge 9 1111111 lane-9 r9.md >/dev/null 2>&1; then fail "watch-merge accepted a short pin"; fi
@@ -117,6 +117,19 @@ o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1 || true); grep -q '#9 MERGED
 grep -q -- "--match-head-commit $SHA" "$MOCK_DIR/gh.log" || fail "merge was not pinned with --match-head-commit"
 mkpr "$SHA"; jq --arg s 3333333333333333333333333333333333333333 '.headRefOid=$s' "$MOCK_DIR/pr-9.json" > "$tmp" && mv "$tmp" "$MOCK_DIR/pr-9.json"
 o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1 || true); grep -q 'HEAD MOVED' <<<"$o" || fail "a moved head did not exit: $o"
+# trunk guard: a failed trunk check blocks, unless the PR contains that trunk commit and passed the failed check itself; pending never blocks
+jq -n '{check_runs:[{id:9,name:"quality-status",status:"completed",conclusion:"failure"}]}' > "$MOCK_DIR/checks-$TS.json"; mkpr "$SHA"
+o=$("$ORCHY" snapshot 2>&1); grep -q '^dev aaaaaaaa: RED quality-status' <<<"$o" || fail "snapshot does not show the red trunk: $o"
+o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1 || true); grep -q 'TIMEOUT; not merged' <<<"$o" || fail "a red trunk did not block: $o"
+[ "$(grep -c 'TRUNK RED at aaaaaaaa: quality-status' <<<"$o")" = 1 ] || fail "TRUNK RED not printed exactly once: $o"
+jq -n '{behind_by:0}' > "$MOCK_DIR/compare.json"
+o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1 || true); grep -q '#9 MERGED' <<<"$o" || fail "a PR containing the red commit, green on the failed check, did not merge: $o"
+cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak"; jq '.merge.trunk_checks=["quality-status","nightly"]' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"
+jq -n '{check_runs:[{id:9,name:"nightly",status:"completed",conclusion:"failure"}]}' > "$MOCK_DIR/checks-$TS.json"; mkpr "$SHA"
+o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1 || true); grep -q 'TRUNK RED at aaaaaaaa: nightly' <<<"$o" || fail "a failed trunk check the PR never ran did not block: $o"
+jq -n '{check_runs:[{id:9,name:"nightly",status:"in_progress",conclusion:null}]}' > "$MOCK_DIR/checks-$TS.json"; mkpr "$SHA"
+o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1 || true); grep -q '#9 MERGED' <<<"$o" || fail "a pending trunk check blocked: $o"
+cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"; rm -f "$MOCK_DIR/checks-$TS.json" "$MOCK_DIR/compare.json"
 # arm-merge: the detached watcher finds the repo and the home (no cd into the cache), and a second arm refuses
 mkpr "$SHA"; "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 4 >/dev/null || fail "arm-merge"
 o=$("$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md 2>&1 || true); grep -q 'already armed' <<<"$o" || fail "arm-merge armed twice: $o"
