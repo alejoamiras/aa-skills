@@ -35,7 +35,11 @@ const docs = loadAnswers(answersPath);
 const publicNotesPath = join(O, "public-notes.json");
 const publicNotes: Record<string, string> = existsSync(publicNotesPath) ? JSON.parse(readFileSync(publicNotesPath, "utf8")) : {};
 const SENSITIVE = S.sensitive ? new RegExp(S.sensitive, "i") : /\bfindings?\b|advisor(y|ies)|GHSA|vulnerab|exploit|\battack|confidential/i;
-const held: string[] = [];
+// a home path, an account name or a page link never reaches a public issue, reviewed wording included: the scan's own patterns
+const readCfg = (f: string) => existsSync(join(process.env.ORCHY_HOME!, f)) ? JSON.parse(readFileSync(join(process.env.ORCHY_HOME!, f), "utf8")) : {};
+const LEAKS = [readCfg("orchy.json").scan?.leak, readCfg("local.json").prompt_ban].filter((r): r is string => typeof r === "string" && r !== "").map(r => new RegExp(r));
+const leaks = (t: string) => LEAKS.some(r => r.test(t));
+const held: string[] = [], leaked: string[] = [];
 // every free-text field that can reach an issue body goes through the same filter
 const FREE_TEXT = ["note", "result", "next_step", "recorded", "except"];
 for (const d of docs) {
@@ -45,12 +49,15 @@ for (const d of docs) {
     const pub = publicNotes[k === "note" ? id : `${id}.${k}`] ?? (k === "note" ? undefined : publicNotes[`${id}.${k}`]);
     if (pub !== undefined) d[k] = pub;
     else if (SENSITIVE.test(d[k])) held.push(`${id}.${k}`);
+    if (leaks(d[k])) leaked.push(`${id}.${k}`);
   }
   if (d.notes && typeof d.notes === "object") for (const k of Object.keys(d.notes)) {
     if (publicNotes[k] !== undefined) d.notes[k] = publicNotes[k];
     else if (typeof d.notes[k] === "string" && SENSITIVE.test(d.notes[k])) held.push(k);
+    if (typeof d.notes[k] === "string" && leaks(d.notes[k])) leaked.push(k);
   }
 }
+if (leaked.length) { console.error(`refused: these fields carry a local path, an account name or a page link (scan.leak or prompt_ban); reword them, or give a public wording in public-notes.json: ${[...new Set(leaked)].join(", ")}`); process.exit(4); }
 if (held.length) { console.error(`refused: these fields need a public wording in public-notes.json first (key "<record id>" for a note, "<record id>.<field>" for result, next_step, recorded or except): ${[...new Set(held)].join(", ")}`); process.exit(4); }
 const choices: Record<string, Doc> = {}, signoffs: Record<number, Doc> = {};
 for (const d of docs) { const id = d.__id ?? d.id; if (typeof id === "string" && id.startsWith("signoff-P")) signoffs[Number(id.slice(9))] = d; else if (d.id && d.kind) choices[d.id] = d; else if (typeof id === "string" && id.startsWith("choice-")) choices[id.slice(7)] = d; }

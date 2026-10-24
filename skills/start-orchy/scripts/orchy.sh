@@ -164,7 +164,8 @@ launch|resume)
   need claude-usage; need flock; weight=heavy; force=0
   while [ "${1:-}" = --light ] || [ "${1:-}" = --force-cap ]; do [ "$1" = --light ] && weight=light; [ "$1" = --force-cap ] && force=1; shift; done
   k=$1; w=$2; a=$3; sid=${4:-}
-  [[ "$k" =~ ^[A-Za-z0-9._-]+$ && "$w" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "refused: key and slug are [A-Za-z0-9._-]" >&2; exit 1; }
+  # a dot-led key's .started file would be invisible to every *.started glob, so to the cap and to liveness
+  [[ "$k" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ && "$w" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || { echo "refused: key and slug are [A-Za-z0-9._-], not starting with a dot or a dash" >&2; exit 1; }
   refuse_account "$a" || exit 1; cap_root_ok || exit 1
   # Close-outs run one at a time: each merges the trunk's plan index and lessons, and two in flight would each miss the other's.
   if [[ "$k" == *-closeout ]]; then
@@ -184,6 +185,8 @@ launch|resume)
   esac
   extra=(); [ "$cmd" = resume ] && extra=(--resume "$sid")
   mkdir -p "$H/scratch/$w"; S="$H/leads/$k.settings.json"; L="$H/leads/$k.log"
+  dirs=(--add-dir "$H/reports" --add-dir "$H/scratch/$w")
+  [ -f "$H/page/shots-plan/$k.json" ] && { mkdir -p "$H/page/shots"; dirs+=(--add-dir "$H/page/shots"); }
   hook=$(printf '%q ' bash "$(realpath "$(dirname "$0")")/inbox-hook.sh" "$H/inbox/$k.jsonl"); hook=${hook% }
   jq -n --arg c "$hook" '{hooks: {PostToolUse: [{matcher: "*", hooks: [{type: "command", command: $c}]}]}}' > "$S"
   # Key check, count, spawn and the .started write are one step, so two programs cannot both take an account's last slot.
@@ -198,10 +201,13 @@ launch|resume)
   # PRINT_BG_WAIT_CEILING=0: a headless turn that yields to a background task ends the session; the brief tells leads to poll inside one tool call instead.
   # setsid: the lead leads its own process group (a background subshell is not a group leader, so setsid does not fork and $! stays the lead).
   ( cd "$d" && exec 9>&- env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 setsid nohup claude-usage run "=$a" "${extra[@]}" -p "$(cat "$p")" --model "$model" "${perm[@]}" \
-      --settings "$S" --add-dir "$H/reports" --add-dir "$H/scratch/$w" --verbose --output-format stream-json >> "$L" 2>> "$H/leads/$k.err" ) &
-  pid=$!; for _ in 1 2 3 4 5 6 7 8 9 10; do alive "$pid" && break; sleep 0.2; done
-  pg=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
-  printf '%s %s %s %s %s %s %s\n' "$pid" "$(pstart "$pid")" "$a" "$(now)" "$weight" "prompts/$k.md" "${pg:-?}" > "$H/leads/$k.started.tmp" && mv "$H/leads/$k.started.tmp" "$H/leads/$k.started"
+      --settings "$S" "${dirs[@]}" --verbose --output-format stream-json >> "$L" 2>> "$H/leads/$k.err" ) &
+  pid=$!
+  record() { printf '%s %s %s %s %s %s %s\n' "$pid" "$(pstart "$pid")" "$a" "$(now)" "$weight" "prompts/$k.md" "$1" > "$H/leads/$k.started.tmp" && mv "$H/leads/$k.started.tmp" "$H/leads/$k.started"; }
+  # recorded at once (exec keeps the pid and its start time), so a launcher killed during the wait still leaves the lead counted and stoppable
+  record "?"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do alive "$pid" && break; sleep 0.2; done
+  pg=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' '); record "${pg:-?}"
   exec 9>&-
   echo "$k ${cmd}d on $a pid $pid pgid ${pg:-?} ($weight, $(cfg '.leads.permission_mode // "auto"'), load1 $l1)";;
 stop)
@@ -221,7 +227,7 @@ stop)
   echo "$k: stopped pid $pid and ${#ids[@]} process(es) in its tree";;
 say)
   need flock; k=$1; shift; t="$*"
-  [[ "$k" =~ ^[A-Za-z0-9._-]+$ ]] && [ -n "$t" ] || { echo "usage: say <key> <text>" >&2; exit 1; }
+  [[ "$k" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] && [ -n "$t" ] || { echo "usage: say <key> <text>" >&2; exit 1; }
   [ -f "$H/leads/$k.started" ] && read -r pid st _ < "$H/leads/$k.started" && alive "$pid" "$st" || { echo "refused: no live lead $k; fold the note into its next prompt" >&2; exit 1; }
   # leads quote their instructions into committed plans, so a note passes the same ban as a prompt
   tf="$H/scratch/say.$$"; printf '%s\n' "$t" > "$tf"; "$0" check-text "$tf"; rc=$?; rm -f "$tf"; [ "$rc" = 0 ] || exit 1
@@ -383,8 +389,9 @@ disarm)
 teardown)
   need gh; need agent-worktree; s=$1; W="$WT_ROOT/$s"; q="$(basename "$ROOT")/$s"
   [ -d "$W" ] || { echo "$s: no worktree dir"; (cd "$ROOT" && agent-worktree done "$q" --forget 2>&1 | tail -1); exit 0; }
-  # the lane's keys are <slug> or <slug>-<suffix> with no dash in the suffix, so lane x never claims lane x-y's leads
-  lead_rows | while read -r k _; do r=${k#"$s"}; [ "$r" != "$k" ] && [[ "$r" =~ ^(-[A-Za-z0-9._]+)?$ ]] && echo "$k"; done | grep -q . && { echo "$s: a lead of this lane is alive; refusing"; exit 4; }
+  # a lead belongs to the lane whose worktree it runs in (launch starts it there), whatever its key
+  wr=$(realpath -m "$W")
+  lead_rows | while read -r k _ _ p; do c=$(readlink "/proc/$p/cwd" 2>/dev/null) || continue; { [ "$c" = "$wr" ] || [ "${c#"$wr"/}" != "$c" ]; } && echo "$k"; done | grep -q . && { echo "$s: a lead of this lane is alive; refusing"; exit 4; }
   b=$(git -C "$W" rev-parse --abbrev-ref HEAD); head=$(git -C "$W" rev-parse HEAD); dirty=$(git -C "$W" status --short | wc -l)
   [ "$dirty" = "0" ] || { echo "$s: $dirty uncommitted files; refusing"; exit 3; }
   if out=$(cd "$ROOT" && agent-worktree done "$q" --merged --trunk "$TRUNK" 2>&1); then echo "$out" | tail -2; exit 0; fi

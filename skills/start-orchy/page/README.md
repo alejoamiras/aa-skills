@@ -179,7 +179,7 @@ bun $S/apply-decisions.ts --answers <fresh dir> --apply     # gh issue edit, lan
 - **Visual and charter items** must be chosen before their page can be signed. Everything else on the page is approved by the signature.
 - **`DROP_PAGES`** lists settled pages, because an artifact version holds at most 511 files. Their rows leave the build and their files go to `_drop-files.json`. A file that a kept row still shows is never listed.
 - **`writes_back`:** every record needs the templates for its kind before apply runs. A missing one makes apply throw before anything is written.
-- **Notes** go into public issue bodies. A note matching `site.sensitive` stops apply with exit 4 until `public-notes.json` maps that record id to reviewed wording.
+- **Notes** go into public issue bodies. A note matching `site.sensitive` stops apply with exit 4 until `public-notes.json` maps that record id to reviewed wording. Any free text, reviewed wording included, that matches `orchy.json` `scan.leak` or `local.json` `prompt_ban` (a home path, an account name, a page link) also stops apply with exit 4.
   - The default pattern catches findings, advisories, GHSA, vulnerabilities, exploits, attacks and "confidential".
   - Add reviewers' names to `site.sensitive`.
 - **Captions and surfaces** describe what the owner sees, never a reviewer, a finding or a defect.

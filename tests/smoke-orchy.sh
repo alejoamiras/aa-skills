@@ -45,8 +45,12 @@ if grep -q '^claude-usage:' "$ORCHY_HOME/leads/x-plan.log" || ! grep -q '^claude
 for f in "$ORCHY_HOME"/leads/*.started; do read -r p _ < "$f"; for fd in /proc/"$p"/fd/*; do case "$(readlink "$fd")" in *spawn.lock) fail "lead $p holds the spawn lock";; esac; done; done
 tmp=$(mktemp); jq '.accounts.use += ["acct-d","acct-e","acct-f"]' "$ORCHY_HOME/local.json" > "$tmp" && mv "$tmp" "$ORCHY_HOME/local.json"
 jq '.leads.permission_mode="bypass"' "$ORCHY_HOME/orchy.json" > "$tmp" && cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak" && mv "$tmp" "$ORCHY_HOME/orchy.json"
-cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/x-b1.md"; "$ORCHY" launch x-b1 x acct-b >/dev/null || fail "bypass launch"
+cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/x-b1.md"; mkdir -p "$ORCHY_HOME/page/shots-plan"; echo '[]' > "$ORCHY_HOME/page/shots-plan/x-b1.json"
+"$ORCHY" launch x-b1 x acct-b >/dev/null || fail "bypass launch"
 tail -1 "$MOCK_DIR/cu.log" | grep -q -- '--dangerously-skip-permissions' || fail "bypass mode flag missing"; cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"
+tail -1 "$MOCK_DIR/cu.log" | grep -q -- "--add-dir $ORCHY_HOME/page/shots " || fail "a shots lead cannot write the page's shots"
+if head -1 "$MOCK_DIR/cu.log" | grep -q -- 'page/shots'; then fail "a lead with no shots plan got the shots dir"; fi
+if "$ORCHY" launch .x-hidden x acct-b >/dev/null 2>&1; then fail "launch accepted a dot-led key"; fi
 # the cap holds across every program under the capacity root, at the strictest cap among them
 # the second home's name carries a space, which must not shift the fields its rows are counted by
 H2="$T/cap/home 2"; mkdir -p "$H2/prompts"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$H2/"; cp "$ORCHY_HOME/prompts/x-plan.md" "$H2/prompts/y-a1.md"
@@ -142,12 +146,15 @@ o=$("$ORCHY" teardown x 2>&1 || true); grep -q 'lead of this lane is alive' <<<"
 "$ORCHY" wt-new y >/dev/null || fail "wt-new"
 if "$ORCHY" wt-new y >/dev/null 2>&1; then fail "wt-new accepted an existing slug"; fi
 HY=$(git -C .claude/worktrees/y rev-parse HEAD)
-# a stand-in lead: a script named claude, blocked on a fifo so it has no child to outlive it
+# a lead running in the lane's worktree blocks teardown whatever its key; lane x's live leads do not
+# the stand-in is a script named claude, blocked on a fifo so it has no child to outlive it
 mkdir -p "$T/fake"; mkfifo "$T/fake/fifo"; printf '#!/usr/bin/env bash\nread -rt 60 <> "%s/fake/fifo"\n' "$T" > "$T/fake/claude"; chmod +x "$T/fake/claude"
-"$T/fake/claude" & zp=$!
-echo "$zp $(awk '{print $22}' /proc/$zp/stat) acct-z 2026-01-01T00:00:00Z heavy" > "$ORCHY_HOME/leads/y-z-plan.started"
-o=$("$ORCHY" snapshot 2>&1); grep -q '^alive y-z-plan ' <<<"$o" || fail "the y-z-plan fixture is not a live lead: $o"
-o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1 || true); grep -q 'hand removal is off' <<<"$o" || fail "teardown hand-removed with the switch off, or took lane y-z's lead for lane y's: $o"
+(cd .claude/worktrees/y && exec "$T/fake/claude") & zp=$!
+echo "$zp $(awk '{print $22}' /proc/$zp/stat) acct-z 2026-01-01T00:00:00Z light" > "$ORCHY_HOME/leads/y-shots-p1.started"
+o=$("$ORCHY" snapshot 2>&1); grep -q '^alive y-shots-p1 ' <<<"$o" || fail "the stand-in lead is not live: $o"
+o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1 || true); grep -q 'lead of this lane is alive' <<<"$o" || fail "teardown ignored a live lead in the lane's worktree: $o"
+kill "$zp"; wait "$zp" 2>/dev/null || true; rm "$ORCHY_HOME/leads/y-shots-p1.started"
+o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1 || true); grep -q 'hand removal is off' <<<"$o" || fail "teardown hand-removed with the switch off: $o"
 jq '.teardown.hand_remove=true' "$ORCHY_HOME/orchy.json" > "$tmp" && mv "$tmp" "$ORCHY_HOME/orchy.json"
 jq -n --arg h 4444444444444444444444444444444444444444 '[{number:5,headRefOid:$h,baseRefName:"dev"}]' > "$MOCK_DIR/merged.json"
 o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1 || true); grep -q 'not the head of a PR merged' <<<"$o" || fail "teardown removed a worktree whose HEAD is not a merged PR head: $o"
