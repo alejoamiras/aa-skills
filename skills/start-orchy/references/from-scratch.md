@@ -40,7 +40,7 @@ Then one `AskUserQuestion`, recommended answer first:
 `orchy.sh` runs before the repository exists when every call carries `ORCHY_REPO=<owner>/<name>` (until step 6 adds `origin`):
 
 1. `git init -b main`, or, when the empty `.git` exists, `git symbolic-ref HEAD refs/heads/main`.
-2. The home `ORCHY home` prints, made with mode 700, holding `orchy.json` from `examples/orchy.example.json` with `repo` and `trunk: "main"` (no `bootstrap` key until Phase 0 step 4) and `local.json` per Phase 0 step 4 from step 2's answers, `prompt_ban` included.
+2. The home `ORCHY home` prints, made with mode 700, holding `orchy.json` from `examples/orchy.example.json` without its `bootstrap` and `approved_at` keys (Phase 0 step 4 writes them), with `repo` and `trunk: "main"`, and `local.json` per Phase 0 step 4 from step 2's answers, `prompt_ban` included.
 3. `ORCHY ask add <what to build, the owner's words>` prints `ask1`; `ORCHY ask public ask1 <the signed description>` runs the same `check-public` every handoff does. A refusal goes back to the owner with a new wording; nothing is written into the folder until the wording passes.
 
 ## 4. Scaffold
@@ -106,11 +106,11 @@ Then one `AskUserQuestion`, recommended answer first:
 
 ## 5. First commit
 
-The local gates green (`bun run lint`, `bun test`, `actionlint`); `gitleaks dir .` clean; the scaffold's paths staged by name, never `git add -A`; one signed commit; `gitleaks git` clean.
+The local gates green (`bun run lint`, `bun test`, `bun audit`, `actionlint`); `gitleaks dir .` clean. A fresh tree can fail `bun audit` on a transitive advisory whose fixed version is younger than `minimumReleaseAge`: `bun audit fix` installs it past the age gate, and frozen installs accept the lockfile afterwards, so it is a deliberate bypass the commit message names (advisory, package, version, age); never a lower age. The scaffold's paths staged by name, never `git add -A`; one signed commit; `gitleaks git` clean.
 
 ## 6. Create and push
 
-`gh repo create <owner>/<name> --<visibility> --description "<public description>" --source . --remote origin --push`: the one direct push to a trunk orchy ever makes, covered by the signed name and visibility. A failure after the repository exists stops with what exists; never a second create.
+`gh repo create <owner>/<name> --<visibility> --description "<public description>" --source . --remote origin --push`: the one direct push to a trunk orchy ever makes, covered by the signed name and visibility. A failure after the repository exists stops with what exists; never a second create. `origin` takes gh's `git_protocol`, which plain git (watchers, `agent-worktree`, leads) may not be able to fetch: `git ls-remote origin` must pass, or `origin` is set to the URL form the machine's other clones use and checked again.
 
 ## 7. Prove the gate on `main`
 
