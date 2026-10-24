@@ -211,8 +211,10 @@ stop)
   # collect the whole tree first, while every child still points at its parent.
   mapfile -t tree < <(ps -eo pid=,ppid= | awk -v r="$pid" '{p[$1]=$2} END {s[r]=1; c=1; while (c) {c=0; for (x in p) if (!(x in s) && (p[x] in s)) {s[x]=1; c=1}}; for (x in s) print x}')
   ids=(); for q in "${tree[@]}"; do if [ "$q" = "$pid" ]; then ids+=("$q:$st"); else ids+=("$q:$(pstart "$q")"); fi; done
-  # a lead that exited during the walk may have handed its pid, and so its group id, to a stranger
-  [ "${pg:-?}" = "$pid" ] && [ "$(pstart "$pid")" = "$st" ] && kill -TERM -- "-$pg" 2>/dev/null
+  # A lead that exited before the walk may have handed its pid, group id and so the walked tree to a stranger: then signal
+  # nothing. A lead that is simply gone leaves its orphans in the tree, and those are still ended.
+  cur=$(pstart "$pid"); [ -n "$cur" ] && [ "$cur" != "$st" ] && { echo "$k: pid $pid now belongs to another process; nothing signalled"; exit 0; }
+  [ "${pg:-?}" = "$pid" ] && [ "$cur" = "$st" ] && kill -TERM -- "-$pg" 2>/dev/null
   for e in "${ids[@]}"; do [ -n "${e#*:}" ] && [ "$(pstart "${e%%:*}")" = "${e#*:}" ] && kill -TERM "${e%%:*}" 2>/dev/null; done
   for _ in 1 2 3 4 5 6 7 8 9 10; do left=0; for e in "${ids[@]}"; do [ "$(pstart "${e%%:*}")" = "${e#*:}" ] && left=1; done; [ "$left" = 0 ] && break; sleep 0.5; done
   for e in "${ids[@]}"; do [ -n "${e#*:}" ] && [ "$(pstart "${e%%:*}")" = "${e#*:}" ] && kill -KILL "${e%%:*}" 2>/dev/null; done
