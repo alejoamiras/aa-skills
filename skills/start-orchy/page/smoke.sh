@@ -4,7 +4,7 @@ set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # ORCHY_SMOKE_TMP moves the scratch dir without moving Chrome's TMPDIR, whose socket path must stay short.
 T=$(mktemp -d "${ORCHY_SMOKE_TMP:-${TMPDIR:-/tmp}}/orchy-page-smoke.XXXXXX"); trap 'rm -rf "$T"' EXIT
-export ORCHY_HOME="$T/home" ORCHY_PROFILE_DIR="$T/profile"; unset ORCHY_PAGE_BUILD DROP_PAGES UNSIGNED
+export ORCHY_HOME="$T/home" ORCHY_PROFILE_DIR="$T/profile" ORCHY_ASKS_DIR="$T/asks"; unset ORCHY_PAGE_BUILD DROP_PAGES UNSIGNED
 P="$ORCHY_HOME/page"; B="$P/build"
 mkdir -p "$P" "$T/bin"; cp -R "$HERE/fixtures/." "$P/"
 # A dry-run must never reach GitHub: this gh records the call and fails.

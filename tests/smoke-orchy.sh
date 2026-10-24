@@ -2,9 +2,11 @@
 # Smoke for skills/start-orchy: orchy.sh against a throwaway repo and home with mocked gh / agent-worktree / claude-usage, the templates, the page toolchain's own smoke.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd); K="$HERE/skills/start-orchy"; ORCHY="$K/scripts/orchy.sh"
-T=$(mktemp -d -t orchy-smoke-XXXX); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d -t orchy-smoke-XXXX); pgp=; trap '[ -z "$pgp" ] || kill "$pgp" 2>/dev/null; rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_CAPACITY_ROOT="$T/cap" ORCHY_HOME="$T/cap/home" ORCHY_REPO=example/app ORCHY_WATCH_SLEEP=1 ORCHY_PROFILE_DIR="$T/profile" ORCHY_ASKS_DIR="$T/asks" ORCHY_GITLEAKS=fake-gitleaks; mkdir -p "$MOCK_DIR"
+# the page toolchain's own smoke shares nothing with this one, so it runs alongside
+[ -x "$K/page/smoke.sh" ] || fail "page/smoke.sh missing"; bash "$K/page/smoke.sh" > "$T/page.log" 2>&1 & pgp=$!
 # a real local origin with a dev branch, so wt-new's fetch and reset work
 git init -q --bare "$T/origin.git"; git init -q -b dev "$T/repo"; git -C "$T/repo" remote add origin "$T/origin.git"
 (cd "$T/repo" && git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -q --allow-empty -m init && git push -q origin dev)
@@ -61,7 +63,7 @@ ORCHY_HOME="$H2" "$ORCHY" launch y-a1 x acct-d >/dev/null || fail "second progra
 for k in x-d1 x-c1 x-c2 x-c3; do cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/$k.md"; done
 o=$("$ORCHY" launch x-d1 x acct-d 2>&1 || true); grep -q 'cap 1' <<<"$o" || fail "the strictest cap among running programs was not applied: $o"
 # concurrent launches never pass the cap together
-for k in x-c1 x-c2 x-c3; do ( "$ORCHY" launch "$k" x acct-c > "$T/$k.out" 2>&1 ) & done; wait
+ps=(); for k in x-c1 x-c2 x-c3; do ( "$ORCHY" launch "$k" x acct-c > "$T/$k.out" 2>&1 ) & ps+=($!); done; wait "${ps[@]}" || true
 [ "$(cat "$T"/x-c?.out | grep -c ' on acct-c pid ')" = 2 ] || fail "concurrent launches broke the cap: $(cat "$T"/x-c?.out)"
 # a home outside the capacity root, a dot-named or symlinked home, or a writable root, is refused
 mkdir -p "$T/cap/.hid/prompts"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$T/cap/.hid/"; cp "$ORCHY_HOME/prompts/x-plan.md" "$T/cap/.hid/prompts/z.md"
@@ -90,7 +92,7 @@ hook <<<'{}' >&- 2>/dev/null; [ ! -f "${IB%.jsonl}.cursor" ] || fail "a failed w
 printf '{"at":"x","text":"partial"}' >> "$IB"; [ -z "$(hook <<<'{}')" ] || fail "a line without its newline was delivered"
 echo >> "$IB"; [ "$(hook <<<'{}' | ctx)" = "ORCHY-STEER: partial" ] || fail "the completed line was not delivered"
 pad=$(head -c 1000 /dev/zero | tr '\0' x); for i in 1 2 3 4 5; do "$ORCHY" say x-b1 "n$i $pad" >/dev/null || fail "say n$i"; done
-for i in 1 2 3 4 5 6 7 8; do ( hook <<<'{}' > "$T/hook.$i" ) & done; wait
+ps=(); for i in 1 2 3 4 5 6 7 8; do ( hook <<<'{}' > "$T/hook.$i" ) & ps+=($!); done; wait "${ps[@]}" || true
 cat "$T"/hook.? | jq -r '.hookSpecificOutput.additionalContext' | grep -o '^ORCHY-STEER: n[0-9]' | sort | uniq -c > "$T/hook.count"
 [ "$(wc -l < "$T/hook.count")" = 5 ] && ! grep -qv '^ *1 ' "$T/hook.count" || fail "parallel hooks did not deliver each note once: $(cat "$T/hook.count")"
 [ "$(cat "$T"/hook.? | grep -c additionalContext)" -lt 5 ] || fail "notes that fit in 4 KiB were not delivered together"
@@ -216,7 +218,7 @@ mkdir -p "$T/profile"; { jq -nc '{record:"a",category:"copy",agreed:false}'; jq 
 o=$(ORCHY_HOME="$HR" "$ORCHY" receipt q | tail -1); [ "$o" = "owner took the recommendation: copy 1/2; 1 taken all at once (not scored), 1 left to the orchestrator" ] || fail "owner-record footer: $o"
 # ask ledger: distinct ids under contention, transitions, a torn tail, the size cap
 LG="$T/asks/example-app.jsonl"; A() { "$ORCHY" ask "$@"; }
-for i in 1 2 3 4; do ( A add "parallel ask $i" > "$T/add.$i" ) & done; wait
+ps=(); for i in 1 2 3 4; do ( A add "parallel ask $i" > "$T/add.$i" ) & ps+=($!); done; wait "${ps[@]}" || true
 [ "$(cat "$T"/add.* | sort -u | grep -c '^ask[1-4]$')" = 4 ] || fail "parallel ask add reused an id: $(cat "$T"/add.*)"
 [ "$(stat -c %a "$T/asks") $(stat -c %a "$LG")" = "700 600" ] || fail "ledger modes: $(stat -c %a "$T/asks") $(stat -c %a "$LG")"
 o=$(A lane ask1 greet-1 "a repo change" 2>&1 || true); grep -q 'no public wording' <<<"$o" || fail "lane without a public wording: $o"
@@ -346,8 +348,7 @@ touch "$MOCK_DIR/fail-issues"; ORCHY_HOME="$HW" ORCHY_WAIT_TICK=1 "$ORCHY" wait 
 grep -q 'TIMEOUT after 2s, no change; unreadable: issues' "$T/w.out" || fail "a timeout did not name the unreadable source: $(cat "$T/w.out")"
 o=$(ORCHY_HOME="$HW" ORCHY_WAIT_TICK=1 "$ORCHY" wait 2 2>&1); [ "$o" = "TIMEOUT after 2s, no change" ] || fail "a quiet wait did not time out cleanly: $o"
 rm -f "$MOCK_DIR/issues.json" "$MOCK_DIR/trunk.json"
-# the page toolchain's own smoke
-[ -x "$K/page/smoke.sh" ] || fail "page/smoke.sh missing"; bash "$K/page/smoke.sh" > "$T/page.log" 2>&1 || { tail -n 20 "$T/page.log"; fail "page smoke"; }
+wait "$pgp" || { tail -n 20 "$T/page.log"; fail "page smoke"; }; pgp=
 # no project names, home paths or roster names anywhere in the skill
 if grep -rnE 'nulo|Nulo|program-2|program2|/mnt/user-data|/Users/|martu|proton|icloud|GzKw77' "$K" --include='*.md' --include='*.sh' --include='*.py' --include='*.js' --include='*.ts' --include='*.json' --include='*.cjs' | grep -v 'page/fixtures' ; then fail "project-specific text in the skill"; fi
 echo "smoke-orchy: ok"
