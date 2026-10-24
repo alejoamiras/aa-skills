@@ -4,7 +4,7 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd); K="$HERE/skills/start-orchy"; ORCHY="$K/scripts/orchy.sh"
 T=$(mktemp -d -t orchy-smoke-XXXX); trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
-export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_CAPACITY_ROOT="$T/cap" ORCHY_HOME="$T/cap/home" ORCHY_REPO=example/app ORCHY_WATCH_SLEEP=1; mkdir -p "$MOCK_DIR"
+export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_CAPACITY_ROOT="$T/cap" ORCHY_HOME="$T/cap/home" ORCHY_REPO=example/app ORCHY_WATCH_SLEEP=1 ORCHY_PROFILE_DIR="$T/profile"; mkdir -p "$MOCK_DIR"
 # a real local origin with a dev branch, so wt-new's fetch and reset work
 git init -q --bare "$T/origin.git"; git init -q -b dev "$T/repo"; git -C "$T/repo" remote add origin "$T/origin.git"
 (cd "$T/repo" && git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -q --allow-empty -m init && git push -q origin dev)
@@ -195,6 +195,10 @@ grep -qF 'q: $0.25 API-equivalent; 1 session(s); tokens in 1 out 2 cache-read 3 
 grep -qF 'total: $1.75 API-equivalent + 37 unpriced tokens' <<<"$o" || fail "receipt total: $o"
 [ "$(ORCHY_HOME="$HR" "$ORCHY" receipt q | wc -l)" = 1 ] || fail "receipt <lane> printed other lanes"
 if ORCHY_HOME="$HR" "$ORCHY" receipt nope >/dev/null 2>&1; then fail "receipt of an unknown lane succeeded"; fi
+# the owner-record footer: last row per record, take-all picks and delegations never scored
+mkdir -p "$T/profile"; { jq -nc '{record:"a",category:"copy",agreed:false}'; jq -nc '{record:"a",category:"copy",agreed:true}'; jq -nc '{record:"b",category:"copy",agreed:false}'
+  jq -nc '{record:"c",category:"layout",agreed:true,via_recommend_all:true}'; jq -nc '{record:"d",category:"layout",agreed:null}'; } > "$T/profile/example-app.jsonl"
+o=$(ORCHY_HOME="$HR" "$ORCHY" receipt q | tail -1); [ "$o" = "owner took the recommendation: copy 1/2; 1 taken all at once (not scored), 1 left to the orchestrator" ] || fail "owner-record footer: $o"
 # the page toolchain's own smoke
 [ -x "$K/page/smoke.sh" ] || fail "page/smoke.sh missing"; bash "$K/page/smoke.sh" > "$T/page.log" 2>&1 || { tail -n 20 "$T/page.log"; fail "page smoke"; }
 # no project names, home paths or roster names anywhere in the skill

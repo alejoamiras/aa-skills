@@ -465,6 +465,19 @@ for lane in sorted(lanes):
           f"failed arcs {failed}; Codex rounds {rounds}")
     tot["cost"] += L["cost"]; tot["partial"] += L["partial"]
 if not want and len(lanes) > 1: print(f"total: ${tot['cost']:.2f} API-equivalent" + (f" + {tot['partial']} unpriced tokens" if tot["partial"] else ""))
+rec_file = os.path.join(os.environ.get("ORCHY_PROFILE_DIR") or os.path.expanduser("~/.agents/orchy/profile"), repo.replace("/", "-") + ".jsonl")
+if os.path.exists(rec_file):
+    last = {}
+    for line in open(rec_file, errors="replace"):
+        try: o = json.loads(line); last[o["record"]] = o
+        except (ValueError, KeyError, TypeError): continue
+    cats, take_all, neither = {}, 0, 0
+    for o in last.values():
+        if o.get("via_recommend_all"): take_all += 1
+        elif o.get("agreed") is None: neither += 1
+        else: c = cats.setdefault(o.get("category") or "other", [0, 0]); c[0] += bool(o["agreed"]); c[1] += 1
+    print("owner took the recommendation: " + (", ".join(f"{k} {a}/{n}" for k, (a, n) in sorted(cats.items())) or "nothing scored yet")
+          + f"; {take_all} taken all at once (not scored), {neither} left to the orchestrator")
 if want and want not in lanes: print(f"no lead logs for lane {want}", file=sys.stderr); sys.exit(1)
 PY
   ;;

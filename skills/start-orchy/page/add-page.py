@@ -11,6 +11,7 @@ no = page.get("no")
 if type(no) is not int: sys.exit("page.no must be an integer")
 if any(p["no"] == no for p in d["pages"]): sys.exit(f"page {no} exists already: a page number is never reused")
 errs = []
+CATEGORIES = ("copy", "layout", "a11y", "risk", "architecture", "policy", "ci-cost", "scope", "other")   # the owner record scores agreement per category
 def need(obj, keys, where): errs.extend(f"{where}: no {k}" for k in keys if obj.get(k) in (None, ""))
 def banned(text, where):
     if isinstance(text, str) and BAN.search(text): errs.append(f"{where}: {BAN.search(text).group(0)!r} is banned in what the owner sees")
@@ -34,6 +35,7 @@ for r in recs:
         if k == "options": continue
         if not isinstance(t, str) or not t.startswith("## Decision\n"): errs.append(f"{rid}: writes_back.{k} must be a template string starting with '## Decision'")
     banned(r.get("surface"), f"{rid} surface")
+    if r.get("category") is not None and r["category"] not in CATEGORIES: errs.append(f"{rid}: category must be one of {', '.join(CATEGORIES)}")
     if kind == "visual":
         need(r, ("surface", "options", "recommend"), rid)
         keys = [o.get("id") for o in r.get("options") or []]

@@ -3,8 +3,10 @@
 // Usage: bun apply-decisions.ts --answers <dir-or-json> [--apply] [--force]
 // A signed page writes the choices its signoff doc snapshotted; a later change to a choice holds that record until the page is signed again.
 // Reads $ORCHY_HOME/page/{decisions.json,lanes.json,public-notes.json}; a dry-run (no --apply) never calls gh.
-import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+// --apply also records each signed record against its recommendation in ${ORCHY_PROFILE_DIR:-~/.agents/orchy/profile}/<owner>-<repo>.jsonl.
+import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 if (!process.env.ORCHY_HOME) { console.error("ORCHY_HOME is not set: export the orchestrator's state dir (the page data lives in $ORCHY_HOME/page)"); process.exit(2); }
 const O = join(process.env.ORCHY_HOME, "page");
 const MARK = "<!-- orchy:decision -->";
@@ -65,6 +67,15 @@ const recorded: string[] = [];
 // What a signoff snapshotted is what was signed. Three outcomes per record: a doc (answered), undefined (signed as the
 // default; a doc added after signing does not count), or HELD (changed after signing: nothing of its issues is written).
 const HELD: Doc = { __held: true };
+// Owner record: only what a signoff snapshotted counts; `explicit` is false for a default the owner signed without touching.
+// A take-all pick is kept but never scored as agreement, and a `read` (left to the orchestrator, or a note instead of an option) scores neither way.
+const ownerRows: Doc[] = [];
+const ownerRow = (s: Doc, p: any, r: any, a: Doc | undefined, recommended: string, agreeOn: (c: string) => boolean) => {
+  if (!(s.choices && typeof s.choices === "object" && r.id in s.choices)) return;
+  const chosen: string = a?.choice ?? recommended;
+  ownerRows.push({ repo: REPO, page: p.no, record: r.id, kind: r.kind ?? "charter", category: r.category ?? "other", recommended, chosen,
+    agreed: chosen === "read" ? null : agreeOn(chosen), explicit: s.choices[r.id] !== null, via_recommend_all: a?.viaRecommendAll === true, note: a?.note ?? "", signed_at: s.at ?? "" });
+};
 const heldIssues = new Set<number>();
 const heldPages: number[] = [];
 const pagesToWrite = D.pages.filter((p: any) => signoffs[p.no]).filter((p: any) => {
@@ -97,6 +108,7 @@ for (const p of pagesToWrite) {
   if (p.no === 0) {
     for (const c of D.charter) {
       const a = signed(s, c.id); if (a === HELD) continue; if (!a) { manual.push(`${c.id} unanswered though page 0 is signed`); continue; }
+      ownerRow(s, p, c, a, c.recommend?.id ?? "", ch => ch === c.recommend?.id);
       const optText = c.options.find((o: any) => o.id === a.choice)?.text ?? "";
       for (const [key, tpl] of Object.entries<string>(c.writes_back)) {
         const targets = key === "*" ? c.applies_to : [Number(key)];
@@ -115,6 +127,9 @@ for (const p of pagesToWrite) {
   }
   for (const r of D.records.filter((r: any) => r.page_no === p.no)) {
     const a = signed(s, r.id), wb = r.writes_back; let text = ""; if (a === HELD) continue;
+    if (r.kind === "approve" && !r.check) ownerRow(s, p, r, a, "approve", ch => ch !== "change");
+    else if (r.kind === "veto") ownerRow(s, p, r, a, "accept", ch => ch !== "strike");
+    else if (r.kind === "visual" && a) ownerRow(s, p, r, a, r.recommend?.id ?? "", ch => ch === r.recommend?.id);
     if (r.check) { if (!a) { manual.push(`${r.id} (#${r.issue.join(", #")}) manual check not recorded; nothing written`); continue; } text = fill(wb.on_result, { date, result: a.result || "", next_step: a.next_step || "the orchestrator proposes one" }); }
     else if (r.kind === "approve") text = a?.choice === "change" ? fill(wb.on_change, { date, note: a.note || "" }) : fill(wb.on_approve, { date, note: a?.note || "" });
     else if (r.kind === "veto") text = a?.choice === "strike" ? fill(wb.on_strike, { date, note: a.note || "" }) : fill(wb.on_accept, { date });
@@ -177,6 +192,14 @@ for (const n of issues) {
   await sh(edit); receipts[n] = { at: new Date().toISOString(), lane, pages: [...new Set(out[n].map(s => s.page))] }; written++;
   writeFileSync(receiptsPath, JSON.stringify(receipts, null, 1));
   await Bun.sleep(1200);
+}
+if (APPLY && ownerRows.length) {
+  // append-only, last row per record wins; a row equal to the record's live one is not appended again
+  const dir = process.env.ORCHY_PROFILE_DIR ?? join(homedir(), ".agents/orchy/profile"), file = join(dir, `${REPO.replace("/", "-")}.jsonl`);
+  const live: Record<string, string> = {};
+  if (existsSync(file)) for (const l of readFileSync(file, "utf8").split("\n")) { try { const o = JSON.parse(l); live[o.record] = l; } catch {} }
+  const fresh = ownerRows.map(o => JSON.stringify(o)).filter(l => live[JSON.parse(l).record] !== l);
+  if (fresh.length) { mkdirSync(dir, { recursive: true, mode: 0o700 }); appendFileSync(file, fresh.join("\n") + "\n", { mode: 0o600 }); }
 }
 console.log(`${APPLY ? "applied" : "dry-run"}: pages signed ${pagesToWrite.map((p: any) => p.no).join(",") || "none"}; issues ${issues.length}; written ${written}; skipped ${skipped}; previews in ${prevDir}`);
 if (recorded.length) console.log("RECORDED READ OPTIONS (written from their recorded field):\n- " + recorded.join("\n- "));

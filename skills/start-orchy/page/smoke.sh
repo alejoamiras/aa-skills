@@ -4,7 +4,7 @@ set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # ORCHY_SMOKE_TMP moves the scratch dir without moving Chrome's TMPDIR, whose socket path must stay short.
 T=$(mktemp -d "${ORCHY_SMOKE_TMP:-${TMPDIR:-/tmp}}/orchy-page-smoke.XXXXXX"); trap 'rm -rf "$T"' EXIT
-export ORCHY_HOME="$T/home"; unset ORCHY_PAGE_BUILD DROP_PAGES UNSIGNED
+export ORCHY_HOME="$T/home" ORCHY_PROFILE_DIR="$T/profile"; unset ORCHY_PAGE_BUILD DROP_PAGES UNSIGNED
 P="$ORCHY_HOME/page"; B="$P/build"
 mkdir -p "$P" "$T/bin"; cp -R "$HERE/fixtures/." "$P/"
 # A dry-run must never reach GitHub: this gh records the call and fails.
@@ -43,7 +43,10 @@ PY
 if python3 -I "$HERE/add-page.py" "$T/bad.json" 2> "$T/bad.err"; then fail "add-page.py accepted a bad spec"; fi
 if ! { grep -q 'must end with -<option key>' "$T/bad.err" && grep -q 'is banned' "$T/bad.err"; }; then fail "bad spec refused for the wrong reason: $(cat "$T/bad.err")"; fi
 [ "$(cksum < "$P/decisions.json")" = "$sum" ] || fail "a refused add-page.py changed decisions.json"
-ok "add-page.py refuses a re-added page, a bad option suffix and a banned caption"
+jq '.records[0].category="vibes"' "$HERE/fixtures/page-2.json" | jq '.page.no=9 | .records[0].id="P9-01" | .records[0].page_no=9 | .records |= .[:1] | .manifest_rows=[]' > "$T/cat.json"
+if python3 -I "$HERE/add-page.py" "$T/cat.json" 2> "$T/cat.err"; then fail "add-page.py accepted an unknown category"; fi
+grep -q 'category must be one of' "$T/cat.err" || fail "unknown category not named: $(cat "$T/cat.err")"
+ok "add-page.py refuses a re-added page, a bad option suffix, a banned caption and an unknown category"
 
 python3 -I "$HERE/gen.py" 2> "$T/gen.err" || { cat "$T/gen.err" >&2; fail "gen.py after add-page"; }
 grep -q '"no": 2, "name": "Settings list"' "$B/decisions.html" || fail "page 2 missing from the build"
@@ -98,7 +101,10 @@ jq -r '[.labels[].name]|join(",")' "$T/issues/1.json" | grep -q 'owner-decision'
 jq -e '."1".lane=="home-1"' "$P/apply-receipts.json" >/dev/null || fail "no receipt for #1"
 PATH="$G:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans1" --apply > "$T/apply3.out" 2>&1 || fail "second apply"
 grep -q 'written 0; skipped 2' "$T/apply3.out" || fail "second apply rewrote unchanged blocks: $(head -1 "$T/apply3.out")"
-ok "apply --apply: marker block below the original body, lane label, receipts, idempotent"
+R="$ORCHY_PROFILE_DIR/example-app.jsonl"
+[ "$(wc -l < "$R")" = 2 ] || fail "two applies did not leave one owner-record row per record: $(cat "$R")"
+jq -se 'map({(.record): [.chosen, .agreed, .explicit, .via_recommend_all]}) | add == {"P1-01": ["B", true, true, false], "P1-02": ["approve", true, false, false]}' "$R" >/dev/null || fail "owner-record rows: $(cat "$R")"
+ok "apply --apply: marker block below the original body, lane label, receipts, idempotent, one owner-record row per record"
 
 # a choice changed after signing is held, never written; an except note holds the page; a sensitive result holds everything
 cp -r "$P/answers" "$T/ans2"; jq '.choice="A"' "$T/ans2/decisions/choice-P1-01.json" > "$T/c.json" && mv "$T/c.json" "$T/ans2/decisions/choice-P1-01.json"
@@ -115,6 +121,7 @@ if PATH="$G:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans6" --apply > 
 grep -q 'P1-02 changed after page 1 was signed (signed approve, now change)' "$T/apply8.out" || fail "held approve not reported: $(cat "$T/apply8.out")"
 [ ! -e "$T/issues/2.json" ] || fail "a held approve record's issue was written: $(jq -r .body "$T/issues/2.json")"
 [ -e "$T/issues/1.json" ] || fail "the unaffected issue was not written"
+jq -e 'select(.record == "P1-02")' "$R" | grep -q change && fail "a held record reached the owner record"
 # a null snapshot is the signed default even when a doc appears later
 cp -r "$P/answers" "$T/ans7"; jq -n '{"__id":"choice-P1-02","page":"decisions","page_no":1,"id":"P1-02","kind":"approve","issue":[2],"choice":"change","note":"later","at":"2026-01-07T10:00:00.000Z","by":"u_example"}' > "$T/ans7/decisions/choice-P1-02.json"
 PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans7" > /dev/null 2>&1 || fail "apply with a post-signing doc on a null snapshot"
