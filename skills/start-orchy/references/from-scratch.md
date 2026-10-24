@@ -1,6 +1,6 @@
 # From scratch: an empty folder becomes a repository
 
-`/start-orchy` in an empty folder runs this procedure, in the owner's session, by the orchestrator itself (never a lead). It hands over to Phase 0 step 2 with a repository on GitHub, a green gate on `main`, and what to build captured as `ask1`. Every step stops on failure and names the step and the reason; nothing here retries a create or a push.
+`/start-orchy` in an empty folder runs this procedure, in the owner's session, by the orchestrator itself (never a lead). It hands over to Phase 0 step 2 with a repository on GitHub, a green gate on `main`, and what to build captured as `ask1`. Every step stops on failure and names the step and the reason; nothing here retries a create or a push. A run interrupted after step 3 is not resumed: the folder is no longer empty and has no `origin`, so the guard refuses it, and the owner decides whether to finish by hand or start over in a fresh folder.
 
 ## 1. Guard
 
@@ -40,7 +40,7 @@ Then one `AskUserQuestion`, recommended answer first:
 `orchy.sh` runs before the repository exists when every call carries `ORCHY_REPO=<owner>/<name>` (until step 6 adds `origin`):
 
 1. `git init -b main`, or, when the empty `.git` exists, `git symbolic-ref HEAD refs/heads/main`.
-2. The home `ORCHY home` prints, made with mode 700, holding `orchy.json` from `examples/orchy.example.json` with `repo` and `trunk: "main"` (no `bootstrap` key, so an interrupted run resumes here) and `local.json` per Phase 0 step 4 from step 2's answers, `prompt_ban` included.
+2. The home `ORCHY home` prints, made with mode 700, holding `orchy.json` from `examples/orchy.example.json` with `repo` and `trunk: "main"` (no `bootstrap` key until Phase 0 step 4) and `local.json` per Phase 0 step 4 from step 2's answers, `prompt_ban` included.
 3. `ORCHY ask add <what to build, the owner's words>` prints `ask1`; `ORCHY ask public ask1 <the signed description>` runs the same `check-public` every handoff does. A refusal goes back to the owner with a new wording; nothing is written into the folder until the wording passes.
 
 ## 4. Scaffold
