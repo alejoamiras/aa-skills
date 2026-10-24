@@ -68,3 +68,4 @@ A finding becomes a change only once its path is written (initial conditions, ac
 - orchy assumes a single-user host or a private group. The home and the capacity root are made 700, which protects everything inside from then on; a home that was ever group-accessible on a shared host may hold files edited in place before that and must be inspected before use. Symlinked homes and files another user owns are refused.
 - An inbox cursor past the end of its file (only a hand truncation shrinks an inbox) holds that lead's notes until the inbox grows past it.
 - A receipt counts a killed run's usage as tokens without dollars, and treats a run killed between two results of one session as included in the later running total.
+- The close-out guard reads open PRs before taking the spawn lock: a close-out lead that opens its PR and exits inside that window is seen by neither check, and a second close-out can start. Closing it needs a network call under the lock.

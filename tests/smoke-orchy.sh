@@ -120,7 +120,8 @@ mkpr "$SHA"; jq --arg s 3333333333333333333333333333333333333333 '.headRefOid=$s
 o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1 || true); grep -q 'HEAD MOVED' <<<"$o" || fail "a moved head did not exit: $o"
 # trunk guard: a failed trunk check blocks, unless the PR contains that trunk commit and passed the failed check itself; pending never blocks
 jq -n '{check_runs:[{id:9,name:"quality-status",status:"completed",conclusion:"failure"}]}' > "$MOCK_DIR/checks-$TS.json"; mkpr "$SHA"
-o=$("$ORCHY" snapshot 2>&1); grep -q '^dev aaaaaaaa: RED quality-status' <<<"$o" || fail "snapshot does not show the red trunk: $o"
+o=$("$ORCHY" snapshot 2>&1); grep -qx 'dev aaaaaaaa: RED quality-status' <<<"$o" || fail "snapshot does not show the red trunk exactly once: $o"
+grep -q -- '/status --paginate' "$MOCK_DIR/gh.log" || fail "the combined status is read without --paginate"
 o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1 || true); grep -q 'TIMEOUT; not merged' <<<"$o" || fail "a red trunk did not block: $o"
 [ "$(grep -c 'TRUNK RED at aaaaaaaa: quality-status' <<<"$o")" = 1 ] || fail "TRUNK RED not printed exactly once: $o"
 jq -n '{behind_by:0}' > "$MOCK_DIR/compare.json"
@@ -141,7 +142,8 @@ o=$("$ORCHY" teardown x 2>&1 || true); grep -q 'lead of this lane is alive' <<<"
 "$ORCHY" wt-new y >/dev/null || fail "wt-new"
 if "$ORCHY" wt-new y >/dev/null 2>&1; then fail "wt-new accepted an existing slug"; fi
 HY=$(git -C .claude/worktrees/y rev-parse HEAD)
-o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1 || true); grep -q 'hand removal is off' <<<"$o" || fail "teardown hand-removed with the switch off: $o"
+sleep 60 & zp=$!; echo "$zp $(awk '{print $22}' /proc/$zp/stat) acct-z 2026-01-01T00:00:00Z heavy" > "$ORCHY_HOME/leads/y-z-plan.started"
+o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1 || true); grep -q 'hand removal is off' <<<"$o" || fail "teardown hand-removed with the switch off, or took lane y-z's lead for lane y's: $o"
 jq '.teardown.hand_remove=true' "$ORCHY_HOME/orchy.json" > "$tmp" && mv "$tmp" "$ORCHY_HOME/orchy.json"
 jq -n --arg h 4444444444444444444444444444444444444444 '[{number:5,headRefOid:$h,baseRefName:"dev"}]' > "$MOCK_DIR/merged.json"
 o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1 || true); grep -q 'not the head of a PR merged' <<<"$o" || fail "teardown removed a worktree whose HEAD is not a merged PR head: $o"
@@ -169,12 +171,12 @@ kill $hp; wait $hp 2>/dev/null || true; "$ORCHY" lock | grep -q '^locked' || fai
 for f in "$T"/cap/*/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/null || true; done; for f in "$MOCK_DIR"/gc.*; do kill "$(cat "$f")" 2>/dev/null || true; done
 # triage mode refuses worktrees, leads and merges in one guard
 cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak"; jq '.mode="triage"' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"
-for c in "wt-new z" "launch x-plan x acct-e" "arm-merge 9 $SHA lane-9 r9.md"; do
+for c in "wt-new z" "launch x-plan x acct-e" "arm-merge 9 $SHA lane-9 r9.md" "watch-merge 9 $SHA lane-9 r9.md"; do
   o=$("$ORCHY" $c 2>&1 || true); grep -q 'mode is triage' <<<"$o" || fail "triage mode allowed $c: $o"; done
 cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"
 # intake and page age: untriaged open issues, unsigned pages with how long they have waited
 o=$("$ORCHY" snapshot 2>&1); grep -q '^(no triaged.txt' <<<"$o" || fail "snapshot without triaged.txt: $o"
-jq -n '[{number:1,title:"old"},{number:2,title:"new one"}]' > "$MOCK_DIR/issues.json"; printf '1\n' > "$ORCHY_HOME/triaged.txt"
+jq -n '[{number:1,title:"old"},{number:2,title:"new one"}]' > "$MOCK_DIR/issues.json"; printf '1\n2junk\n' > "$ORCHY_HOME/triaged.txt"
 jq -n --arg t "$(date -u -d '50 hours ago' +%FT%TZ)" '{pages:[{no:3,name:"Copy",added_at:$t},{no:4,name:"Old"},{no:5,name:"Signed",added_at:$t}]}' > "$ORCHY_HOME/page/decisions.json"; echo '[3,4]' > "$ORCHY_HOME/page/unsigned.json"
 o=$("$ORCHY" snapshot 2>&1); grep -q '^#2 new one$' <<<"$o" && ! grep -q '^#1 ' <<<"$o" || fail "untriaged issues: $o"
 grep -q '^page 3 Copy: waiting 2d2h$' <<<"$o" && grep -q '^page 4 Old: age unknown$' <<<"$o" && ! grep -q '^page 5 ' <<<"$o" || fail "unsigned page ages: $o"
@@ -184,13 +186,14 @@ jq -n '[{headRefName:"q-closeout"},{headRefName:"x-closeout"}]' > "$MOCK_DIR/ope
 o=$("$ORCHY" launch x-closeout x acct-e 2>&1 || true); grep -q 'close-out PR q-closeout is still open' <<<"$o" || fail "a second close-out launched beside an open one: $o"
 jq -n '[{headRefName:"x-closeout"}]' > "$MOCK_DIR/open.json"; "$ORCHY" launch x-closeout x acct-e >/dev/null || fail "a lane's own open close-out PR blocked its close-out lead"
 o=$("$ORCHY" launch x2-closeout x acct-f 2>&1 || true); grep -q 'close-out lead x-closeout is alive' <<<"$o" || fail "two close-out leads ran at once: $o"
+grep -q -- '--state open --limit 1000' "$MOCK_DIR/gh.log" || fail "the close-out PR check reads gh's default 30 PRs"
 rm -f "$MOCK_DIR/open.json"
 # receipt: a session counts its last (running-total) result once; a killed run adds deduped, unpriced usage; only closed issues count
 HR="$T/cap/rcpt"; mkdir -p "$HR"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HR/"; cp -r "$HERE/tests/mocks/orchy/receipt/." "$HR/"
 jq -n '{closingIssuesReferences:[{number:3},{number:4}]}' > "$MOCK_DIR/pr-21.json"; jq -n '{state:"CLOSED"}' > "$MOCK_DIR/issue-3.json"; jq -n '{state:"OPEN"}' > "$MOCK_DIR/issue-4.json"
 o=$(ORCHY_HOME="$HR" "$ORCHY" receipt) || fail "receipt: $o"
 grep -qF 'r: $1.50 API-equivalent + 37 unpriced tokens from killed runs; 2 session(s); tokens in 150 out 20 cache-read 1500 cache-write 60;' <<<"$o" || fail "receipt cost or tokens: $o"
-grep -qF 'PRs #21 #22 (merged #21); issues closed 1 (#3); failed arcs 1; Codex rounds 2' <<<"$o" || fail "receipt joins: $o"
+grep -qF 'PRs #21 #22 #23 (merged #21); issues closed 1 (#3); failed arcs 1; Codex rounds 3' <<<"$o" || fail "receipt joins, with the auto-continued arc1 report: $o"
 grep -qF 'q: $0.25 API-equivalent; 1 session(s); tokens in 1 out 2 cache-read 3 cache-write 4; wall ?;' <<<"$o" || fail "receipt of a log without markers: $o"
 grep -qF 'total: $1.75 API-equivalent + 37 unpriced tokens' <<<"$o" || fail "receipt total: $o"
 [ "$(ORCHY_HOME="$HR" "$ORCHY" receipt q | wc -l)" = 1 ] || fail "receipt <lane> printed other lanes"

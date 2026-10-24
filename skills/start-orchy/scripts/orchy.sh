@@ -45,7 +45,7 @@ case "$cmd" in help|-h|--help) usage 0;; home) echo "$H"; exit 0;; esac
 cfg() { jq -r "$1" "$CFG"; }
 lcl() { [ -f "$LOCAL" ] && jq -r "$1" "$LOCAL" || echo ""; }
 TRUNK=$(cfg '.trunk // "main"')
-case "$cmd" in wt-new|launch|resume|arm-merge)
+case "$cmd" in wt-new|launch|resume|arm-merge|watch-merge)
   [ "$(cfg '.mode // empty')" = triage ] && { echo "refused: orchy.json mode is triage (labels, comments and pages only; no worktree, lead or merge)" >&2; exit 1; };; esac
 # A lead runs the hook its settings file names, so nobody but the owner may write here. chmod tightens a fresh or loose
 # home (a umask would also reach wt-new's product checkout), but cannot undo what another user planted while it was loose.
@@ -98,7 +98,7 @@ sha_ok() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
 checks() { # name<TAB>status<TAB>conclusion: the newest check-run per name, then a commit status only for a name no check-run carries; exit 1 on an API failure
   local cr st
   cr=$(gh api "repos/$REPO/commits/$1/check-runs" --paginate --jq '.check_runs[] | {id, name, status, conclusion}' 2>/dev/null) || return 1
-  st=$(gh api "repos/$REPO/commits/$1/status" --jq '.statuses[] | "\(.context)\tcompleted\t\(.state)"' 2>/dev/null) || return 1
+  st=$(gh api "repos/$REPO/commits/$1/status" --paginate --jq '.statuses[] | "\(.context)\tcompleted\t\(.state)"' 2>/dev/null) || return 1
   cr=$(jq -rs 'group_by(.name) | map(max_by(.id)) | .[] | "\(.name)\t\(.status)\t\(.conclusion)"' <<<"$cr")
   printf '%s\n' "$cr"
   [ -z "$st" ] || awk -F'\t' 'NR==FNR{seen[$1]=1; next} !($1 in seen)' <(printf '%s\n' "$cr") <(printf '%s\n' "$st" | sed 's/\terror$/\tfailure/')
@@ -168,7 +168,7 @@ launch|resume)
   refuse_account "$a" || exit 1; cap_root_ok || exit 1
   # Close-outs run one at a time: each merges the trunk's plan index and lessons, and two in flight would each miss the other's.
   if [[ "$k" == *-closeout ]]; then
-    open=$(gh pr list --repo "$REPO" --state open --json headRefName --jq '.[].headRefName' 2>/dev/null) || { echo "refused: cannot list open PRs to serialize close-outs" >&2; exit 1; }
+    open=$(gh pr list --repo "$REPO" --state open --limit 1000 --json headRefName --jq '.[].headRefName' 2>/dev/null) || { echo "refused: cannot list open PRs to serialize close-outs" >&2; exit 1; }
     other=$(grep -E -- '-closeout$' <<<"$open" | grep -vxF -- "$w-closeout" | head -1)
     [ -z "$other" ] || { echo "refused: close-out PR $other is still open; close-outs run one at a time" >&2; exit 1; }
   fi
@@ -254,13 +254,13 @@ snapshot)
     c=$(cat "${f%.jsonl}.cursor" 2>/dev/null); [[ "$c" =~ ^[0-9]{1,15}$ ]] && c=$((10#$c)) || c=0
     n=$(tail -c +"$((c + 1))" "$f" | grep -c ''); [ "$n" -gt 0 ] && echo "$(basename "$f" .jsonl): $n undelivered"; done
   echo "-- watchers"; for f in "$H"/watch/*.pid; do [ -f "$f" ] || continue; n=$(basename "$f" .pid); if watcher_alive "$f"; then echo "alive $n pid $(cut -d' ' -f1 "$f")"; else echo "ended $n: $(tail -n 1 "$H/watch/$n.out" 2>/dev/null | cut -c1-120)"; fi; done
-  echo "-- trunk"; if t=$(trunk_state); then f=$(tail -n +2 <<<"$t" | paste -sd, -); echo "$TRUNK ${t:0:8}: ${f:+RED $f}${f:-no failed trunk check}"; else echo "(trunk checks unreadable)"; fi
+  echo "-- trunk"; if t=$(trunk_state); then f=$(tail -n +2 <<<"$t" | paste -sd, -); echo "$TRUNK ${t:0:8}: ${f:+RED }${f:-no failed trunk check}"; else echo "(trunk checks unreadable)"; fi
   echo "-- open PRs"; gh pr list --repo "$REPO" --state open --json number,title,headRefOid,mergeable,mergeStateStatus,isDraft,baseRefName --jq '.[]|"#\(.number) \(.headRefOid[0:8]) \(.mergeable) \(.mergeStateStatus) draft=\(.isDraft) -> \(.baseRefName) \(.title)"' 2>/dev/null || echo "(gh pr list failed)"
   echo "-- worktrees"; git -C "$ROOT" worktree list | tail -n +2
   echo "-- untriaged issues"
   if [ ! -f "$H/triaged.txt" ]; then echo "(no triaged.txt: write every triaged issue number into it, one per line)"
   elif iss=$(gh issue list --repo "$REPO" --state open --limit 1000 --json number,title --jq '.[] | "\(.number)\t\(.title)"' 2>/dev/null); then
-    awk -F'\t' 'FILENAME == ARGV[1] {t[$1]=1; next} $1 != "" && !($1 in t) {print "#" $1 " " substr($2, 1, 100)}' <(grep -oE '^[0-9]+' "$H/triaged.txt") <(printf '%s\n' "$iss")
+    awk -F'\t' 'FILENAME == ARGV[1] {t[$1]=1; next} $1 != "" && !($1 in t) {print "#" $1 " " substr($2, 1, 100)}' <(grep -xE '[0-9]+' "$H/triaged.txt") <(printf '%s\n' "$iss")
   else echo "(gh issue list failed)"; fi
   echo "-- unsigned pages"; [ -f "$H/page/unsigned.json" ] && jq -r --argjson now "$(date +%s)" --slurpfile u "$H/page/unsigned.json" '.pages[] | select(.no as $n | $u[0] | index($n)) |
     "page \(.no) \(.name): " + (if .added_at then (($now - (.added_at | fromdateiso8601)) | "waiting \(. / 86400 | floor)d\(. % 86400 / 3600 | floor)h") else "age unknown" end)' "$H/page/decisions.json" 2>/dev/null
@@ -273,14 +273,15 @@ wait)
     for f in "$H"/watch/*.pid; do watcher_alive "$f" && echo "watcher $(basename "$f" .pid)"; done
   }
   prs() { gh pr list --repo "$REPO" --state open --json number,headRefOid,mergeable,isDraft --jq '.[]|"\(.number) \(.headRefOid[0:8]) \(.mergeable) \(.isDraft)"' 2>/dev/null; }
-  a=$(snap); pa=$(prs); t0=$(date +%s); n=0
+  a=$(snap); pa=$(prs) || pa=unread; t0=$(date +%s); n=0
   while :; do
     sleep 20; n=$((n+1)); b=$(snap)
     if [ "$a" != "$b" ]; then echo "CHANGED (reports/leads/watchers):"; diff <(echo "$a") <(echo "$b") | grep '^[<>]' | head -20; exit 0; fi
-    if [ $((n % 6)) -eq 0 ]; then pb=$(prs)
+    if [ $((n % 6)) -eq 0 ] && pb=$(prs); then
+      [ "$pa" = unread ] && pa=$pb
       # GitHub answers UNKNOWN while it recomputes mergeability; that is not a change
       pa=$(awk 'NR==FNR{m[$1]=$3; next} ($1 in m) && $3=="UNKNOWN"{$3=m[$1]} {print}' <(echo "$pb") <(echo "$pa")); pb=$(awk 'NR==FNR{m[$1]=$3; next} ($1 in m) && $3=="UNKNOWN"{$3=m[$1]} {print}' <(echo "$pa") <(echo "$pb"))
-      [ -n "$pb" ] && [ "$pa" != "$pb" ] && { echo "CHANGED (PRs):"; diff <(echo "$pa") <(echo "$pb") | grep '^[<>]'; exit 0; }
+      [ "$pa" != "$pb" ] && { echo "CHANGED (PRs):"; diff <(echo "$pa") <(echo "$pb") | grep '^[<>]'; exit 0; }
     fi
     [ $(( $(date +%s) - t0 )) -ge "$LIMIT" ] && { echo "TIMEOUT after ${LIMIT}s, no change"; exit 0; }
   done;;
@@ -332,6 +333,7 @@ watch-merge)
   m=""; ok=0; missing_rounds=0; api_fail=0
   for i in $(seq 1 "$rounds"); do
     st=$(pr_state) || { api_fail=$((api_fail+1)); [ "$api_fail" = 10 ] && echo "$(date -u +%H:%MZ) API FAILURE: gh pr view failed 10 rounds running"; sleep "$WS"; continue; }; read -r state draft base head _ <<<"$st"
+    [ "$state" = OPEN ] || { echo "#$N is $state; watcher stopped"; exit 4; }
     [ "$head" = "$PIN" ] || { echo "HEAD MOVED to $head (scanned $PIN); rescan before merging"; exit 2; }
     runs=$(checks "$head") || { api_fail=$((api_fail+1)); [ "$api_fail" = 10 ] && echo "$(date -u +%H:%MZ) API FAILURE: check-runs unreadable 10 rounds running"; sleep "$WS"; continue; }; api_fail=0; ok=0; bad=""; absent=""
     for name in "${REQ[@]}"; do
@@ -351,10 +353,13 @@ watch-merge)
   [ "$m" = "MERGEABLE CLEAN" ] || { echo "TIMEOUT; not merged"; exit 3; }
   read -r state draft base head _ <<<"$(pr_state)"
   [ "$state" = OPEN ] && [ "$draft" = false ] && [ "$base" = "$TRUNK" ] && [ "$head" = "$PIN" ] || { echo "REFUSED at merge time: state=$state draft=$draft base=$base head=$head"; exit 4; }
+  [ "$(cfg '.mode // empty')" = triage ] && { echo "REFUSED: orchy.json mode is triage; not merged"; exit 4; }
   merged=0; for try in 1 2 3; do
     [ "$try" = 1 ] || trunk_ok || { echo "TRUNK RED at merge time; not merged"; exit 7; }
     out=$(gh pr merge "$N" --repo "$REPO" "--$method" --delete-branch --match-head-commit "$PIN" 2>&1 | tail -1); echo "$out"
-    sleep $((WS/10)); [ "$(gh pr view "$N" --repo "$REPO" --json state --jq .state)" = MERGED ] && { merged=1; break; }
+    for _ in 1 2 3; do sleep $((WS/10)); s=$(gh pr view "$N" --repo "$REPO" --json state --jq .state 2>/dev/null) && break; done
+    [ -n "$s" ] || { echo "#$N state unreadable after the merge call; check it by hand"; exit 6; }
+    [ "$s" = MERGED ] && { merged=1; break; }
     echo "$out" | grep -q "Base branch was modified" || break; sleep $((WS/2))
   done
   [ "$merged" = 1 ] || { echo "NOT MERGED; check #$N by hand"; exit 6; }
@@ -378,7 +383,8 @@ disarm)
 teardown)
   need gh; need agent-worktree; s=$1; W="$WT_ROOT/$s"; q="$(basename "$ROOT")/$s"
   [ -d "$W" ] || { echo "$s: no worktree dir"; (cd "$ROOT" && agent-worktree done "$q" --forget 2>&1 | tail -1); exit 0; }
-  lead_rows | awk -v s="$s" '$1 ~ "^"s"(-|$)"' | grep -q . && { echo "$s: a lead of this lane is alive; refusing"; exit 4; }
+  # the lane's keys are <slug> or <slug>-<suffix> with no dash in the suffix, so lane x never claims lane x-y's leads
+  lead_rows | while read -r k _; do r=${k#"$s"}; [ "$r" != "$k" ] && [[ "$r" =~ ^(-[a-z0-9]+)?$ ]] && echo "$k"; done | grep -q . && { echo "$s: a lead of this lane is alive; refusing"; exit 4; }
   b=$(git -C "$W" rev-parse --abbrev-ref HEAD); head=$(git -C "$W" rev-parse HEAD); dirty=$(git -C "$W" status --short | wc -l)
   [ "$dirty" = "0" ] || { echo "$s: $dirty uncommitted files; refusing"; exit 3; }
   if out=$(cd "$ROOT" && agent-worktree done "$q" --merged --trunk "$TRUNK" 2>&1); then echo "$out" | tail -2; exit 0; fi
@@ -439,7 +445,9 @@ tot = {"cost": 0.0, "partial": 0}
 for lane in sorted(lanes):
     if want and lane != want: continue
     L = lanes[lane]; prs, failed, rounds = [], 0, 0
-    for k in sorted(L["keys"]):
+    try: named = [f[:-3] for f in os.listdir(f"{H}/reports") if re.fullmatch(rf"{re.escape(lane)}-(plan|closeout|a\d+|arc\d+)\.md", f)]
+    except OSError: named = []
+    for k in sorted(L["keys"] | set(named)):
         try: rep = open(f"{H}/reports/{k}.md", errors="replace").read()
         except OSError: continue
         prs += [int(n) for n in re.findall(r"^PR #(\d+) ", rep, re.M)]
