@@ -14,7 +14,8 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   wt-new <slug>...             create worktrees from origin/<trunk> and install deps; sequential; refuses an existing slug
 #   launch [--light] <key> <slug> <account>            start a headless lead on prompts/<key>.md inside the lane worktree
 #   resume [--light] <key> <slug> <account> <session>  resume a lead's session with prompts/<key>.md
-#   session-id <key>             the session id a lead's log recorded
+#   stop <key>                   end a live lead and every process it started
+#   session-id <key>             the session id of a lead's latest run
 #   snapshot                     the tick's facts: reports, leads, watchers, PRs, worktrees, load, headroom
 #   wait [seconds]               block until a report, lead, watcher or open-PR state changes (default 1500)
 #   scan <pr>                    gate-weakening and leak scan of a PR's diff, body and commit messages
@@ -31,7 +32,9 @@ origin=$(git -C "$ROOT" remote get-url origin 2>/dev/null || true)
 REPO=${ORCHY_REPO:-$(printf '%s' "$origin" | sed -E 's#^(git@|ssh://git@|https?://)[^/:]+[:/]##; s#\.git$##')}
 [ -n "$REPO" ] || { echo "orchy: no origin remote; set ORCHY_REPO=owner/name" >&2; exit 1; }
 slug=$(echo "$REPO" | tr '/' '-')
-ORCHY_HOME=${ORCHY_HOME:-$HOME/.cache/orchy/$slug}
+# Every program's home sits under one capacity root, so a launch can count all programs' leads under one lock.
+CAP=${ORCHY_CAPACITY_ROOT:-$HOME/.cache/orchy}
+ORCHY_HOME=${ORCHY_HOME:-$CAP/$slug}
 H="$ORCHY_HOME"; CFG="$H/orchy.json"; LOCAL="$H/local.json"
 cmd=${1:-help}; shift || true
 case "$cmd" in help|-h|--help) usage 0;; home) echo "$H"; exit 0;; esac
@@ -39,7 +42,10 @@ case "$cmd" in help|-h|--help) usage 0;; home) echo "$H"; exit 0;; esac
 cfg() { jq -r "$1" "$CFG"; }
 lcl() { [ -f "$LOCAL" ] && jq -r "$1" "$LOCAL" || echo ""; }
 TRUNK=$(cfg '.trunk // "main"')
-mkdir -p "$H"/{briefs,prompts,reports,leads,watch,wt,scratch,page/shots,page/build}
+mkdir -p "$H"/{briefs,prompts,reports,leads,watch,wt,scratch,inbox,page/shots,page/build}
+# A lead runs the hook its settings file names, so nobody but the owner may write here. chmod on the directories, not a
+# umask: a umask would also reach wt-new's checkout and install inside the product worktree.
+chmod 700 "$H"; [ "$(dirname "$H")" = "$CAP" ] && [ -O "$CAP" ] && chmod 700 "$CAP"
 WT_ROOT="$ROOT/$(cfg '.worktrees.root // ".claude/worktrees"')"
 ARCHIVE=$(cfg '.plans.archive // "implementations-plan/archive"')
 now() { date -u +%FT%TZ; }
@@ -56,11 +62,27 @@ refuse_account() {
   if [ -f "$LOCAL" ] && jq -e --arg a "$a" '.accounts.never // [] | index($a)' "$LOCAL" >/dev/null; then echo "refused: $a is on accounts.never" >&2; return 1; fi
   if [ -f "$LOCAL" ] && [ "$(jq -r '.accounts.use // [] | length' "$LOCAL")" != "0" ] && ! jq -e --arg a "$a" '.accounts.use | index($a)' "$LOCAL" >/dev/null; then echo "refused: $a is not on accounts.use" >&2; return 1; fi
 }
-refuse_cap() { # refuse_cap <account> <heavy|light>
-  local a=$1 w=$2 cap n
-  cap=$(lcl ".accounts.${w}_per_account // empty"); [ -n "$cap" ] || return 0
-  n=$(lead_rows | awk -v a="$a" -v w="$w" '$2==a && $3==w' | wc -l)
-  [ "$n" -lt "$cap" ] || { echo "refused: $a already runs $n $w lead(s) (cap $cap); pass --force-cap to override" >&2; return 1; }
+all_rows() { # <home> <acct> <weight>: every live lead of every program under the capacity root
+  local f pid st acct t weight
+  for f in "$CAP"/*/leads/*.started; do [ -f "$f" ] || continue; read -r pid st acct t weight _ < "$f"; alive "$pid" "$st" && echo "${f%/leads/*} $acct ${weight:-heavy}"; done
+}
+cap_root_ok() { # the root holds every home and the spawn lock: whoever can rename or replace it can swap a lead's hook settings
+  local p
+  [ -d "$CAP" ] && [ ! -L "$CAP" ] && [ -O "$CAP" ] || { echo "refused: capacity root $CAP must be a directory owned by $(id -un), not a symlink" >&2; return 1; }
+  for p in "$CAP" "$(dirname "$CAP")"; do case "$(stat -c %a "$p")" in *[2367]?|*[2367]) echo "refused: $p is group- or world-writable" >&2; return 1;; esac; done
+  [ "$(cd "$(dirname "$H")" && pwd -P)" = "$(cd "$CAP" && pwd -P)" ] || { echo "refused: $H is not directly under the capacity root $CAP (ORCHY_CAPACITY_ROOT); its leads would escape the shared cap" >&2; return 1; }
+}
+refuse_cap() { # refuse_cap <account> <heavy|light>: the strictest cap among this program and the programs already running on the account
+  local a=$1 w=$2 cap c n rows home
+  cap=$(lcl ".accounts.${w}_per_account // empty")
+  rows=$(all_rows | awk -v a="$a" -v w="$w" '$2==a && $3==w')
+  for home in $(awk '{print $1}' <<<"$rows" | sort -u); do
+    c=$(jq -r ".accounts.${w}_per_account // empty" "$home/local.json" 2>/dev/null); [ -n "$c" ] || continue
+    { [ -z "$cap" ] || [ "$c" -lt "$cap" ]; } && cap=$c
+  done
+  [ -n "$cap" ] || return 0
+  n=$(grep -c . <<<"$rows")
+  [ "$n" -lt "$cap" ] || { echo "refused: $a already runs $n $w lead(s) across programs (cap $cap); --force-cap only on the owner's word" >&2; return 1; }
 }
 sha_ok() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
 session_pid() { # the nearest `claude` ancestor is the orchestrator session; without one (a test, a plain shell) the caller's parent
@@ -115,22 +137,54 @@ wt-new)
     echo "$s: $(tail -n 1 "$out")"
   done; exit $rc;;
 launch|resume)
-  need claude-usage; weight=heavy; force=0
+  need claude-usage; need flock; weight=heavy; force=0
   while [ "${1:-}" = --light ] || [ "${1:-}" = --force-cap ]; do [ "$1" = --light ] && weight=light; [ "$1" = --force-cap ] && force=1; shift; done
-  k=$1; w=$2; a=$3; sid=${4:-}; refuse_account "$a" || exit 1
-  [ "$force" = 1 ] || refuse_cap "$a" "$weight" || exit 1
+  k=$1; w=$2; a=$3; sid=${4:-}
+  [[ "$k" =~ ^[A-Za-z0-9._-]+$ && "$w" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "refused: key and slug are [A-Za-z0-9._-]" >&2; exit 1; }
+  refuse_account "$a" || exit 1; cap_root_ok || exit 1
   [ "$cmd" = resume ] && [ -z "$sid" ] && { echo "usage: resume <key> <slug> <account> <session-id>" >&2; exit 1; }
-  if [ -f "$H/leads/$k.started" ]; then read -r pid st _ < "$H/leads/$k.started"; alive "$pid" "$st" && { echo "refused: lead $k is alive (pid $pid)" >&2; exit 1; }; fi
   p="$H/prompts/$k.md"; [ -f "$p" ] || { echo "orchy: no prompt $p" >&2; exit 1; }
   "$0" check-text "$p" || exit 1
   d="$WT_ROOT/$w"; [ -d "$d" ] || { echo "orchy: no worktree $d" >&2; exit 3; }
   model=$(cfg '.leads.model // "opus"'); l1=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo "?")
+  case "$(cfg '.leads.permission_mode // "auto"')" in
+    auto) perm=(--permission-mode auto --permission-prompts none);;
+    bypass) perm=(--dangerously-skip-permissions);;
+    *) echo "orchy: leads.permission_mode must be auto or bypass" >&2; exit 1;;
+  esac
   extra=(); [ "$cmd" = resume ] && extra=(--resume "$sid")
+  mkdir -p "$H/scratch/$w"; S="$H/leads/$k.settings.json"; L="$H/leads/$k.log"
+  hook=$(printf '%q ' bash "$(realpath "$(dirname "$0")")/inbox-hook.sh" "$H/inbox/$k.jsonl"); hook=${hook% }
+  jq -n --arg c "$hook" '{hooks: {PostToolUse: [{matcher: "*", hooks: [{type: "command", command: $c}]}]}}' > "$S"
+  # Key check, count, spawn and the .started write are one step, so two programs cannot both take an account's last slot.
+  # Nothing in here touches the network; the lead starts with fd 9 closed, so no descendant ever holds the lock.
+  exec 9>"$CAP/.spawn.lock"; flock -w 30 9 || { echo "refused: spawn lock busy for 30 s" >&2; exit 1; }
+  if [ -f "$H/leads/$k.started" ]; then read -r pid st _ < "$H/leads/$k.started"; alive "$pid" "$st" && { echo "refused: lead $k is alive (pid $pid)" >&2; exit 1; }; fi
+  [ "$force" = 1 ] || refuse_cap "$a" "$weight" || exit 1
+  # a killed run may end mid-line: the newline keeps the marker a line of its own
+  printf '\n%s\n' "$(jq -nc --arg k "$k" --arg l "$w" --arg c "$cmd" --arg t "$(now)" '{type: "orchy_invocation", key: $k, lane: $l, cmd: $c, at: $t}')" >> "$L"
   # PRINT_BG_WAIT_CEILING=0: a headless turn that yields to a background task ends the session; the brief tells leads to poll inside one tool call instead.
-  ( cd "$d" && exec env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 nohup claude-usage run "=$a" "${extra[@]}" -p "$(cat "$p")" --model "$model" --dangerously-skip-permissions --verbose --output-format stream-json > "$H/leads/$k.log" 2>&1 ) &
-  pid=$!; sleep 1; echo "$pid $(pstart "$pid") $a $(now) $weight prompts/$k.md" > "$H/leads/$k.started"
-  echo "$k ${cmd}d on $a pid $pid ($weight, load1 $l1)";;
-session-id) grep -oE '"session_id":"[0-9a-f-]{36}"' "$H/leads/$1.log" 2>/dev/null | head -1 | cut -d'"' -f4;;
+  # setsid: the lead leads its own process group (a background subshell is not a group leader, so setsid does not fork and $! stays the lead).
+  ( cd "$d" && exec 9>&- env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 setsid nohup claude-usage run "=$a" "${extra[@]}" -p "$(cat "$p")" --model "$model" "${perm[@]}" \
+      --settings "$S" --add-dir "$H/reports" --add-dir "$H/scratch/$w" --verbose --output-format stream-json >> "$L" 2>> "$H/leads/$k.err" ) &
+  pid=$!; for _ in 1 2 3 4 5 6 7 8 9 10; do alive "$pid" && break; sleep 0.2; done
+  pg=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+  printf '%s %s %s %s %s %s %s\n' "$pid" "$(pstart "$pid")" "$a" "$(now)" "$weight" "prompts/$k.md" "${pg:-?}" > "$H/leads/$k.started.tmp" && mv "$H/leads/$k.started.tmp" "$H/leads/$k.started"
+  exec 9>&-
+  echo "$k ${cmd}d on $a pid $pid pgid ${pg:-?} ($weight, $(cfg '.leads.permission_mode // "auto"'), load1 $l1)";;
+stop)
+  k=$1; f="$H/leads/$k.started"; [ -f "$f" ] || { echo "$k: no lead record"; exit 1; }
+  read -r pid st _ _ _ _ pg < "$f"; alive "$pid" "$st" || { echo "$k: not alive"; exit 0; }
+  # Claude Code starts each Bash-tool shell as its own session leader, so a group kill alone misses a hung tool process:
+  # collect the whole tree first, while every child still points at its parent.
+  mapfile -t tree < <(ps -eo pid=,ppid= | awk -v r="$pid" '{p[$1]=$2} END {s[r]=1; do {c=0; for (x in p) if (!(x in s) && (p[x] in s)) {s[x]=1; c=1}} while (c); for (x in s) print x}')
+  ids=(); for q in "${tree[@]}"; do ids+=("$q:$(pstart "$q")"); done
+  [ "${pg:-?}" = "$pid" ] && kill -TERM -- "-$pg" 2>/dev/null
+  for e in "${ids[@]}"; do kill -TERM "${e%%:*}" 2>/dev/null; done
+  for _ in 1 2 3 4 5 6 7 8 9 10; do left=0; for e in "${ids[@]}"; do [ "$(pstart "${e%%:*}")" = "${e#*:}" ] && left=1; done; [ "$left" = 0 ] && break; sleep 0.5; done
+  for e in "${ids[@]}"; do [ "$(pstart "${e%%:*}")" = "${e#*:}" ] && kill -KILL "${e%%:*}" 2>/dev/null; done
+  echo "$k: stopped pid $pid and ${#ids[@]} process(es) in its tree";;
+session-id) grep -oE '"session_id":"[0-9a-f-]{36}"' "$H/leads/$1.log" 2>/dev/null | tail -1 | cut -d'"' -f4;;
 snapshot)
   need gh
   echo "== $(now) load1 $(cut -d' ' -f1 /proc/loadavg 2>/dev/null) nproc $(nproc 2>/dev/null)"

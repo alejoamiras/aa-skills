@@ -4,12 +4,12 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd); K="$HERE/skills/start-orchy"; ORCHY="$K/scripts/orchy.sh"
 T=$(mktemp -d -t orchy-smoke-XXXX); trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
-export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_HOME="$T/home" ORCHY_REPO=example/app ORCHY_WATCH_SLEEP=1; mkdir -p "$MOCK_DIR"
+export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_CAPACITY_ROOT="$T/cap" ORCHY_HOME="$T/cap/home" ORCHY_REPO=example/app ORCHY_WATCH_SLEEP=1; mkdir -p "$MOCK_DIR"
 # a real local origin with a dev branch, so wt-new's fetch and reset work
 git init -q --bare "$T/origin.git"; git init -q -b dev "$T/repo"; git -C "$T/repo" remote add origin "$T/origin.git"
 (cd "$T/repo" && git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -q --allow-empty -m init && git push -q origin dev)
 cd "$T/repo"
-[ "$("$ORCHY" home)" = "$T/home" ] || fail "home"
+[ "$("$ORCHY" home)" = "$T/cap/home" ] || fail "home"
 if "$ORCHY" config .trunk >/dev/null 2>&1; then fail "config before bootstrap must refuse"; fi
 mkdir -p "$ORCHY_HOME"; jq '.install="true"' "$K/examples/orchy.example.json" > "$ORCHY_HOME/orchy.json"; cp "$K/examples/local.example.json" "$ORCHY_HOME/local.json"
 [ "$("$ORCHY" config .trunk)" = dev ] || fail "config .trunk"
@@ -34,6 +34,39 @@ o=$("$ORCHY" launch x-a2 x acct-a 2>&1 || true); grep -q 'cap 2' <<<"$o" || fail
 "$ORCHY" launch --light x-a2 x acct-a >/dev/null || fail "light launch under its own cap"
 [ "$("$ORCHY" snapshot 2>/dev/null | grep -c '^alive x-')" = 3 ] || fail "snapshot does not list the three live leads"
 [ "$("$ORCHY" session-id x-plan)" = 00000000-0000-4000-8000-000000000001 ] || fail "session-id"
+# launch: its own process group, auto mode by default, the hook settings and the two writable dirs, banner kept out of the JSON log
+read -r lp _ _ _ _ _ lg < "$ORCHY_HOME/leads/x-plan.started"; [ "$lp" = "$lg" ] || fail "lead pid $lp is not its own group leader ($lg)"
+[ "$(stat -c %a "$ORCHY_HOME")" = 700 ] || fail "home is not mode 700"
+grep -q -- '--permission-mode auto --permission-prompts none' "$MOCK_DIR/cu.log" || fail "auto mode flags missing: $(head -1 "$MOCK_DIR/cu.log")"
+grep -q -- "--settings $ORCHY_HOME/leads/x-plan.settings.json --add-dir $ORCHY_HOME/reports --add-dir $ORCHY_HOME/scratch/x" "$MOCK_DIR/cu.log" || fail "settings or add-dir flags missing"
+jq -e '.hooks.PostToolUse[0].hooks[0].command | test("inbox-hook.sh .*/inbox/x-plan.jsonl$")' "$ORCHY_HOME/leads/x-plan.settings.json" >/dev/null || fail "hook settings"
+grep -q '"type":"orchy_invocation","key":"x-plan","lane":"x"' "$ORCHY_HOME/leads/x-plan.log" || fail "no invocation marker"
+if grep -q '^claude-usage:' "$ORCHY_HOME/leads/x-plan.log" || ! grep -q '^claude-usage:' "$ORCHY_HOME/leads/x-plan.err"; then fail "the banner is not in .err alone"; fi
+for f in "$ORCHY_HOME"/leads/*.started; do read -r p _ < "$f"; for fd in /proc/"$p"/fd/*; do case "$(readlink "$fd")" in *spawn.lock) fail "lead $p holds the spawn lock";; esac; done; done
+tmp=$(mktemp); jq '.accounts.use += ["acct-d","acct-e","acct-f"]' "$ORCHY_HOME/local.json" > "$tmp" && mv "$tmp" "$ORCHY_HOME/local.json"
+jq '.leads.permission_mode="bypass"' "$ORCHY_HOME/orchy.json" > "$tmp" && cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak" && mv "$tmp" "$ORCHY_HOME/orchy.json"
+cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/x-b1.md"; "$ORCHY" launch x-b1 x acct-b >/dev/null || fail "bypass launch"
+tail -1 "$MOCK_DIR/cu.log" | grep -q -- '--dangerously-skip-permissions' || fail "bypass mode flag missing"; cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"
+# the cap holds across every program under the capacity root, at the strictest cap among them
+H2="$T/cap/home2"; mkdir -p "$H2/prompts"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$H2/"; cp "$ORCHY_HOME/prompts/x-plan.md" "$H2/prompts/y-a1.md"
+o=$(ORCHY_HOME="$H2" "$ORCHY" launch y-a1 x acct-a 2>&1 || true); grep -q 'across programs (cap 2)' <<<"$o" || fail "a second program exceeded the account cap: $o"
+jq '.accounts.heavy_per_account=1' "$H2/local.json" > "$tmp" && mv "$tmp" "$H2/local.json"
+ORCHY_HOME="$H2" "$ORCHY" launch y-a1 x acct-d >/dev/null || fail "second program launch"
+for k in x-d1 x-c1 x-c2 x-c3; do cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/$k.md"; done
+o=$("$ORCHY" launch x-d1 x acct-d 2>&1 || true); grep -q 'cap 1' <<<"$o" || fail "the strictest cap among running programs was not applied: $o"
+# concurrent launches never pass the cap together
+for k in x-c1 x-c2 x-c3; do ( "$ORCHY" launch "$k" x acct-c > "$T/$k.out" 2>&1 ) & done; wait
+[ "$(cat "$T"/x-c?.out | grep -c ' on acct-c pid ')" = 2 ] || fail "concurrent launches broke the cap: $(cat "$T"/x-c?.out)"
+# a home outside the capacity root, or a writable root, is refused
+mkdir -p "$T/elsewhere/h/prompts"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$T/elsewhere/h/"; cp "$ORCHY_HOME/prompts/x-plan.md" "$T/elsewhere/h/prompts/z.md"
+o=$(ORCHY_HOME="$T/elsewhere/h" "$ORCHY" launch z x acct-e 2>&1 || true); grep -q 'not directly under the capacity root' <<<"$o" || fail "a home outside the root launched: $o"
+chmod 775 "$T"; o=$("$ORCHY" launch z x acct-e 2>&1 || true); chmod 700 "$T"; grep -q 'group- or world-writable' <<<"$o" || fail "a writable root parent was accepted: $o"
+# stop ends the lead and the session-leader grandchild a group kill would miss
+read -r sp _ < "$ORCHY_HOME/leads/x-b1.started"; gc=$(cat "$MOCK_DIR/gc.$sp"); [ -d "/proc/$gc" ] || fail "mock grandchild $gc not running"
+"$ORCHY" stop x-b1 | grep -q 'stopped' || fail "stop"; sleep 0.5; [ ! -d "/proc/$sp" ] && [ ! -d "/proc/$gc" ] || fail "stop left $sp or grandchild $gc alive"
+MOCK_SESSION=00000000-0000-4000-8000-000000000002 "$ORCHY" launch x-b1 x acct-b >/dev/null || fail "relaunch after stop"
+[ "$("$ORCHY" session-id x-b1)" = 00000000-0000-4000-8000-000000000002 ] || fail "session-id is not the latest run's"
+[ "$(grep -c orchy_invocation "$ORCHY_HOME/leads/x-b1.log")" = 2 ] || fail "the relaunch did not append to the log"
 # scan: a gh failure is loud, never a clean report
 jq -n '{body:"body", commits:[{messageHeadline:"feat: x", messageBody:"ran with CLAUDE_ACCOUNT=acct-a"}]}' > "$MOCK_DIR/pr-7.json"
 printf 'diff --git a/x b/x\n+++ b/x\n+ok\n' > "$MOCK_DIR/diff-7.txt"; printf 'x\n' > "$MOCK_DIR/files-7.txt"
@@ -75,7 +108,7 @@ o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1); grep -q 'hand-removed' <<<"$o" |
 # disarm stops a live watcher (its whole process group); lock refuses while another live holder has it and replaces a stale one
 mkpr "$SHA"; "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 30 >/dev/null || fail "arm-merge for disarm"
 # another home's watcher on the same PR number is never this home's stray
-H2="$T/home2"; mkdir -p "$H2"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$H2/"
+H2="$T/cap/home2"; mkdir -p "$H2"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$H2/"
 ORCHY_HOME="$H2" "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 30 >/dev/null || fail "arm-merge in a second home"
 wp2=$(cut -d' ' -f1 "$H2/watch/merge-9.pid")
 wp=$(cut -d' ' -f1 "$ORCHY_HOME/watch/merge-9.pid"); "$ORCHY" disarm 9 | grep -q 'stopped merge-9' || fail "disarm did not stop the watcher"
@@ -89,7 +122,7 @@ if "$ORCHY" lock >/dev/null 2>&1; then fail "lock did not refuse a live holder";
 # a takeover file left by a killed contender never blocks the next one
 touch "$ORCHY_HOME/orchestrator.lock.takeover"
 kill $hp; wait $hp 2>/dev/null || true; "$ORCHY" lock | grep -q '^locked' || fail "lock did not replace a stale holder"; "$ORCHY" unlock >/dev/null
-for f in "$ORCHY_HOME"/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/null || true; done
+for f in "$T"/cap/*/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/null || true; done; for f in "$MOCK_DIR"/gc.*; do kill "$(cat "$f")" 2>/dev/null || true; done
 # the page toolchain's own smoke
 [ -x "$K/page/smoke.sh" ] || fail "page/smoke.sh missing"; bash "$K/page/smoke.sh" > "$T/page.log" 2>&1 || { tail -n 20 "$T/page.log"; fail "page smoke"; }
 # no project names, home paths or roster names anywhere in the skill
