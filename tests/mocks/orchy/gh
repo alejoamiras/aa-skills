@@ -12,7 +12,11 @@ case "$1 $2" in
 "pr diff") [ "${MOCK_GH_FAIL:-}" = diff ] && { echo "HTTP 500" >&2; exit 1; }; if printf '%s\n' "$@" | grep -qx -- --name-only; then cat "$MOCK_DIR/files-$3.txt"; else cat "$MOCK_DIR/diff-$3.txt"; fi;;
 "issue view") f="$MOCK_DIR/issue-$3.json"; [ -f "$f" ] || { echo "no such issue" >&2; exit 1; }; jq -r "$jqexpr" "$f";;
 "pr list") if printf '%s\n' "$@" | grep -qx -- merged; then jq -r "$jqexpr" "$MOCK_DIR/merged.json"; elif [ -f "$MOCK_DIR/open.json" ]; then jq -r "$jqexpr" "$MOCK_DIR/open.json"; fi;;
-"issue list") [ -f "$MOCK_DIR/issues.json" ] || exit 1; jq -r "$jqexpr" "$MOCK_DIR/issues.json";;
+"issue list") [ "${MOCK_GH_FAIL:-}" = search ] && printf '%s\n' "$@" | grep -qx -- --search && { echo "HTTP 502" >&2; exit 1; }
+  [ -e "$MOCK_DIR/fail-issues" ] && { echo "HTTP 502" >&2; exit 1; }
+  [ -f "$MOCK_DIR/issues.json" ] || exit 1; jq -r "$jqexpr" "$MOCK_DIR/issues.json";;
+"issue create") sleep "${MOCK_GH_DELAY:-0}"; [ "${MOCK_GH_FAIL:-}" = create ] && { echo "HTTP 500" >&2; exit 1; }
+  echo "$*" >> "$MOCK_DIR/created.log"; echo "https://github.com/example/app/issues/${MOCK_ISSUE_NUMBER:-77}";;
 "api repos/"*) s=$(sed -E 's#.*/commits/([^/]+)/.*#\1#' <<<"$2")   # per-sha fixtures (checks-<sha>.json) fall back to the shared one
   case "$2" in
   *check-runs) f="$MOCK_DIR/checks-$s.json"; [ -f "$f" ] || f="$MOCK_DIR/checks.json"; jq -r "$jqexpr" "$f";;

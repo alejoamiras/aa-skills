@@ -2,9 +2,11 @@
 # Smoke for skills/start-orchy: orchy.sh against a throwaway repo and home with mocked gh / agent-worktree / claude-usage, the templates, the page toolchain's own smoke.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd); K="$HERE/skills/start-orchy"; ORCHY="$K/scripts/orchy.sh"
-T=$(mktemp -d -t orchy-smoke-XXXX); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d -t orchy-smoke-XXXX); pgp=; trap '[ -z "$pgp" ] || kill "$pgp" 2>/dev/null; rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
-export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_CAPACITY_ROOT="$T/cap" ORCHY_HOME="$T/cap/home" ORCHY_REPO=example/app ORCHY_WATCH_SLEEP=1 ORCHY_PROFILE_DIR="$T/profile"; mkdir -p "$MOCK_DIR"
+export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_CAPACITY_ROOT="$T/cap" ORCHY_HOME="$T/cap/home" ORCHY_REPO=example/app ORCHY_WATCH_SLEEP=1 ORCHY_PROFILE_DIR="$T/profile" ORCHY_ASKS_DIR="$T/asks" ORCHY_GITLEAKS=fake-gitleaks; mkdir -p "$MOCK_DIR"
+# the page toolchain's own smoke shares nothing with this one, so it runs alongside
+[ -x "$K/page/smoke.sh" ] || fail "page/smoke.sh missing"; bash "$K/page/smoke.sh" > "$T/page.log" 2>&1 & pgp=$!
 # a real local origin with a dev branch, so wt-new's fetch and reset work
 git init -q --bare "$T/origin.git"; git init -q -b dev "$T/repo"; git -C "$T/repo" remote add origin "$T/origin.git"
 (cd "$T/repo" && git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -q --allow-empty -m init && git push -q origin dev)
@@ -16,8 +18,10 @@ mkdir -p "$ORCHY_HOME"; jq '.install="true"' "$K/examples/orchy.example.json" > 
 # render: every token substituted; a token left over is exit 1
 out=$("$ORCHY" render common-brief.md REPO=example/app PRODUCT="the app" TRUNK=dev WORKTREE=/w/x BRANCH=worktree-x LANE=x KEY=x-plan PLANS_DIR=plans ARCHIVE_DIR=plans/archive ORCHY_HOME="$ORCHY_HOME" CODEX_EFFORT=high CODEX_MODEL=gpt-6.1-sol CODEX_MODEL_SHORT=sol LEAD_MODEL=opus LEAD_MODEL_NAME="Claude Opus 5.5" QUALITY_BAR=production GATES="lint, test" PROTECTED=main KNOWN_LIMIT_LABEL=known-limit DELEGATIONS="" NEVER_OPEN="")
 grep -q 'example/app backlog program (the app)' <<<"$out" || fail "render substitution"
+"$ORCHY" render --keep LANE,KEY,WORKTREE,BRANCH common-brief.md REPO=example/app PRODUCT=x TRUNK=dev PLANS_DIR=plans ARCHIVE_DIR=plans/archive ORCHY_HOME="$ORCHY_HOME" CODEX_EFFORT=high CODEX_MODEL=m CODEX_MODEL_SHORT=s LEAD_MODEL=opus LEAD_MODEL_NAME=x QUALITY_BAR=p GATES=g PROTECTED=main KNOWN_LIMIT_LABEL=k DELEGATIONS= NEVER_OPEN= | grep -q '<WORKTREE>' || fail "render --keep did not keep the lead-bound tokens"
 if "$ORCHY" render common-brief.md REPO=x >/dev/null 2>&1; then fail "render must fail on a leftover token"; fi
 for t in planner-brief implementer-brief lane-brief plan-spawn arc-spawn closeout-spawn shots-spawn goal tick; do [ -f "$K/templates/$t.md" ] || fail "template $t missing"; done
+for t in goal tick; do "$ORCHY" render "$t.md" REPO=example/app ORCHY_HOME="$ORCHY_HOME" ORCHY_SH="$ORCHY" MERGE_METHOD=squash PROTECTED=main TRUNK=dev CAPS="2 heavy, 3 light" LOAD_MAX=6 BLOCKED_LABEL=blocked:external > "$T/$t.txt" || fail "render $t left a token"; "$ORCHY" check-text "$T/$t.txt" >/dev/null || fail "check-text $t"; done
 # every rendered brief passes check-text (no roster name, no account-variable assignment)
 printf '%s\n' "$out" > "$T/brief.md"; "$ORCHY" check-text "$T/brief.md" || fail "rendered common brief fails check-text"
 printf 'run it on acct-a\n' > "$T/bad.md"; if "$ORCHY" check-text "$T/bad.md" >/dev/null 2>&1; then fail "check-text accepted a roster name"; fi
@@ -35,7 +39,7 @@ o=$("$ORCHY" launch x-a2 x acct-a 2>&1 || true); grep -q 'cap 2' <<<"$o" || fail
 [ "$("$ORCHY" snapshot 2>/dev/null | grep -c '^alive x-')" = 3 ] || fail "snapshot does not list the three live leads"
 [ "$("$ORCHY" session-id x-plan)" = 00000000-0000-4000-8000-000000000001 ] || fail "session-id"
 # launch: its own process group, auto mode by default, the hook settings and the two writable dirs, banner kept out of the JSON log
-read -r lp _ _ _ _ _ lg < "$ORCHY_HOME/leads/x-plan.started"; [ "$lp" = "$lg" ] || fail "lead pid $lp is not its own group leader ($lg)"
+read -r lp _ _ _ _ _ lg _ < "$ORCHY_HOME/leads/x-plan.started"; [ "$lp" = "$lg" ] || fail "lead pid $lp is not its own group leader ($lg)"
 [ "$(stat -c %a "$ORCHY_HOME")" = 700 ] || fail "home is not mode 700"
 grep -q -- '--permission-mode auto --permission-prompts none' "$MOCK_DIR/cu.log" || fail "auto mode flags missing: $(head -1 "$MOCK_DIR/cu.log")"
 grep -q -- "--settings $ORCHY_HOME/leads/x-plan.settings.json --add-dir $ORCHY_HOME/reports --add-dir $ORCHY_HOME/scratch/x" "$MOCK_DIR/cu.log" || fail "settings or add-dir flags missing"
@@ -60,7 +64,7 @@ ORCHY_HOME="$H2" "$ORCHY" launch y-a1 x acct-d >/dev/null || fail "second progra
 for k in x-d1 x-c1 x-c2 x-c3; do cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/$k.md"; done
 o=$("$ORCHY" launch x-d1 x acct-d 2>&1 || true); grep -q 'cap 1' <<<"$o" || fail "the strictest cap among running programs was not applied: $o"
 # concurrent launches never pass the cap together
-for k in x-c1 x-c2 x-c3; do ( "$ORCHY" launch "$k" x acct-c > "$T/$k.out" 2>&1 ) & done; wait
+ps=(); for k in x-c1 x-c2 x-c3; do ( "$ORCHY" launch "$k" x acct-c > "$T/$k.out" 2>&1 ) & ps+=($!); done; wait "${ps[@]}" || true
 [ "$(cat "$T"/x-c?.out | grep -c ' on acct-c pid ')" = 2 ] || fail "concurrent launches broke the cap: $(cat "$T"/x-c?.out)"
 # a home outside the capacity root, a dot-named or symlinked home, or a writable root, is refused
 mkdir -p "$T/cap/.hid/prompts"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$T/cap/.hid/"; cp "$ORCHY_HOME/prompts/x-plan.md" "$T/cap/.hid/prompts/z.md"
@@ -89,7 +93,7 @@ hook <<<'{}' >&- 2>/dev/null; [ ! -f "${IB%.jsonl}.cursor" ] || fail "a failed w
 printf '{"at":"x","text":"partial"}' >> "$IB"; [ -z "$(hook <<<'{}')" ] || fail "a line without its newline was delivered"
 echo >> "$IB"; [ "$(hook <<<'{}' | ctx)" = "ORCHY-STEER: partial" ] || fail "the completed line was not delivered"
 pad=$(head -c 1000 /dev/zero | tr '\0' x); for i in 1 2 3 4 5; do "$ORCHY" say x-b1 "n$i $pad" >/dev/null || fail "say n$i"; done
-for i in 1 2 3 4 5 6 7 8; do ( hook <<<'{}' > "$T/hook.$i" ) & done; wait
+ps=(); for i in 1 2 3 4 5 6 7 8; do ( hook <<<'{}' > "$T/hook.$i" ) & ps+=($!); done; wait "${ps[@]}" || true
 cat "$T"/hook.? | jq -r '.hookSpecificOutput.additionalContext' | grep -o '^ORCHY-STEER: n[0-9]' | sort | uniq -c > "$T/hook.count"
 [ "$(wc -l < "$T/hook.count")" = 5 ] && ! grep -qv '^ *1 ' "$T/hook.count" || fail "parallel hooks did not deliver each note once: $(cat "$T/hook.count")"
 [ "$(cat "$T"/hook.? | grep -c additionalContext)" -lt 5 ] || fail "notes that fit in 4 KiB were not delivered together"
@@ -137,6 +141,7 @@ jq -n '{check_runs:[{id:9,name:"nightly",status:"in_progress",conclusion:null}]}
 o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1 || true); grep -q '#9 MERGED' <<<"$o" || fail "a pending trunk check blocked: $o"
 cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"; rm -f "$MOCK_DIR/checks-$TS.json" "$MOCK_DIR/compare.json"
 # arm-merge: the detached watcher finds the repo and the home (no cd into the cache), and a second arm refuses
+if "$ORCHY" arm-merge 9 "$SHA" lane-9 "$ORCHY_HOME/reports/r9.md" >/dev/null 2>&1; then fail "arm-merge accepted a report path the watcher cannot find"; fi
 mkpr "$SHA"; "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 4 >/dev/null || fail "arm-merge"
 o=$("$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md 2>&1 || true); grep -q 'already armed' <<<"$o" || fail "arm-merge armed twice: $o"
 for i in $(seq 1 30); do grep -q 'MERGED deadbeef\|archived plan' "$ORCHY_HOME/watch/merge-9.out" 2>/dev/null && break; sleep 1; done
@@ -165,7 +170,7 @@ o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1); grep -q 'hand-removed' <<<"$o" |
 # disarm stops a live watcher (its whole process group); lock refuses while another live holder has it and replaces a stale one
 mkpr "$SHA"; "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 30 >/dev/null || fail "arm-merge for disarm"
 # another home's watcher on the same PR number is never this home's stray
-H2="$T/cap/home2"; mkdir -p "$H2"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$H2/"
+H2="$T/cap/home2"; mkdir -p "$H2/reports"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$H2/"; cp "$ORCHY_HOME/reports/r9.md" "$H2/reports/"
 ORCHY_HOME="$H2" "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 30 >/dev/null || fail "arm-merge in a second home"
 wp2=$(cut -d' ' -f1 "$H2/watch/merge-9.pid")
 wp=$(cut -d' ' -f1 "$ORCHY_HOME/watch/merge-9.pid"); "$ORCHY" disarm 9 | grep -q 'stopped merge-9' || fail "disarm did not stop the watcher"
@@ -213,8 +218,142 @@ if ORCHY_HOME="$HR" "$ORCHY" receipt nope >/dev/null 2>&1; then fail "receipt of
 mkdir -p "$T/profile"; { jq -nc '{record:"a",category:"copy",agreed:false}'; jq -nc '{record:"a",category:"copy",agreed:true}'; jq -nc '{record:"b",category:"copy",agreed:false}'
   jq -nc '{record:"c",category:"layout",agreed:true,via_recommend_all:true}'; jq -nc '{record:"d",category:"layout",agreed:null}'; } > "$T/profile/example-app.jsonl"
 o=$(ORCHY_HOME="$HR" "$ORCHY" receipt q | tail -1); [ "$o" = "owner took the recommendation: copy 1/2; 1 taken all at once (not scored), 1 left to the orchestrator" ] || fail "owner-record footer: $o"
-# the page toolchain's own smoke
-[ -x "$K/page/smoke.sh" ] || fail "page/smoke.sh missing"; bash "$K/page/smoke.sh" > "$T/page.log" 2>&1 || { tail -n 20 "$T/page.log"; fail "page smoke"; }
+# ask ledger: distinct ids under contention, transitions, a torn tail, the size cap
+LG="$T/asks/example-app.jsonl"; A() { "$ORCHY" ask "$@"; }
+ps=(); for i in 1 2 3 4; do ( A add "parallel ask $i" > "$T/add.$i" ) & ps+=($!); done; wait "${ps[@]}" || true
+[ "$(cat "$T"/add.* | sort -u | grep -c '^ask[1-4]$')" = 4 ] || fail "parallel ask add reused an id: $(cat "$T"/add.*)"
+[ "$(stat -c %a "$T/asks") $(stat -c %a "$LG")" = "700 600" ] || fail "ledger modes: $(stat -c %a "$T/asks") $(stat -c %a "$LG")"
+o=$(A lane ask1 greet-1 "a repo change" 2>&1 || true); grep -q 'no public wording' <<<"$o" || fail "lane without a public wording: $o"
+A public ask1 "Add a greeting helper with a unit test" >/dev/null || fail "ask public"
+A lane ask1 greet-1 "a repo change" >/dev/null || fail "ask lane"
+A "done" ask1 "delivered in greet-1 PR #5" >/dev/null || fail "ask done"
+o=$(A "done" ask1 again 2>&1 || true); grep -q 'ask1 is done' <<<"$o" || fail "a refused transition does not name the state: $o"
+o=$(A note ask99 x 2>&1 || true); grep -q 'no ask99' <<<"$o" || fail "unknown id: $o"
+A public ask2 "Rename the config loader" >/dev/null || fail "public ask2"
+A lane ask2 cfg-1 "a repo change" >/dev/null || fail "lane ask2"
+A reopen ask2 "lane closed" >/dev/null || fail "reopen ask2"
+[ "$(A show ask2 | sed '/^-- history/,$d' | jq -r '.lane')" = null ] || fail "reopen kept the lane"
+A note ask3 "waiting: wording" >/dev/null; A public ask3 "Tidy the README" >/dev/null
+o=$(A lane ask3 docs-1 "a repo change" 2>&1 || true); grep -q 'waiting: wording' <<<"$o" || fail "lane ignored the wording gate: $o"
+A note ask3 "wording ok" >/dev/null; A public ask3 "Tidy the README intro" | grep -q "OK again" || fail "a new wording kept the old OK"
+A note ask3 "wording okay? queued behind the docs lane" >/dev/null; A list | grep -q '^ask3 .*\[waiting\]' || fail "an ordinary note cleared the hold in list: $(A list)"
+o=$(A lane ask3 docs-1 "a repo change" 2>&1 || true); grep -q 'waiting: wording (changed)' <<<"$o" || fail "a replaced wording skipped the gate: $o"
+A note ask3 "wording ok" >/dev/null; A lane ask3 docs-1 "a repo change" >/dev/null || fail "lane after the OK"
+printf '{"id":"ask4","at":"2026-01-01T00:00:00Z","no' >> "$LG"
+[ "$(A add "after a torn tail")" = ask5 ] || fail "add after a torn tail"
+tail -n 1 "$LG" | jq -e '.id == "ask5"' >/dev/null || fail "the row after a torn tail does not start its own line"
+o=$(A add "$(head -c 17000 /dev/zero | tr '\0' a)" 2>&1 || true); grep -q '16 KiB' <<<"$o" || fail "16 KiB cap: $o"
+A list | grep -q '^ask2  open' || fail "list: $(A list)"; A list | grep -q '^ask1 ' && fail "list shows a done ask without --all"
+# the copy check: six words of the owner's text or later words, accents and curly quotes aside; template boilerplate exempt
+p=$(A add "Please add a greet function, my sister Ana asked for it last Tuesday")
+o=$(A public "$p" "Context: my sister Ana asked for it last Tuesday" 2>&1 || true); grep -q 'copies the owner' <<<"$o" || fail "public copied six words: $o"
+A public "$p" "Add greet(name); my sister Ana asked for help" >/dev/null || fail "a five-word overlap was refused"
+A said "$p" "Sí, añadí la función greet para mi hermana" >/dev/null
+o=$(A public "$p" 'Añadí la función “greet” para mi hermana' 2>&1 || true); grep -q 'copies the owner' <<<"$o" || fail "copied Spanish from a said row passed: $o"
+A add "You are a subagent. Don't run memo. Summarize this email for me" >/dev/null
+printf 'You are a subagent. Don'"'"'t run memo.\nRead your brief.\n' > "$T/boiler.md"; "$ORCHY" check-private "$T/boiler.md" >/dev/null || fail "template boilerplate counted as a copy"
+# check-public: leak, sensitive word, a planted secret (assembled here, so this file carries none), and failing closed
+printf 'see %s/someone/x\n' "/ho""me" > "$T/p1"; printf 'a vulnerability in login\n' > "$T/p2"; printf 'clean text\n' > "$T/p0"
+printf 'aws_access_key_id = %s\naws_secret_access_key = %s\n' "AKIA""QYLPMN5HHHFPZAM2" "wJalrXUtnFEMI/K7MDENG/bPxRfiCY""EXAMPLEKEYzz" > "$T/p3"
+ORCHY_GITLEAKS=gitleaks "$ORCHY" check-public "$T/p0" >/dev/null || fail "check-public refused clean text"
+for n in 1 2; do if "$ORCHY" check-public "$T/p$n" >/dev/null 2>&1; then fail "check-public accepted p$n: $(cat "$T/p$n")"; fi; done
+o=$(ORCHY_GITLEAKS=gitleaks "$ORCHY" check-public "$T/p3" 2>&1 || true); grep -q 'SECRET' <<<"$o" || fail "the real gitleaks missed the planted secret: $o"
+"$ORCHY" check-public --no-sensitive "$T/p2" >/dev/null || fail "--no-sensitive still applied the sensitive pattern"
+o=$(ORCHY_GITLEAKS=no-such-gitleaks "$ORCHY" check-public "$T/p0" 2>&1; echo "rc=$?"); grep -q 'rc=2' <<<"$o" || fail "check-public without gitleaks did not refuse: $o"
+cp "$ORCHY_HOME/local.json" "$T/local.bak"; echo '{' > "$ORCHY_HOME/local.json"
+o=$("$ORCHY" check-public "$T/p0" 2>&1; echo "rc=$?"); grep -q 'rc=2' <<<"$o" || fail "check-public with a broken local.json did not refuse: $o"; cp "$T/local.bak" "$ORCHY_HOME/local.json"
+mkdir "$T/lk"; cp "$LG" "$T/lk/l.jsonl"; chmod 000 "$T/lk"; o=$(bash "$K/scripts/overlap.sh" "$T/lk/l.jsonl" "$T/p0" 2>&1; echo "rc=$?"); chmod 700 "$T/lk"
+grep -q 'rc=2' <<<"$o" || fail "the copy check read a ledger behind a locked dir as absent: $o"
+# ask file: every refusal leaves no create call; an exact title, a failed search and a failed create file nothing; one lock spans it all
+f=$(A add "File the flaky login test"); A public "$f" "The login test fails intermittently" >/dev/null
+printf '## Problem\nThe login test fails about one run in ten.\n' > "$T/body.md"; jq -n '[{number:9,title:"Flaky login test"}]' > "$MOCK_DIR/issues.json"; : > "$MOCK_DIR/created.log"
+for b in p1 p2 p3; do if A file "$f" "Login test is flaky" "$T/$b" >/dev/null 2>&1; then fail "file accepted body $b"; fi; done
+o=$(A file "$f" "flaky LOGIN test" "$T/body.md" 2>&1 || true); grep -q 'issue #9 already has this exact title' <<<"$o" || fail "exact title: $o"
+o=$(MOCK_GH_FAIL=search A file "$f" "Login test is flaky" "$T/body.md" 2>&1 || true); grep -q 'duplicate search failed' <<<"$o" || fail "search error: $o"
+[ ! -s "$MOCK_DIR/created.log" ] || fail "a refused file still called gh issue create"
+n0=$(wc -l < "$LG"); o=$(MOCK_GH_FAIL=create A file "$f" "Login test is flaky" "$T/body.md" 2>&1 || true)
+grep -q 'ledger is unchanged' <<<"$o" && [ "$(wc -l < "$LG")" = "$n0" ] || fail "a failed create changed the ledger: $o"
+( MOCK_GH_DELAY=2 A file "$f" "Login test is flaky" "$T/body.md" > "$T/file.out" 2>&1 ) & fp=$!; sleep 0.5
+o=$(A drop "$f" "never mind" 2>&1 || true); wait "$fp"
+grep -q "$f filed as #77" "$T/file.out" || fail "file: $(cat "$T/file.out")"; grep -q "$f is filed" <<<"$o" || fail "a drop during the create was not refused after it: $o"
+[ "$(A show "$f" | sed '/^-- history/,$d' | jq -r '"\(.state) \(.issue)"')" = "filed 77" ] || fail "filed state"
+rm -f "$MOCK_DIR/issues.json"
+# asks in lanes: the lane brief carries them; close-lane reads each report's last ASKS: line in lane order
+"$ORCHY" render lane-brief.md LANE=cl ISSUES=none ASKS="ask9: Add a greeting helper" TIER=light SCOPE=s DECISIONS=none OUT=none VERIFY=none ARCS=a1 OTHER_LEADS=none | grep -qx 'ask9: Add a greeting helper' || fail "lane brief does not render ASKS"
+c=(); for i in 1 2 3 4 5; do c[i]=$(A add "close-lane case $i"); A public "${c[i]}" "Close-lane requirement number $i" >/dev/null; A lane "${c[i]}" cl "a repo change" >/dev/null || fail "lane ${c[i]}"; done
+A drop "${c[4]}" "withdrawn" >/dev/null
+RP="$ORCHY_HOME/reports"; mkdir -p "$RP"
+printf 'LEAD_DONE\nASKS: delivered %s %s %s\n' "${c[1]}" "${c[2]}" "${c[3]}" > "$RP/cl-plan.md"   # a plan delivers nothing
+printf 'LEAD_DONE\nPR #31 add it ready checks: green\nASKS: delivered %s %s; left out %s the API it needs is missing\n' "${c[1]}" "${c[5]}" "${c[2]}" > "$RP/cl-a1.md"
+printf 'LEAD_DONE\nPR #32 retry ready checks: green\nASKS: left out %s not needed\n' "${c[5]}" > "$RP/cl-arc1.md"
+printf 'LEAD_DONE\nPR #40 other ready checks: green\nASKS: delivered %s\n' "${c[3]}" > "$RP/cl-a11y-a1.md"
+mkdir -p .claude/worktrees/cl; o=$(A close-lane cl 2>&1 || true); grep -q 'still has its worktree' <<<"$o" || fail "close-lane with the worktree present: $o"; rmdir .claude/worktrees/cl
+A close-lane cl > "$T/cl.out" || fail "close-lane: $(cat "$T/cl.out")"
+st() { A show "$1" | sed '/^-- history/,$d' | jq -r '"\(.state) \(.notes[-1])"'; }
+[ "$(st "${c[1]}")" = "done delivered in cl PR #31" ] || fail "delivered ask: $(st "${c[1]}")"
+[ "$(st "${c[2]}")" = "open lane cl closed without delivering it: the API it needs is missing" ] || fail "a later left-out did not win: $(st "${c[2]}")"
+[ "$(st "${c[3]}")" = "open lane cl closed without delivering it: not reported" ] || fail "an unreported ask (the plan's claim and another lane's report ignored): $(st "${c[3]}")"
+[ "$(st "${c[4]}")" = "dropped withdrawn" ] || fail "a dropped ask was touched: $(st "${c[4]}")"
+[ "$(st "${c[5]}")" = "open lane cl closed without delivering it: conflicting reports a1/arc1" ] || fail "a1/arc1 conflict: $(st "${c[5]}")"
+o=$(A lane "${c[3]}" cl "again" 2>&1 || true); grep -q 'lane cl is closed' <<<"$o" || fail "ask lane reused a closed slug: $o"
+o=$("$ORCHY" wt-new cl 2>&1 || true); grep -q 'never reused' <<<"$o" || fail "wt-new recreated a closed lane: $o"
+# snapshot names asks by id and state only, flags an ask whose lane is gone, and lists no untriaged issue for an empty backlog
+g=$(A add "my sister Ana wants the gone lane"); A public "$g" "Gone-lane requirement" >/dev/null; A lane "$g" gone-1 "a repo change" >/dev/null
+echo '[]' > "$MOCK_DIR/issues.json"; : > "$ORCHY_HOME/triaged.txt"; "$ORCHY" snapshot > "$T/snap.out" 2>&1
+sed -n '/^-- asks/,/^--/p' "$T/snap.out" | grep -q "^$g lane gone-1 .*lane closed: run ask close-lane gone-1" || fail "snapshot asks: $(sed -n '/^-- asks/,/^--/p' "$T/snap.out")"
+grep -q 'Ana\|close-lane case' "$T/snap.out" && fail "snapshot printed an ask's text"
+if sed -n '/^-- untriaged/,/^--/p' "$T/snap.out" | grep -q '^#'; then fail "untriaged issues listed for an empty backlog"; fi
+r=$(A add "receipt case"); A public "$r" "Receipt requirement" >/dev/null; A lane "$r" r "a repo change" >/dev/null; A "done" "$r" "delivered" >/dev/null
+o=$(ORCHY_HOME="$HR" "$ORCHY" receipt r); grep -qF "asks done 1 ($r)" <<<"$o" || fail "receipt asks: $o"
+# launch and say: an ask reaches a lead only as its stored wording, laned there, not held, never copied from the owner
+l=$(A add "Please add the greeting on the home page because my landlord asked twice"); A public "$l" "Show a greeting on the home page" >/dev/null; A lane "$l" x "a repo change" >/dev/null
+lt() { printf 'You are a subagent.\n%s\n' "$1" > "$ORCHY_HOME/prompts/x-lt.md"; "$ORCHY" launch x-lt x acct-a 2>&1 || true; }
+o=$(lt "$l: Show a greeting"); grep -q 'not its stored public wording' <<<"$o" || fail "launch with a reworded ask line: $o"
+o=$(lt "$l: Show a greeting on the home page, a vulnerability fix"); grep -q 'SENSITIVE' <<<"$o" || fail "launch with a sensitive ask line: $o"
+o=$(lt "$r: Receipt requirement"); grep -q "$r is not laned to x" <<<"$o" || fail "launch with another lane's ask: $o"
+o=$(lt "Context: on the home page because my landlord asked twice"); grep -q 'copies the owner' <<<"$o" || fail "launch with a copied sentence: $o"
+printf 'Lane x for acct-a\n' > "$ORCHY_HOME/briefs/x.md"; o=$(lt "$l: Show a greeting on the home page"); grep -q 'banned text' <<<"$o" || fail "launch with a banned lane brief: $o"; rm "$ORCHY_HOME/briefs/x.md"
+o=$(lt "$l: Show a greeting on the home page"); grep -qE 'refused: (the|.* is not laned|.*copies)|SENSITIVE|LEAK' <<<"$o" && fail "launch refused a clean ask line: $o"
+printf 'You are a subagent.\n' > "$ORCHY_HOME/prompts/x-say.md"; MOCK_LEAD_SECS=30 "$ORCHY" launch --force-cap x-say x acct-b >/dev/null || fail "launch x-say"
+o=$("$ORCHY" say x-say "remember: home page because my landlord asked twice" 2>&1 || true); grep -q 'copies the owner' <<<"$o" || fail "say queued a copied sentence: $o"
+o=$("$ORCHY" say x-say "$(cat "$T/p3")" 2>&1 || true); grep -q 'SECRET' <<<"$o" || fail "say queued a secret: $o"
+o=$("$ORCHY" say x-say "$l: Show a greeting" 2>&1 || true); grep -q 'not its stored public wording' <<<"$o" || fail "say queued a reworded ask: $o"
+o=$("$ORCHY" say x-say "$g: Gone-lane requirement" 2>&1 || true); grep -q "$g is not laned to x" <<<"$o" || fail "say queued another lane's ask: $o"
+"$ORCHY" say x-say "fix the review finding in $l first" | grep -q queued || fail "say refused an ordinary note naming a finding"
+"$ORCHY" stop x-say >/dev/null
+# the seat: session id and messaging address recorded, the token never; pid and start time alone decide ownership
+L="$ORCHY_HOME/orchestrator.lock"; TOK="tok-$RANDOM$RANDOM"
+CLAUDE_CODE_SESSION_ID=sess-0001 CLAUDE_CODE_MESSAGING_SOCKET="$T/m.sock" CLAUDE_CODE_MESSAGING_TOKEN="$TOK" "$ORCHY" lock >/dev/null || fail "lock with the session env"
+read -r _ _ _ s4 s5 < "$L"; [ "$s4 $s5" = "sess-0001 uds:$T/m.sock" ] || fail "seat fields: $(cat "$L")"
+grep -rqF -- "$TOK" "$ORCHY_HOME" && fail "the messaging token reached the home"
+"$ORCHY" unlock | grep -qx unlocked || fail "the holder could not unlock its seat"
+seat() { printf '%s %s 2026-01-01T00:00:00Z %s uds:%s\n' "$1" "$(awk '{print $22}' "/proc/$1/stat")" "$2" "$T/o.sock" > "$L"; }
+sleep 60 & sa=$!; seat "$sa" sess-other
+o=$("$ORCHY" lock 2>&1 || true); grep -q 'session sess-other' <<<"$o" || fail "a refused lock does not name the holder's session: $o"
+o=$("$ORCHY" unlock 2>&1; echo "rc=$?"); grep -q 'rc=2' <<<"$o" || fail "unlock removed a live other session's seat: $o"
+kill "$sa"; wait "$sa" 2>/dev/null || true; sleep 60 & sb=$!; seat "$sb" sess-contender
+o=$("$ORCHY" unlock 2>&1; echo "rc=$?"); grep -q 'rc=2' <<<"$o" || fail "unlock removed a contender's fresh seat: $o"
+seat "$sb" sess-0001; o=$(CLAUDE_CODE_SESSION_ID=sess-0001 "$ORCHY" unlock 2>&1; echo "rc=$?"); grep -q 'rc=2' <<<"$o" || fail "a matching session string unlocked another process's seat: $o"
+kill "$sb"; wait "$sb" 2>/dev/null || true; "$ORCHY" unlock | grep -qx unlocked || fail "a dead holder's seat was not released"
+# wait, in fast motion (1 s ticks and polls), in a home of its own so no lead or report moves under it
+HW="$T/cap/hw"; mkdir -p "$HW"; jq '.wait.poll_sec=1' "$ORCHY_HOME/orchy.json" > "$HW/orchy.json"; cp "$ORCHY_HOME/local.json" "$HW/"
+jq -n '[{number:1,updatedAt:"2026-01-01T00:00:00Z"}]' > "$MOCK_DIR/issues.json"; jq -n '{sha:"1111111111111111111111111111111111111111"}' > "$MOCK_DIR/trunk.json"; rm -f "$MOCK_DIR/open.json"
+w() { ORCHY_HOME="$HW" ORCHY_WAIT_TICK=1 "$ORCHY" wait "$1" > "$T/w.out" 2>&1; }
+w 5; [ "$(grep -cE '^CHANGED \((issues|trunk|prs|reports/leads/watchers)\)' "$T/w.out")" = 4 ] || fail "sources with no seen file did not fire on their first read: $(cat "$T/w.out")"
+# between two waits nobody watches: the next wait compares against what the last one reported, so the gap is seen
+jq '. + [{number:2,updatedAt:"2026-01-02T00:00:00Z"}]' "$MOCK_DIR/issues.json" > "$T/i.json" && mv "$T/i.json" "$MOCK_DIR/issues.json"
+w 5; [ "$(grep '^CHANGED' "$T/w.out")" = 'CHANGED (issues):' ] || fail "an issue added between two waits was absorbed: $(cat "$T/w.out")"
+jq -n '{sha:"2222222222222222222222222222222222222222"}' > "$MOCK_DIR/trunk.json"; jq '.[0].updatedAt="2026-01-03T00:00:00Z"' "$MOCK_DIR/issues.json" > "$T/i.json" && mv "$T/i.json" "$MOCK_DIR/issues.json"
+w 5; [ "$(grep -cE '^CHANGED \((trunk|issues)\)' "$T/w.out")" = 2 ] || fail "wait did not report both sources that moved in one poll: $(cat "$T/w.out")"
+w 2; [ "$(cat "$T/w.out")" = "TIMEOUT after 2s, no change" ] || fail "reported changes fired again, or a quiet wait did not time out cleanly: $(cat "$T/w.out")"
+touch "$MOCK_DIR/fail-issues"; jq -n '{sha:"3333333333333333333333333333333333333333"}' > "$MOCK_DIR/trunk.json"
+w 5; grep -q 'CHANGED (trunk)' "$T/w.out" || fail "a failing issue read hid a trunk move: $(cat "$T/w.out")"
+w 2; rm "$MOCK_DIR/fail-issues"; grep -q 'TIMEOUT after 2s, no change; unreadable: issues' "$T/w.out" || fail "a timeout did not name the unreadable source: $(cat "$T/w.out")"
+# local events re-arm the wait long before poll_sec, so the first tick must read GitHub too
+jq '.wait.poll_sec=120' "$HW/orchy.json" > "$T/o.json" && mv "$T/o.json" "$HW/orchy.json"; jq -n '{sha:"4444444444444444444444444444444444444444"}' > "$MOCK_DIR/trunk.json"
+w 3; grep -q 'CHANGED (trunk)' "$T/w.out" || fail "the first tick of a wait did not read GitHub: $(cat "$T/w.out")"
+rm -f "$MOCK_DIR/issues.json" "$MOCK_DIR/trunk.json"
+wait "$pgp" || { tail -n 20 "$T/page.log"; fail "page smoke"; }; pgp=
 # no project names, home paths or roster names anywhere in the skill
 if grep -rnE 'nulo|Nulo|program-2|program2|/mnt/user-data|/Users/|martu|proton|icloud|GzKw77' "$K" --include='*.md' --include='*.sh' --include='*.py' --include='*.js' --include='*.ts' --include='*.json' --include='*.cjs' | grep -v 'page/fixtures' ; then fail "project-specific text in the skill"; fi
 echo "smoke-orchy: ok"

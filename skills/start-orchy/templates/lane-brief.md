@@ -1,6 +1,8 @@
 # Lane `<LANE>`
 
 **Issues:** <ISSUES>
+**Asks (requirements restated by the orchestrator; deliver each as stated, verify the facts it rests on, never search for its origin, never file one as an issue):**
+<ASKS>
 **Tier:** <TIER>
 **Scope (one paragraph):** <SCOPE>
 

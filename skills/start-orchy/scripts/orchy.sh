@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016  # jq programs are single-quoted on purpose: their $vars are jq's
 # orchy: the backlog-program orchestrator's shell half. One entry point, subcommands below.
 # State lives in $ORCHY_HOME (default ~/.cache/orchy/<owner>-<repo>): orchy.json (policy), local.json (accounts, caps),
 # briefs, prompts, reports, leads, watch, wt, page. Nothing in the repo.
@@ -9,8 +10,16 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   config <jq-expr>             read $ORCHY_HOME/orchy.json ('.trunk', '.merge.required_checks[]')
 #   local <jq-expr>              read $ORCHY_HOME/local.json (accounts, caps)
 #   lock | unlock                claim this repo's orchestrator seat (refuses while another session holds it)
-#   render <template> K=V ...    substitute <K> tokens in a template file to stdout; exit 1 on a token left over
+#   render [--keep K,...] <template> K=V ...   substitute <K> tokens to stdout; exit 1 on a token left over that --keep does not name
 #   check-text <file>...         refuse a file carrying a banned string (local.json prompt_ban: roster names, page ids)
+#   check-private <file>...      refuse a file that copies six consecutive words of the owner's verbatim words in the ask ledger
+#   check-public [--no-sensitive] <file>   check-private, then the leak and sensitive patterns and gitleaks; any check error refuses
+#   ask add <text>               capture the owner's words verbatim; prints the new id (askN)
+#   ask public <id> <text>       the restatement every handoff carries; ask said <id> <text>: the owner's later words, verbatim
+#   ask lane <id> <slug> <route> | done|drop|reopen <id> <note> | note <id> <text>   route or move an ask
+#   ask list [--all] | show <id> one line per open or laned ask (every ask with --all); one ask's fold and history
+#   ask file <id> <title> <body-file>   file an ask as a GitHub issue: check, dedupe, create and record under one lock
+#   ask close-lane <slug>        after teardown: each ask laned there is done (delivered, with its PR) or reopened, from the reports' ASKS: lines
 #   wt-new <slug>...             create worktrees from origin/<trunk> and install deps; sequential; refuses an existing slug
 #   launch [--light] <key> <slug> <account>            start a headless lead on prompts/<key>.md inside the lane worktree
 #   resume [--light] <key> <slug> <account> <session>  resume a lead's session with prompts/<key>.md
@@ -18,10 +27,10 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   say <key> <text>             queue a steering note; a live lead gets it after its next tool call (inbox-hook.sh)
 #   session-id <key>             the session id of a lead's latest run
 #   snapshot                     the tick's facts: reports, leads, watchers, PRs, worktrees, load, headroom
-#   wait [seconds]               block until a report, lead, watcher or open-PR state changes (default 1500)
+#   wait [seconds]               block until a report, lead or watcher changes, or (every wait.poll_sec, default 120) open PRs, open issues or the trunk head (default 1500)
 #   scan <pr>                    gate-weakening and leak scan of a PR's diff, title, body and commit messages (plus the local ban)
 #   watch-merge <pr> <full-sha> <lane> <report> [archive-name]   merge on the standing policy, then tear the lane down
-#   arm-merge  <pr> <full-sha> <lane> <report> [archive-name] [delay-s]   watch-merge detached (nohup, .out + .pid)
+#   arm-merge  <pr> <full-sha> <lane> <report-name> [archive-name] [delay-s]   watch-merge detached (nohup, .out + .pid)
 #   disarm [<pr>]                stop one merge watcher, or every one
 #   receipt [<lane>]             per lane: API-equivalent dollars, tokens, wall-clock, PRs merged, issues closed, failed arcs, Codex rounds
 #   teardown <slug>              remove a lane worktree whose HEAD is exactly a merged PR's head and whose tree is clean
@@ -39,6 +48,9 @@ slug=$(echo "$REPO" | tr '/' '-')
 CAP=$(realpath -sm "${ORCHY_CAPACITY_ROOT:-$HOME/.cache/orchy}")
 ORCHY_HOME=$(realpath -sm "${ORCHY_HOME:-$CAP/$slug}")
 H="$ORCHY_HOME"; CFG="$H/orchy.json"; LOCAL="$H/local.json"
+# The owner's verbatim words live outside $H, where leads write their reports and would find them.
+ASKS_DIR=$(realpath -sm "${ORCHY_ASKS_DIR:-$HOME/.agents/orchy/asks}"); LEDGER="$ASKS_DIR/$slug.jsonl"
+OVERLAP="$(dirname "$(realpath "$0")")/overlap.sh"
 cmd=${1:-help}; shift || true
 case "$cmd" in help|-h|--help) usage 0;; home) echo "$H"; exit 0;; esac
 [ -f "$CFG" ] || { echo "orchy: no $CFG (run /start-orchy in the repo first)" >&2; exit 1; }
@@ -109,34 +121,100 @@ trunk_state() { # the trunk head's sha, then one line per trunk check that concl
   while IFS= read -r n; do awk -F'\t' -v n="$n" '$1==n' <<<"$runs" | tail -1 | grep -qE $'\tcompleted\t(failure|timed_out)$' && echo "$n"; done < <(cfg '(.merge.trunk_checks // .merge.required_checks)[]')
   return 0
 }
-session_pid() { # the nearest `claude` ancestor is the orchestrator session; without one (a test, a plain shell) the caller's parent
-  local p=$PPID c; while [ "$p" -gt 1 ] 2>/dev/null; do c=$(ps -o comm= -p "$p" 2>/dev/null); [ "$c" = claude ] && { echo "$p"; return; }; p=$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null || echo 1); done; echo "$PPID"
+session_pid() { # the orchestrator session: $CLAUDE_PID while it is a live claude, else the nearest `claude` ancestor, else (a test, a plain shell) the caller's parent
+  local p=${CLAUDE_PID:-} c
+  if [[ "$p" =~ ^[0-9]+$ ]] && [ "$(ps -o comm= -p "$p" 2>/dev/null)" = claude ]; then echo "$p"; return; fi
+  p=$PPID; while [ "$p" -gt 1 ] 2>/dev/null; do c=$(ps -o comm= -p "$p" 2>/dev/null); [ "$c" = claude ] && { echo "$p"; return; }; p=$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null || echo 1); done; echo "$PPID"
 }
+ledger_ok() { # owner-only and never a symlink: it holds the owner's verbatim words
+  mkdir -p "$ASKS_DIR" && chmod 700 "$ASKS_DIR" || return 1
+  [ ! -L "$ASKS_DIR" ] && [ -O "$ASKS_DIR" ] && [ ! -L "$LEDGER" ] || { echo "refused: $ASKS_DIR and $LEDGER must be owned by $(id -un), not symlinks" >&2; return 1; }
+  ( umask 077; : >> "$LEDGER" ) && chmod 600 "$LEDGER"
+}
+# One fold for every reader: a line that is not a JSON object with a string id (a torn tail) is skipped.
+FOLD='reduce (inputs | fromjson? | select(type == "object" and (.id | type) == "string")) as $r ({};
+  .[$r.id] |= ((. // {id: $r.id, at: $r.at, said: [], notes: []})
+    | .updated = $r.at
+    | if .text == null and ($r.text | type) == "string" then .text = $r.text else . end
+    | if ($r.said | type) == "string" then .said += [$r.said] else . end
+    | if ($r.public | type) == "string" then .public = $r.public else . end
+    | if ($r.note | type) == "string" then .notes += [$r.note] else . end
+    | if ($r.state | type) == "string" then .state = $r.state
+        | if $r.state == "lane" then .lane = $r.lane elif $r.state == "open" or $r.state == "dropped" then .lane = null else . end
+        | if $r.state == "filed" then .issue = $r.issue else . end
+      else . end))'
+fold() { if [ -f "$LEDGER" ]; then jq -Rn "$FOLD" "$LEDGER"; else echo '{}'; fi; }
+ask_get() { fold | jq -c --arg id "$1" '.[$id] // empty'; }
+ask_moves() { case "$1>$2" in open\>lane|open\>done|open\>dropped|open\>filed|lane\>done|lane\>open|lane\>dropped|lane\>filed|done\>open|dropped\>open) return 0;; esac; return 1; }
+ASK_HOLD='[.notes[] | select(test("^(waiting:|answered:)") or . == "wording ok")][-1] // "" | select(startswith("waiting:"))'
+ask_ready() { # ask_ready <fold-json> <id>: a handoff needs the stored restatement and no open owner question
+  local w; [ -n "$(jq -r '.public // empty' <<<"$1")" ] || { echo "refused: $2 has no public wording; ask public $2 first" >&2; return 1; }
+  # only control notes decide a hold, so an ordinary note never clears one
+  w=$(jq -r "$ASK_HOLD" <<<"$1"); [ -z "$w" ] || { echo "refused: $2 is $w; record 'answered: …' or 'wording ok' with ask note first" >&2; return 1; }
+}
+ask_lines() { # ask_lines <slug> [--no-sensitive] <file>...: each `askN: ` line is that ask's stored wording, laned to <slug>, not held
+  local s=$1 m id t a rc=0 tf lines nosens=(); shift; [ "${1:-}" = --no-sensitive ] && { nosens=(--no-sensitive); shift; }
+  tf=$(mktemp "$H/scratch/asklines.XXXXXX"); grep -hE '\bask[0-9]+\b' "$@" > "$tf"
+  [ $? -le 1 ] || { echo "refused: cannot read the ask lines of $*" >&2; rm -f "$tf"; return 1; }
+  if [ -s "$tf" ]; then "$0" check-public "${nosens[@]}" "$tf" || { echo "refused: a line that names an ask is checked as public text; keep paths and other local detail off it" >&2; rc=1; }; fi
+  lines=$(grep -ohE '\bask[0-9]+: .*' "$tf"); [ $? -le 1 ] || { echo "refused: cannot read the ask lines of $*" >&2; rm -f "$tf"; return 1; }
+  while IFS= read -r m; do   # one ask per line: the wording runs to the end of it
+    [ -n "$m" ] || continue; id=${m%%: *}; t=${m#*: }; t=${t%"${t##*[![:space:]]}"}; a=$(ask_get "$id")
+    [ -n "$a" ] || { echo "refused: $id is not in the ask ledger" >&2; rc=1; continue; }
+    [ "$(jq -r '.public // empty' <<<"$a")" = "$t" ] || { echo "refused: the $id line is not its stored public wording (ask show $id)" >&2; rc=1; }
+    jq -e --arg s "$s" '.state == "lane" and .lane == $s' <<<"$a" >/dev/null || { echo "refused: $id is not laned to $s" >&2; rc=1; }
+    ask_ready "$a" "$id" || rc=1
+  done <<<"$lines"
+  rm -f "$tf"; return $rc
+}
+lane_reported() { # a lane's reports outlive its worktree: their slug never names a new lane
+  local f b; for f in "$H/reports/$1"-*.md; do [ -f "$f" ] || continue; b=$(basename "$f" .md); [[ "${b#"$1"-}" =~ ^(plan|a[0-9]+|arc[0-9]+|closeout)$ ]] && return 0; done; return 1
+}
+append_row() { # inside the ledger lock (fd 9); a torn last line is ended first so the new row parses
+  [ "$(printf '%s' "$1" | wc -c)" -le 16384 ] || { echo "refused: a ledger row is at most 16 KiB; restate or split the ask" >&2; return 1; }
+  [ -z "$(tail -c 1 "$LEDGER")" ] || printf '\n' >&9
+  printf '%s\n' "$1" >&9
+}
+with_ledger() { ( flock -w 60 9 || { echo "refused: ask ledger lock busy for 60 s" >&2; exit 1; }; "$@" ) 9>>"$LEDGER"; }
 case "$cmd" in
 config) cfg "$1";;
 local) lcl "$1";;
 lock)
   f="$H/orchestrator.lock"; me=$(session_pid)
+  # The seat names the session and its messaging address so a coordinator can find it; pid and start time stay the only
+  # ownership test, and the messaging token is never read.
+  sess=${CLAUDE_CODE_SESSION_ID:-${ORCHY_SESSION:--}}; addr=-; [ -n "${CLAUDE_CODE_MESSAGING_SOCKET:-}" ] && addr="uds:$CLAUDE_CODE_MESSAGING_SOCKET"
   for try in 1 2 3; do
-    if ( set -o noclobber; echo "$me $(pstart "$me") $(now) ${ORCHY_SESSION:-}" > "$f" ) 2>/dev/null; then echo "locked $REPO for session pid $me"; exit 0; fi
-    read -r p st t _ < "$f" 2>/dev/null || { sleep 1; continue; }
-    [ "$p" = "$me" ] && { echo "already locked by this session (pid $me)"; exit 0; }
-    if [ -d "/proc/$p" ] && [ "$(pstart "$p")" = "$st" ]; then echo "refused: another orchestrator holds $REPO (pid $p since $t)"; exit 2; fi
+    if ( set -o noclobber; echo "$me $(pstart "$me") $(now) $sess $addr" > "$f" ) 2>/dev/null; then echo "locked $REPO for session pid $me ($sess)"; exit 0; fi
+    read -r p st t hs _ < "$f" 2>/dev/null || { sleep 1; continue; }
+    [ "$p" = "$me" ] && [ "$st" = "$(pstart "$me")" ] && { echo "already locked by this session (pid $me)"; exit 0; }
+    if [ -d "/proc/$p" ] && [ "$(pstart "$p")" = "$st" ]; then echo "refused: another orchestrator holds $REPO (pid $p, session ${hs:--}, since $t)"; exit 2; fi
     # a stale holder: one contender at a time replaces it (the flock dies with its holder), so two contenders cannot unlink each other's fresh lock
-    ( flock -w 5 9 || exit 1; read -r p2 _ < "$f" 2>/dev/null; [ "$p2" = "$p" ] && rm -f "$f"; exit 0 ) 9>"$f.takeover" || sleep 1
+    ( flock -w 5 9 || exit 1; read -r p2 st2 _ < "$f" 2>/dev/null; [ "$p2" = "$p" ] && [ "$st2" = "$st" ] && rm -f "$f"; exit 0 ) 9>"$f.takeover" || sleep 1
   done; echo "lock: could not claim $f"; exit 2;;
-unlock) rm -f "$H/orchestrator.lock"; echo "unlocked";;
+unlock)
+  # Under the takeover lock, so the seat read is the seat removed: never a live other session's, never a contender's fresh one.
+  need flock; f="$H/orchestrator.lock"; me=$(session_pid)
+  ( flock -w 5 9 || { echo "refused: the seat's takeover lock is busy"; exit 2; }
+    [ -f "$f" ] || { echo "unlocked (no seat was held)"; exit 0; }
+    read -r p st _ < "$f" 2>/dev/null; mine=0; gone=1
+    [ "$p" = "$me" ] && [ "$st" = "$(pstart "$me")" ] && mine=1
+    [ -n "$p" ] && [ -d "/proc/$p" ] && [ "$(pstart "$p")" = "$st" ] && gone=0
+    if [ $mine = 1 ] || [ $gone = 1 ]; then rm -f "$f"; echo "unlocked"; exit 0; fi
+    echo "refused: pid $p holds the seat and is alive; it is not this session"; exit 2 ) 9>"$f.takeover";;
 render)
-  t=$1; shift; [ -f "$t" ] || t="$(dirname "$0")/../templates/$t"
-  [ -f "$t" ] || { echo "orchy: no template $1" >&2; exit 1; }
+  # the shared briefs keep <LANE>, <KEY>, <WORKTREE> and <BRANCH>: each spawn prompt binds them for its lead
+  keep=; [ "${1:-}" = --keep ] && { keep=${2:-}; shift 2; }
+  name=${1:-}; t=$name; shift; [ -f "$t" ] || t="$(dirname "$0")/../templates/$t"
+  [ -f "$t" ] || { echo "orchy: no template $name" >&2; exit 1; }
   # values may carry newlines, '|', '&' or '/': a plain string replace, never sed
-  python3 -I - "$t" "$@" <<'PY'
+  python3 -I - "$t" "$keep" "$@" <<'PY'
 import sys, re
 t = open(sys.argv[1]).read()
-for kv in sys.argv[2:]:
+for kv in sys.argv[3:]:
     k, _, v = kv.partition("="); t = t.replace(f"<{k}>", v)
 sys.stdout.write(t)
-left = sorted(set(re.findall(r"<[A-Z_]{3,}>", t)))
+left = sorted(set(re.findall(r"<[A-Z_]{3,}>", t)) - {f"<{k}>" for k in sys.argv[2].split(",") if k})
 if left: print("orchy: unrendered tokens: " + " ".join(left), file=sys.stderr); sys.exit(1)
 PY
   ;;
@@ -144,13 +222,156 @@ check-text)
   ban=$(lcl '.prompt_ban // empty'); [ -n "$ban" ] || { echo "orchy: local.json has no prompt_ban" >&2; exit 2; }
   grep -qE "$ban" /dev/null 2>/dev/null; [ $? -le 1 ] || { echo "orchy: prompt_ban is not a valid regex" >&2; exit 2; }
   rc=0; for f in "$@"; do [ -r "$f" ] || { echo "orchy: cannot read $f" >&2; rc=2; continue; }
-    hits=$(grep -nE "$ban" "$f" | head -5); [ -z "$hits" ] || { echo "orchy: $f carries banned text:"; echo "$hits" | cut -c1-160; rc=1; }; done; exit $rc;;
+    hits=$(grep -nE "$ban" "$f"); [ $? -le 1 ] || { echo "orchy: cannot scan $f" >&2; rc=2; continue; }
+    [ -z "$hits" ] || { echo "orchy: $f carries banned text:"; head -5 <<<"$hits" | cut -c1-160; rc=1; }; done; exit $rc;;
+check-private) [ $# -gt 0 ] || { echo "usage: check-private <file>..." >&2; exit 2; }; bash "$OVERLAP" "$LEDGER" "$@";;
+check-public)
+  # Fails closed: a check that cannot run refuses (exit 2), unlike scan, which reports what it could read.
+  sens=1; [ "${1:-}" = --no-sensitive ] && { sens=0; shift; }
+  f=${1:-}; [ -r "$f" ] || { echo "usage: check-public [--no-sensitive] <file>" >&2; exit 2; }
+  bash "$OVERLAP" "$LEDGER" "$f"; rc=$?; [ "$rc" -le 1 ] || { echo "refused: the copy check could not run" >&2; exit 2; }
+  # a policy file that cannot be parsed refuses: an empty pattern would pass everything
+  if ! leakre=$(cfg '.scan.leak // empty') || ! ban=$(jq -r '.prompt_ban // empty' "$LOCAL"); then echo "refused: orchy.json or local.json cannot be read" >&2; exit 2; fi
+  [ -n "$ban" ] && leakre="${leakre:+($leakre)|}($ban)"
+  [ -n "$leakre" ] || { echo "refused: neither scan.leak nor prompt_ban is set" >&2; exit 2; }
+  # the default pattern only on confirmed absence: -e is also false behind an unsearchable page/
+  dj="$H/page/decisions.json"; sre=
+  if [ -e "$dj" ]; then sre=$(jq -r '.site.sensitive // empty' "$dj") || { echo "refused: decisions.json cannot be read" >&2; exit 2; }
+  elif [ ! -d "$H/page" ] || [ ! -x "$H/page" ]; then echo "refused: cannot tell whether decisions.json exists" >&2; exit 2; fi
+  : "${sre:=\\bfindings?\\b|advisor(y|ies)|GHSA|vulnerab|exploit|\\battack|confidential}"   # apply-decisions.ts's default
+  for kind in LEAK SENSITIVE; do
+    if [ $kind = LEAK ]; then hits=$(grep -nE -- "$leakre" "$f"); r=$?; else [ $sens = 1 ] || continue; hits=$(grep -niE -- "$sre" "$f"); r=$?; fi
+    [ "$r" -le 1 ] || { echo "refused: the $kind pattern is not a valid grep -E regex" >&2; exit 2; }
+    [ -z "$hits" ] || { echo "$kind:"; cut -c1-160 <<<"$hits" | head -5; rc=1; }
+  done
+  gl=${ORCHY_GITLEAKS:-gitleaks}; command -v "$gl" >/dev/null || { echo "refused: $gl not found, so the secret check cannot run" >&2; exit 2; }
+  "$gl" stdin --no-banner --redact --exit-code 3 -l error < "$f" >/dev/null 2>&1; r=$?
+  case $r in 0) ;; 3) echo "SECRET: gitleaks found a secret"; rc=1;; *) echo "refused: gitleaks failed (exit $r)" >&2; exit 2;; esac
+  exit $rc;;
+ask)
+  need flock; ledger_ok || exit 1; sub=${1:-}; shift || true
+  case "$sub" in add|list|close-lane) ;; public|said|note|done|drop|reopen|show|lane|file)
+    [[ "${1:-}" =~ ^ask[0-9]+$ ]] || { echo "usage: ask $sub <askN> ..." >&2; exit 1; }; id=$1; shift;;
+    *) echo "usage: ask add|public|said|note|lane|done|drop|reopen|list|show|file ... (orchy.sh help)" >&2; exit 1;; esac
+  row() { jq -nc --arg id "$id" --arg at "$(now)" "$@"; }
+  case "$sub" in
+  add)
+    t="$*"; [ -n "$t" ] || { echo "usage: ask add <text>" >&2; exit 1; }
+    ask_add() { local n; n=$(fold | jq -r '[keys[] | select(test("^ask[0-9]+$")) | ltrimstr("ask") | tonumber] | max // 0')
+      id="ask$((n + 1))"; append_row "$(row --arg t "$t" '{id: $id, at: $at, state: "open", text: $t}')" && echo "$id"; }
+    with_ledger ask_add;;
+  public)
+    t="$*"; [ -n "$t" ] || { echo "usage: ask public <askN> <text>" >&2; exit 1; }
+    tf=$(mktemp "$H/scratch/public.XXXXXX"); printf '%s\n' "$t" > "$tf"; "$0" check-public "$tf"; rc=$?; rm -f "$tf"; [ "$rc" = 0 ] || exit 1
+    ask_public() { local a st; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
+      st=$(jq -r .state <<<"$a"); case "$st" in open|lane) ;; *) echo "refused: $id is $st" >&2; return 1;; esac
+      # the owner's OK covered the wording they saw, never its replacement; one row, so no reader sees it unheld
+      if jq -e 'any(.notes[]; startswith("waiting: wording"))' <<<"$a" >/dev/null; then
+        append_row "$(row --arg t "$t" '{id: $id, at: $at, public: $t, note: "waiting: wording (changed)"}')" || return 1; echo "$id public wording stored; it needs the owner's OK again"
+      else append_row "$(row --arg t "$t" '{id: $id, at: $at, public: $t}')" || return 1; echo "$id public wording stored"; fi; }
+    with_ledger ask_public;;
+  said|note)
+    t="$*"; [ -n "$t" ] || { echo "usage: ask $sub <askN> <text>" >&2; exit 1; }
+    ask_text() { [ -n "$(ask_get "$id")" ] || { echo "refused: no $id" >&2; return 1; }
+      append_row "$(row --arg k "$sub" --arg t "$t" '{id: $id, at: $at} + {($k): $t}')" && echo "$id $sub recorded"; }
+    with_ledger ask_text;;
+  done|drop|reopen)
+    t="$*"; [ -n "$t" ] || { echo "usage: ask $sub <askN> <note>" >&2; exit 1; }
+    to=$sub; [ "$sub" = drop ] && to=dropped; [ "$sub" = reopen ] && to=open
+    ask_move() { local a st; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
+      st=$(jq -r .state <<<"$a"); ask_moves "$st" "$to" || { echo "refused: $id is $st; $sub does not apply" >&2; return 1; }
+      append_row "$(row --arg s "$to" --arg t "$t" '{id: $id, at: $at, state: $s, note: $t}')" && echo "$id $to"; }
+    with_ledger ask_move;;
+  lane)
+    s=${1:-}; shift || true; t="$*"
+    [[ "$s" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] && [ -n "$t" ] || { echo "usage: ask lane <askN> <slug> <route>" >&2; exit 1; }
+    ask_lane() { local a st; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
+      st=$(jq -r .state <<<"$a"); ask_moves "$st" lane || { echo "refused: $id is $st; lane does not apply" >&2; return 1; }
+      ask_ready "$a" "$id" || return 1
+      if lane_reported "$s" && [ ! -d "$WT_ROOT/$s" ]; then echo "refused: lane $s is closed (its reports remain); name a new lane" >&2; return 1; fi
+      append_row "$(row --arg s "$s" --arg t "$t" '{id: $id, at: $at, state: "lane", lane: $s, note: $t}')" && echo "$id lane $s"; }
+    with_ledger ask_lane;;
+  list)
+    all=0; [ "${1:-}" = --all ] && all=1
+    fold | jq -r --argjson all "$all" --argjson now "$(date +%s)" 'map(.) | sort_by(.id | ltrimstr("ask") | tonumber? // 0) | .[]
+      | select($all == 1 or .state == "open" or .state == "lane")
+      | ($now - (.at | fromdateiso8601? // $now)) as $s
+      | [.id, .state, (.lane // (if .issue then "#\(.issue)" else "-" end)), (if $s < 3600 then "\($s / 60 | floor)m" else "\($s / 3600 | floor)h" end),
+         ((if .public then "" else "[no public] " end) + (if ([ '"$ASK_HOLD"' ] | length) > 0 then "[waiting] " else "" end)
+          + ((.text // "") | gsub("\\s+"; " ") | .[0:80]))] | join("  ")';;
+  show)
+    a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; exit 1; }
+    jq . <<<"$a"; echo "-- history"; jq -Rc --arg id "$id" 'fromjson? | select(type == "object" and .id == $id)' "$LEDGER";;
+  file)
+    need gh; need timeout; title=${1:-}; bf=${2:-}
+    [ -n "$title" ] && [ -r "$bf" ] || { echo "usage: ask file <askN> <title> <body-file>" >&2; exit 1; }
+    # One critical section from the state check to the filed row: a concurrent drop waits, then finds the ask filed.
+    ask_file() { local a st tf rc found ex url n; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
+      st=$(jq -r .state <<<"$a"); ask_moves "$st" filed || { echo "refused: $id is $st; file does not apply" >&2; return 1; }
+      ask_ready "$a" "$id" || return 1
+      # the body that is checked is the body that is filed: a snapshot, never the caller's file
+      bs=$(mktemp "$H/scratch/file-body.XXXXXX") || return 1
+      trap 'rm -f "$bs"' EXIT   # bs is not local: the trap runs as the subshell exits
+      cat "$bf" > "$bs" || { echo "refused: cannot snapshot $bf; nothing filed" >&2; return 1; }
+      tf=$(mktemp "$H/scratch/file.XXXXXX"); { printf '%s\n\n' "$title"; cat "$bs"; } > "$tf"; "$0" check-public "$tf"; rc=$?; rm -f "$tf"
+      [ "$rc" = 0 ] || { echo "refused: the title or body failed check-public; nothing filed" >&2; return 1; }
+      found=$(timeout 30 gh issue list --repo "$REPO" --state all --limit 50 --search "$title in:title" --json number,title --jq '.[] | "\(.number)\t\(.title)"') \
+        || { echo "refused: the duplicate search failed; nothing filed" >&2; return 1; }
+      ex=$(awk -F'\t' -v t="$title" 'tolower($2) == tolower(t) {print "#" $1; exit}' <<<"$found")
+      [ -z "$ex" ] || { echo "refused: issue $ex already has this exact title" >&2; return 1; }
+      [ -z "$found" ] || { echo "similar titles:"; head -5 <<<"$found" | sed 's/^/  #/'; }
+      url=$(timeout 30 gh issue create --repo "$REPO" --title "$title" --body-file "$bs"); rc=$?
+      [ "$rc" != 124 ] || { echo "AMBIGUOUS: gh issue create timed out; GitHub may have filed it. Reconcile $id by hand; never retry" >&2; return 1; }
+      [ "$rc" = 0 ] || { echo "refused: gh issue create failed; the ledger is unchanged" >&2; return 1; }
+      n=$(grep -oE '/issues/[0-9]+' <<<"$url" | tail -1 | cut -d/ -f3)
+      [ -n "$n" ] || { echo "AMBIGUOUS: gh issue create printed no issue number ($url). Reconcile $id by hand; never retry" >&2; return 1; }
+      append_row "$(row --argjson n "$n" '{id: $id, at: $at, state: "filed", issue: $n}')" && echo "$id filed as #$n"; }
+    with_ledger ask_file;;
+  close-lane)
+    s=${1:-}; [[ "$s" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || { echo "usage: ask close-lane <slug>" >&2; exit 1; }
+    [ ! -d "$WT_ROOT/$s" ] || { echo "refused: lane $s still has its worktree; close-lane runs after teardown" >&2; exit 1; }
+    k=$(lead_rows | awk -v s="$s" '{x = substr($1, length(s) + 2)} index($1, s "-") == 1 && x ~ /^(plan|a[0-9]+|arc[0-9]+|closeout)$/ {print $1; exit}')
+    [ -z "$k" ] || { echo "refused: lead $k of lane $s is alive" >&2; exit 1; }
+    # Each report's last ASKS: line, in lane order (plan, then a<n>/arc<n> by n, then closeout); the latest mention wins.
+    # a<n> and arc<n> (a fresh retry beside an auto-continued arc) that disagree on an ask leave it unresolved.
+    rd="$H/reports"; ns=$(for f in "$rd/$s"-a*.md; do [ -f "$f" ] && basename "$f" .md; done | sed -nE "s/^$(printf '%s' "$s" | sed 's/[.]/\\./g')-(a|arc)([0-9]+)$/\2/p" | sort -nu)
+    mentions() { [ -f "$rd/$1.md" ] || return 0
+      { grep -E '^ASKS:' "$rd/$1.md" | tail -n 1; grep -oE '^PR #[0-9]+' "$rd/$1.md" | tail -n 1; } | awk '
+        /^PR #/ { pr = substr($2, 2); next }
+        { sub(/^ASKS:[ \t]*/, ""); n = split($0, seg, /;[ \t]*/)
+          for (i = 1; i <= n; i++) { k = split(seg[i], w, /[ \t]+/)
+            if (w[1] == "delivered") { for (j = 2; j <= k; j++) if (w[j] ~ /^ask[0-9]+$/) out[++m] = w[j] "\tD" }
+            else if (w[1] == "left" && w[2] == "out" && w[3] ~ /^ask[0-9]+$/) { r = seg[i]; sub(/^left[ \t]+out[ \t]+ask[0-9]+[ \t]*/, "", r); out[++m] = w[3] "\tL\t" (r == "" ? "no reason given" : r) } } }
+        END { for (i = 1; i <= m; i++) { split(out[i], f, "\t"); print out[i] (f[2] == "D" ? "\t" (pr == "" ? "?" : pr) : "") } }'; }
+    declare -A res=()
+    while IFS=$'\t' read -r i kd x; do [ "$kd" = D ] || res[$i]="$kd"$'\t'"$x"; done < <(mentions "$s-plan")   # a plan delivers nothing
+    for n in $ns; do
+      declare -A a1=() a2=()
+      while IFS=$'\t' read -r i kd x; do a1[$i]="$kd"$'\t'"$x"; done < <(mentions "$s-a$n")
+      while IFS=$'\t' read -r i kd x; do a2[$i]="$kd"$'\t'"$x"; done < <(mentions "$s-arc$n")
+      for i in "${!a1[@]}" "${!a2[@]}"; do
+        if [ -n "${a1[$i]:-}" ] && [ -n "${a2[$i]:-}" ] && [ "${a1[$i]%%$'\t'*}" != "${a2[$i]%%$'\t'*}" ]; then res[$i]="C"$'\t'"conflicting reports a$n/arc$n"
+        else res[$i]=${a2[$i]:-${a1[$i]}}; fi
+      done; unset a1 a2
+    done
+    while IFS=$'\t' read -r i kd x; do res[$i]="$kd"$'\t'"$x"; done < <(mentions "$s-closeout")
+    ask_close() { local id kd x; for id in $(fold | jq -r --arg s "$s" 'map(select(.state == "lane" and .lane == $s)) | .[].id'); do
+        kd=${res[$id]:-}; x=${kd#*$'\t'}; kd=${kd%%$'\t'*}
+        case "$kd" in
+        D) append_row "$(row --arg t "delivered in $s PR #$x" '{id: $id, at: $at, state: "done", note: $t}')" && echo "$id done (PR #$x)";;
+        *) case "$kd" in L|C) ;; *) x="not reported";; esac
+           append_row "$(row --arg t "lane $s closed without delivering it: $x" '{id: $id, at: $at, state: "open", note: $t}')" && echo "$id reopened: $x";;
+        esac
+      done; }
+    with_ledger ask_close;;
+  esac;;
 wt-new)
   need agent-worktree; install=$(cfg '.install // empty'); rc=0
   git -C "$ROOT" fetch -q origin "$TRUNK" || { echo "fetch failed"; exit 1; }
   for s in "$@"; do
     out="$H/wt/$s.out"; w="$WT_ROOT/$s"
     [ -d "$w" ] && { echo "$s: worktree exists at $w; refusing"; rc=1; continue; }
+    lane_reported "$s" && { echo "$s: lane $s has reports from an earlier run; a closed lane's slug is never reused"; rc=1; continue; }
     { echo "== $(now) new $s"; } >> "$out"
     # never pipe `agent-worktree new` into head: SIGPIPE kills it after the branch exists and before the directory does
     if ! (cd "$ROOT" && agent-worktree new "$s" --no-start) >> "$out" 2>&1; then echo "$s: agent-worktree new failed (see $out)"; rc=1; continue; fi
@@ -175,7 +396,12 @@ launch|resume)
   fi
   [ "$cmd" = resume ] && [ -z "$sid" ] && { echo "usage: resume <key> <slug> <account> <session-id>" >&2; exit 1; }
   p="$H/prompts/$k.md"; [ -f "$p" ] || { echo "orchy: no prompt $p" >&2; exit 1; }
-  "$0" check-text "$p" || exit 1
+  # Everything the lead reads passes the ban and the copy check; the owner's words reach it only as stored askN lines.
+  reads=("$p"); for b in _common _planner _implementer "$w"; do [ -f "$H/briefs/$b.md" ] && reads+=("$H/briefs/$b.md"); done
+  "$0" check-text "${reads[@]}" || exit 1
+  "$0" check-private "${reads[@]}" || exit 1
+  lb=(); [ -f "$H/briefs/$w.md" ] && lb=("$H/briefs/$w.md")
+  ask_lines "$w" "$p" "${lb[@]}" || exit 1
   d="$WT_ROOT/$w"; [ -d "$d" ] || { echo "orchy: no worktree $d" >&2; exit 3; }
   model=$(cfg '.leads.model // "opus"'); l1=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo "?")
   case "$(cfg '.leads.permission_mode // "auto"')" in
@@ -203,16 +429,16 @@ launch|resume)
   ( cd "$d" && exec 9>&- env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 setsid nohup claude-usage run "=$a" "${extra[@]}" -p "$(cat "$p")" --model "$model" "${perm[@]}" \
       --settings "$S" "${dirs[@]}" --verbose --output-format stream-json >> "$L" 2>> "$H/leads/$k.err" ) &
   pid=$!
-  record() { printf '%s %s %s %s %s %s %s\n' "$pid" "$(pstart "$pid")" "$a" "$(now)" "$weight" "prompts/$k.md" "$1" > "$H/leads/$k.started.tmp" && mv "$H/leads/$k.started.tmp" "$H/leads/$k.started"; }
+  record() { printf '%s %s %s %s %s %s %s %s\n' "$pid" "$(pstart "$pid")" "$a" "$(now)" "$weight" "prompts/$k.md" "$1" "$w" > "$H/leads/$k.started.tmp" && mv "$H/leads/$k.started.tmp" "$H/leads/$k.started"; }
   # recorded at once (exec keeps the pid and its start time), so a launcher killed during the wait still leaves the lead counted and stoppable
   record "?"
   for _ in 1 2 3 4 5 6 7 8 9 10; do alive "$pid" && break; sleep 0.2; done
   pg=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' '); record "${pg:-?}"
   exec 9>&-
-  echo "$k ${cmd}d on $a pid $pid pgid ${pg:-?} ($weight, $(cfg '.leads.permission_mode // "auto"'), load1 $l1)";;
+  echo "$k ${cmd%e}ed on $a pid $pid pgid ${pg:-?} ($weight, $(cfg '.leads.permission_mode // "auto"'), load1 $l1)";;
 stop)
   k=$1; f="$H/leads/$k.started"; [ -f "$f" ] || { echo "$k: no lead record"; exit 1; }
-  read -r pid st _ _ _ _ pg < "$f"; alive "$pid" "$st" || { echo "$k: not alive"; exit 0; }
+  read -r pid st _ _ _ _ pg _ < "$f"; alive "$pid" "$st" || { echo "$k: not alive"; exit 0; }
   # Claude Code starts each Bash-tool shell as its own session leader, so a group kill alone misses a hung tool process:
   # collect the whole tree first, while every child still points at its parent.
   mapfile -t tree < <(ps -eo pid=,ppid= | awk -v r="$pid" '{p[$1]=$2} END {s[r]=1; c=1; while (c) {c=0; for (x in p) if (!(x in s) && (p[x] in s)) {s[x]=1; c=1}}; for (x in s) print x}')
@@ -228,9 +454,11 @@ stop)
 say)
   need flock; k=$1; shift; t="$*"
   [[ "$k" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] && [ -n "$t" ] || { echo "usage: say <key> <text>" >&2; exit 1; }
-  [ -f "$H/leads/$k.started" ] && read -r pid st _ < "$H/leads/$k.started" && alive "$pid" "$st" || { echo "refused: no live lead $k; fold the note into its next prompt" >&2; exit 1; }
+  [ -f "$H/leads/$k.started" ] && read -r pid st _ _ _ _ _ lane _ < "$H/leads/$k.started" && alive "$pid" "$st" || { echo "refused: no live lead $k; fold the note into its next prompt" >&2; exit 1; }
   # leads quote their instructions into committed plans, so a note passes the same ban as a prompt
-  tf="$H/scratch/say.$$"; printf '%s\n' "$t" > "$tf"; "$0" check-text "$tf"; rc=$?; rm -f "$tf"; [ "$rc" = 0 ] || exit 1
+  # the sensitive pattern stays off: notes routinely name review findings
+  tf="$H/scratch/say.$$"; printf '%s\n' "$t" > "$tf"
+  { "$0" check-text "$tf" && "$0" check-public --no-sensitive "$tf" && ask_lines "${lane:-?}" --no-sensitive "$tf"; }; rc=$?; rm -f "$tf"; [ "$rc" = 0 ] || exit 1
   line=$(jq -nc --arg t "$(now)" --arg x "$t" '{at: $t, text: $x}')
   [ "$(printf '%s' "$line" | wc -c)" -le 3072 ] || { echo "refused: a note is at most 3 KiB once serialized; put the detail in a file under the lane's scratch dir and name it" >&2; exit 1; }
   ( flock -w 5 8 || exit 1; printf '%s\n' "$line" >&8 ) 8>>"$H/inbox/$k.jsonl" || { echo "refused: inbox lock busy" >&2; exit 1; }
@@ -259,6 +487,16 @@ snapshot)
   echo "-- inbox"; for f in "$H"/inbox/*.jsonl; do [ -f "$f" ] || continue
     c=$(cat "${f%.jsonl}.cursor" 2>/dev/null); [[ "$c" =~ ^[0-9]{1,15}$ ]] && c=$((10#$c)) || c=0
     n=$(tail -c +"$((c + 1))" "$f" | grep -c ''); [ "$n" -gt 0 ] && echo "$(basename "$f" .jsonl): $n undelivered"; done
+  # ids and states only: the owner's words stay in the ledger (ask show)
+  echo "-- asks"; live=$(lead_rows | cut -d' ' -f1)
+  fold | jq -r --argjson now "$(date +%s)" 'map(select(.state == "open" or .state == "lane")) | sort_by(.id | ltrimstr("ask") | tonumber? // 0) | .[]
+    | ($now - (.at | fromdateiso8601? // $now)) as $s
+    | "\(.id) \(.state) \(.lane // "-") \(if $s < 3600 then "\($s / 60 | floor)m" else "\($s / 3600 | floor)h" end)"
+      + (if .public then "" else " no-public-wording" end) + (if ([ '"$ASK_HOLD"' ] | length) > 0 then " waiting" else "" end)' |
+  while read -r i st l rest; do
+    if [ "$st" = lane ] && [ ! -d "$WT_ROOT/$l" ] && ! grep -qE "^$l-(plan|a[0-9]+|arc[0-9]+|closeout)$" <<<"$live"; then rest="$rest lane closed: run ask close-lane $l"; fi
+    echo "$i $st $l $rest"
+  done
   echo "-- watchers"; for f in "$H"/watch/*.pid; do [ -f "$f" ] || continue; n=$(basename "$f" .pid); if watcher_alive "$f"; then echo "alive $n pid $(cut -d' ' -f1 "$f")"; else echo "ended $n: $(tail -n 1 "$H/watch/$n.out" 2>/dev/null | cut -c1-120)"; fi; done
   echo "-- trunk"; if t=$(trunk_state); then f=$(tail -n +2 <<<"$t" | paste -sd, -); echo "$TRUNK ${t:0:8}: ${f:+RED }${f:-no failed trunk check}"; else echo "(trunk checks unreadable)"; fi
   echo "-- open PRs"; gh pr list --repo "$REPO" --state open --json number,title,headRefOid,mergeable,mergeStateStatus,isDraft,baseRefName --jq '.[]|"#\(.number) \(.headRefOid[0:8]) \(.mergeable) \(.mergeStateStatus) draft=\(.isDraft) -> \(.baseRefName) \(.title)"' 2>/dev/null || echo "(gh pr list failed)"
@@ -278,18 +516,38 @@ wait)
     lead_rows | awk '{print "alive", $1}'
     for f in "$H"/watch/*.pid; do watcher_alive "$f" && echo "watcher $(basename "$f" .pid)"; done
   }
-  prs() { gh pr list --repo "$REPO" --state open --json number,headRefOid,mergeable,isDraft --jq '.[]|"\(.number) \(.headRefOid[0:8]) \(.mergeable) \(.isDraft)"' 2>/dev/null; }
-  a=$(snap); pa=$(prs) || pa=unread; t0=$(date +%s); n=0
+  # GitHub every poll_sec, in three independent reads: one that fails keeps its baseline and never hides another's change.
+  read_src() { local o; case $1 in
+    prs) o=$(timeout 30 gh pr list --repo "$REPO" --state open --limit 1000 --json number,headRefOid,mergeable,isDraft --jq '.[]|"\(.number) \(.headRefOid[0:8]) \(.mergeable) \(.isDraft)"' 2>/dev/null) || return 1;;
+    issues) o=$(timeout 30 gh issue list --repo "$REPO" --state open --limit 1000 --json number,updatedAt --jq '.[]|"\(.number) \(.updatedAt)"' 2>/dev/null) || return 1;;
+    trunk) o=$(timeout 30 gh api "repos/$REPO/commits/$TRUNK" --jq .sha 2>/dev/null) && sha_ok "$o" || return 1;;
+    esac; sort <<<"$o"; }
+  tick=${ORCHY_WAIT_TICK:-20}; every=$(( $(cfg '.wait.poll_sec // 120') / tick )); [ "$every" -ge 1 ] || every=1
+  # Baselines persist in seen/, so what moved while nobody waited (the orchestrator handling the last event) fires at the
+  # first look. A source with no seen file is unknown: its first successful read fires. An exit advances only what it printed,
+  # so seen/ only ever holds reported values: a second concurrent wait can report a change twice, never lose one.
+  SEEN="$H/seen"; mkdir -p "$SEEN"
+  declare -A last=() new=() unread=(); srcs=(prs issues trunk)
+  for s in local "${srcs[@]}"; do [ -f "$SEEN/$s" ] && last[$s]=$(cat "$SEEN/$s"); done
+  report() { local s l
+    for s in "$@"; do l=$s; [ "$s" = local ] && l="reports/leads/watchers"
+      echo "CHANGED ($l):" || return 1; diff <(echo "${last[$s]:-}") <(echo "${new[$s]}") | grep '^[<>]' | head -20; done
+    for s in "$@"; do printf '%s\n' "${new[$s]}" > "$SEEN/.$s.$$" && mv "$SEEN/.$s.$$" "$SEEN/$s" || return 1; done; }
+  t0=$(date +%s); n=0
   while :; do
-    sleep 20; n=$((n+1)); b=$(snap)
-    if [ "$a" != "$b" ]; then echo "CHANGED (reports/leads/watchers):"; diff <(echo "$a") <(echo "$b") | grep '^[<>]' | head -20; exit 0; fi
-    if [ $((n % 6)) -eq 0 ] && pb=$(prs); then
-      [ "$pa" = unread ] && pa=$pb
-      # GitHub answers UNKNOWN while it recomputes mergeability; that is not a change
-      pa=$(awk 'NR==FNR{m[$1]=$3; next} ($1 in m) && $3=="UNKNOWN"{$3=m[$1]} {print}' <(echo "$pb") <(echo "$pa")); pb=$(awk 'NR==FNR{m[$1]=$3; next} ($1 in m) && $3=="UNKNOWN"{$3=m[$1]} {print}' <(echo "$pa") <(echo "$pb"))
-      [ "$pa" != "$pb" ] && { echo "CHANGED (PRs):"; diff <(echo "$pa") <(echo "$pb") | grep '^[<>]'; exit 0; }
+    sleep "$tick"; n=$((n+1)); changed=()
+    new[local]=$(snap); { [ -n "${last[local]+x}" ] && [ "${new[local]}" = "${last[local]}" ]; } || changed+=(local)
+    # the first tick polls too: local events re-arm the wait, and a burst of them must not starve GitHub
+    if [ "$n" = 1 ] || [ $((n % every)) -eq 0 ]; then
+      for s in "${srcs[@]}"; do
+        v=$(read_src "$s") || { unread[$s]=1; continue; }; unset "unread[$s]"
+        # GitHub answers UNKNOWN while it recomputes mergeability; that is not a change
+        [ "$s" = prs ] && [ -n "${last[$s]+x}" ] && v=$(awk 'NR==FNR{m[$1]=$3; next} ($1 in m) && $3=="UNKNOWN"{$3=m[$1]} {print}' <(echo "${last[$s]}") <(echo "$v"))
+        if [ -z "${last[$s]+x}" ] || [ "$v" != "${last[$s]}" ]; then changed+=("$s"); new[$s]=$v; fi
+      done
     fi
-    [ $(( $(date +%s) - t0 )) -ge "$LIMIT" ] && { echo "TIMEOUT after ${LIMIT}s, no change"; exit 0; }
+    if [ ${#changed[@]} -gt 0 ]; then report "${changed[@]}"; exit $?; fi
+    if [ $(( $(date +%s) - t0 )) -ge "$LIMIT" ]; then u="${!unread[*]}"; echo "TIMEOUT after ${LIMIT}s, no change${u:+; unreadable: $u}"; exit 0; fi
   done;;
 scan)
   need gh; n=$1
@@ -375,6 +633,8 @@ watch-merge)
   if [ $on_trunk = 1 ]; then "$0" teardown "$LANE" 2>&1 | tail -3; else echo "archived plan not on $TRUNK yet; teardown skipped"; fi;;
 arm-merge)
   N=$1; sha_ok "$2" || { echo "refused: pin must be the full 40-hex head sha"; exit 4; }
+  # the watcher reads reports/<name> and waits silently for its LEAD_DONE, so a report it cannot find would idle for hours
+  [ -f "$H/reports/${4:-}" ] || { echo "refused: no report $H/reports/${4:-}; pass its file name under reports/"; exit 4; }
   delay=${6:-0}; args=("$1" "$2" "$3" "$4"); [ -n "${5:-}" ] && args+=("$5")
   watcher_alive "$H/watch/merge-$N.pid" && { echo "refused: merge-$N is already armed (pid $(cut -d' ' -f1 "$H/watch/merge-$N.pid"))"; exit 1; }
   ( cd "$ROOT" && exec env ORCHY_ROOT="$ROOT" ORCHY_HOME="$H" setsid nohup bash -c "sleep $delay; exec bash '$(realpath "$0")' watch-merge $(printf '%q ' "${args[@]}")" ) > "$H/watch/merge-$N.out" 2>&1 &
@@ -402,9 +662,10 @@ teardown)
   [ -n "$pr" ] || { echo "$s: HEAD $head is not the head of a PR merged into $TRUNK from $b; refusing"; exit 2; }
   (cd "$ROOT" && git worktree remove --force "$W" && git branch -D "$b" >/dev/null && agent-worktree done "$q" --forget >/dev/null 2>&1; git worktree prune); echo "$s: hand-removed (branch $b at $head = merged PR #$pr)";;
 receipt)
-  need gh; python3 -I - "$H" "$REPO" "${1:-}" <<'PY'
+  need gh; python3 -I - "$H" "$REPO" "${1:-}" "$(fold | jq -c 'map_values({state, lane})')" <<'PY'
 import sys, os, re, json, glob, subprocess, datetime
 H, repo, want = sys.argv[1:4]
+asks = json.loads(sys.argv[4] or "{}")   # ask id -> {state, lane}; never the owner's words
 # keys are <lane>-plan, <lane>-a<n>, <lane>-closeout; only logs written before invocation markers need the name
 legacy_lane = lambda k: re.sub(r"-(plan|a\d+|closeout|shots[\w-]*)$", "", k)
 KINDS = (("in", "input_tokens", "inputTokens"), ("out", "output_tokens", "outputTokens"),
@@ -474,10 +735,11 @@ for lane in sorted(lanes):
         secs = L["end"] - datetime.datetime.strptime(L["start"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()
         wall = f"{int(secs // 3600)}h{int(secs % 3600 // 60):02d}m"
     tok = " ".join(f"{k} {v}" for k, v in L["tok"].items())
+    done_asks = sorted((i for i, a in asks.items() if a.get("state") == "done" and a.get("lane") == lane), key=lambda i: int(i[3:]) if i[3:].isdigit() else 0)
     part = f" + {L['partial']} unpriced tokens from killed runs" if L["partial"] else ""
     print(f"{lane}: ${L['cost']:.2f} API-equivalent{part}; {L['sessions']} session(s); tokens {tok}; wall {wall}; "
           f"PRs {' '.join(f'#{n}' for n in prs) or '-'} (merged {' '.join(f'#{n}' for n in merged) or '-'}); issues closed {issues}; "
-          f"failed arcs {failed}; Codex rounds {rounds}")
+          f"failed arcs {failed}; Codex rounds {rounds}; asks done {len(done_asks)}" + (f" ({' '.join(done_asks)})" if done_asks else ""))
     tot["cost"] += L["cost"]; tot["partial"] += L["partial"]
 if not want and len(lanes) > 1: print(f"total: ${tot['cost']:.2f} API-equivalent" + (f" + {tot['partial']} unpriced tokens" if tot["partial"] else ""))
 rec_file = os.path.join(os.environ.get("ORCHY_PROFILE_DIR") or os.path.expanduser("~/.agents/orchy/profile"), repo.replace("/", "-") + ".jsonl")

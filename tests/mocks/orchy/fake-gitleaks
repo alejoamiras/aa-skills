@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# fake-gitleaks: `stdin` exits 3 (orchy's leak code) on an AWS-key shape, else 0; the real binary costs ~0.4 s a call, so the
+# smoke runs it only where the secret check itself is under test
+[ "${1:-}" = stdin ] || { echo "fake-gitleaks: only stdin" >&2; exit 2; }
+grep -qE 'AKIA[0-9A-Z]{16}' && exit 3; exit 0

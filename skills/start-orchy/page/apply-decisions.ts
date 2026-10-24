@@ -4,7 +4,7 @@
 // A signed page writes the choices its signoff doc snapshotted; a later change to a choice holds that record until the page is signed again.
 // Reads $ORCHY_HOME/page/{decisions.json,lanes.json,public-notes.json}; a dry-run (no --apply) never calls gh.
 // --apply also records each signed record against its recommendation in ${ORCHY_PROFILE_DIR:-~/.agents/orchy/profile}/<owner>-<repo>.jsonl.
-import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, appendFileSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync, statSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 if (!process.env.ORCHY_HOME) { console.error("ORCHY_HOME is not set: export the orchestrator's state dir (the page data lives in $ORCHY_HOME/page)"); process.exit(2); }
@@ -30,10 +30,38 @@ function loadAnswers(p: string): Doc[] {
   return readdirSync(dir).filter(f => f.endsWith(".json")).map(f => { const j = JSON.parse(readFileSync(join(dir, f), "utf8")); const d = j.data && typeof j.data === "object" && "page" in j.data ? j.data : j; d.__id ??= f.replace(/\.json$/, ""); return d; });
 }
 const docs = loadAnswers(answersPath);
-// Owner notes land in public issue bodies: a note naming a reviewer, a finding or an advisory needs a reviewed
-// public wording in public-notes.json (record id -> text) before anything is written; nothing is written otherwise.
+// The owner's free text is private: an owner-authored field reaches a public issue only as its reviewed public wording in
+// public-notes.json (key "<record id>" for a note, "<record id>.<field>" otherwise), and only when it contributes to what
+// was signed; nothing is written while one is missing.
 const publicNotesPath = join(O, "public-notes.json");
 const publicNotes: Record<string, string> = existsSync(publicNotesPath) ? JSON.parse(readFileSync(publicNotesPath, "utf8")) : {};
+const pubKey = (id: string, k: string) => k === "note" ? id : `${id}.${k}`;
+// What goes out verbatim (public wordings, the orchestrator's `recorded`) must not copy the owner's words or carry a secret;
+// a check that cannot run refuses.
+{
+  const outbound = [...Object.entries(publicNotes), ...docs.filter(d => typeof d.recorded === "string" && d.recorded).map(d => [`${String(d.__id ?? d.id)}.recorded`, d.recorded as string])];
+  if (outbound.length) {
+    // the scratch copy holds the owner's words, so it lives beside the ledger, where leads never look, even if a kill skips rmSync
+    const asksDir = process.env.ORCHY_ASKS_DIR ?? join(homedir(), ".agents/orchy/asks");
+    mkdirSync(asksDir, { recursive: true, mode: 0o700 });
+    const dir = mkdtempSync(join(asksDir, ".outbound-")), files = outbound.map(([, t], i) => { const f = join(dir, `${i}.txt`); writeFileSync(f, t + "\n"); return f; });
+    // the owner's words: the ask ledger plus the raw page text, read before any wording replaces it
+    const asks = join(asksDir, `${REPO.replace("/", "-")}.jsonl`);
+    // existsSync reads an unsearchable directory as absence; only ENOENT is
+    try { statSync(asks, { throwIfNoEntry: false }); } catch { console.error("refused: the ask ledger cannot be read, so the copy check cannot run"); process.exit(2); }
+    const raw = docs.flatMap(d => [...["note", "result", "next_step", "except"].map(k => d[k]), ...Object.values(d.notes && typeof d.notes === "object" ? d.notes : {})]).filter((t): t is string => typeof t === "string" && t !== "");
+    const ledger = join(dir, "owner.jsonl");
+    writeFileSync(ledger, (existsSync(asks) ? readFileSync(asks, "utf8").replace(/\n?$/, "\n") : "") + raw.map(t => JSON.stringify({ id: "page", text: t })).join("\n") + "\n");
+    const ov = Bun.spawnSync(["bash", join(import.meta.dir, "../scripts/overlap.sh"), ledger, ...files]);
+    const copied = outbound.filter((_, i) => ov.stdout.toString().includes(`overlap: ${files[i]} `)).map(([k]) => k);
+    let gl = -1; try { gl = Bun.spawnSync([process.env.ORCHY_GITLEAKS ?? "gitleaks", "stdin", "--no-banner", "--redact", "--exit-code", "3", "-l", "error"], { stdin: new TextEncoder().encode(outbound.map(([, t]) => t).join("\n")) }).exitCode; } catch {}
+    rmSync(dir, { recursive: true, force: true });
+    if (ov.exitCode !== 0 && ov.exitCode !== 1) { console.error("refused: the copy check could not run"); process.exit(2); }
+    if (copied.length) { console.error(`refused: these public wordings copy six consecutive words of the owner's own: ${copied.join(", ")}`); process.exit(4); }
+    if (gl === 3) { console.error("refused: a public wording or a recorded text carries a secret (gitleaks)"); process.exit(4); }
+    if (gl !== 0) { console.error("refused: gitleaks could not run, so the secret check cannot"); process.exit(2); }
+  }
+}
 const SENSITIVE = S.sensitive ? new RegExp(S.sensitive, "i") : /\bfindings?\b|advisor(y|ies)|GHSA|vulnerab|exploit|\battack|confidential/i;
 // a home path, an account name or a page link never reaches a public issue, reviewed wording included: the scan's own
 // patterns through the scan's own engine (grep -E, line by line), so the two never disagree on what leaks
@@ -46,25 +74,26 @@ const leaks = (t: string) => {
   return rc === 0;
 };
 const held: string[] = [], leaked: string[] = [];
-// every free-text field that can reach an issue body goes through the same filter
+// every free-text field that can reach an issue body goes through the leak filter; the orchestrator's own `recorded`
+// keeps the sensitive-word hold, and owner-authored fields are held where they contribute (own, below)
 const FREE_TEXT = ["note", "result", "next_step", "recorded", "except"];
 for (const d of docs) {
   const id = String(d.__id ?? d.id ?? "").replace(/^choice-/, "");
   for (const k of FREE_TEXT) {
     if (typeof d[k] !== "string" || !d[k]) continue;
-    const pub = publicNotes[k === "note" ? id : `${id}.${k}`] ?? (k === "note" ? undefined : publicNotes[`${id}.${k}`]);
+    const pub = publicNotes[pubKey(id, k)];
     if (pub !== undefined) d[k] = pub;
-    else if (SENSITIVE.test(d[k])) held.push(`${id}.${k}`);
+    else if (k === "recorded" && SENSITIVE.test(d[k])) held.push(`${id}.${k}`);
     if (leaks(d[k])) leaked.push(`${id}.${k}`);
   }
   if (d.notes && typeof d.notes === "object") for (const k of Object.keys(d.notes)) {
     if (publicNotes[k] !== undefined) d.notes[k] = publicNotes[k];
-    else if (typeof d.notes[k] === "string" && SENSITIVE.test(d.notes[k])) held.push(k);
     if (typeof d.notes[k] === "string" && leaks(d.notes[k])) leaked.push(k);
   }
 }
 if (leaked.length) { console.error(`refused: these fields carry a local path, an account name or a page link (scan.leak or prompt_ban); reword them, or give a public wording in public-notes.json: ${[...new Set(leaked)].join(", ")}`); process.exit(4); }
-if (held.length) { console.error(`refused: these fields need a public wording in public-notes.json first (key "<record id>" for a note, "<record id>.<field>" for result, next_step, recorded or except): ${[...new Set(held)].join(", ")}`); process.exit(4); }
+// an owner-authored field that reaches an issue: its public wording, or a hold (values are already substituted above)
+const own = (id: string, k: string, v: string | undefined) => { if (v && publicNotes[pubKey(id, k)] === undefined) held.push(pubKey(id, k)); };
 const choices: Record<string, Doc> = {}, signoffs: Record<number, Doc> = {};
 for (const d of docs) { const id = d.__id ?? d.id; if (typeof id === "string" && id.startsWith("signoff-P")) signoffs[Number(id.slice(9))] = d; else if (d.id && d.kind) choices[d.id] = d; else if (typeof id === "string" && id.startsWith("choice-")) choices[id.slice(7)] = d; }
 
@@ -122,6 +151,7 @@ for (const p of pagesToWrite) {
     for (const c of D.charter) {
       const a = signed(s, c.id); if (a === HELD) continue; if (!a) { manual.push(`${c.id} unanswered though page 0 is signed`); continue; }
       ownerRow(s, p, c, a, c.recommend?.id ?? "", ch => ch === c.recommend?.id);
+      own(c.id, "note", a.note);
       const optText = c.options.find((o: any) => o.id === a.choice)?.text ?? "";
       for (const [key, tpl] of Object.entries<string>(c.writes_back)) {
         const targets = key === "*" ? c.applies_to : [Number(key)];
@@ -143,6 +173,8 @@ for (const p of pagesToWrite) {
     if (r.kind === "approve" && !r.check) ownerRow(s, p, r, a, "approve", ch => ch !== "change");
     else if (r.kind === "veto") ownerRow(s, p, r, a, "accept", ch => ch !== "strike");
     else if (r.kind === "visual" && a) ownerRow(s, p, r, a, r.recommend?.id ?? "", ch => ch === r.recommend?.id);
+    if (r.check) { own(r.id, "result", a?.result); own(r.id, "next_step", a?.next_step); }
+    else if (r.kind === "approve" || (r.kind === "veto" && a?.choice === "strike") || (r.kind === "visual" && a && (a.choice !== "read" || a.recorded))) own(r.id, "note", a?.note);
     if (r.check) { if (!a) { manual.push(`${r.id} (#${r.issue.join(", #")}) manual check not recorded; nothing written`); continue; } text = fill(wb.on_result, { date, result: a.result || "", next_step: a.next_step || "the orchestrator proposes one" }); }
     else if (r.kind === "approve") text = a?.choice === "change" ? fill(wb.on_change, { date, note: a.note || "" }) : fill(wb.on_approve, { date, note: a?.note || "" });
     else if (r.kind === "veto") text = a?.choice === "strike" ? fill(wb.on_strike, { date, note: a.note || "" }) : fill(wb.on_accept, { date });
@@ -152,14 +184,16 @@ for (const p of pagesToWrite) {
       if (a.choice === "read") { manual.push(`${r.id} (#${r.issue.join(", #")}) READ OPTION: the owner left it to the orchestrator; note: ${a.note || "(none)"}`); continue; }
       text = a.choice === "asis" ? fill(wb.on_as_is, { date, note: a.note || "(none)" }) : fill(wb.on_choice, { date, option: a.choice, option_text: wb.options?.[a.choice] ?? "", note: a.note || "(none)" });
     }
-    if (a?.note && r.kind === "approve" && a.choice !== "change") text = text.trimEnd() + `\n\nOwner note: ${a.note}\n`;
+    if (a?.note && r.kind === "approve" && a.choice !== "change") { own(r.id, "note", a.note); text = text.trimEnd() + `\n\nOwner note: ${a.note}\n`; }
     for (const n of r.issue) push(n, p.no, order++, text);
   }
 }
 
-// Pickup from the lane map
+if (held.length) { console.error(`refused: these fields reach an issue and need a public wording in public-notes.json first (key "<record id>" for a note, "<record id>.<field>" for result, next_step or recorded): ${[...new Set(held)].join(", ")}`); process.exit(4); }
+
+// Pickup from the lane map (an arc built only from owner asks has no issues)
 const arcOf: Record<number, { lane: any; arc: any }> = {};
-for (const lane of L.lanes) for (const arc of lane.arcs) for (const i of arc.issues) arcOf[i] = { lane, arc };
+for (const lane of L.lanes) for (const arc of lane.arcs) for (const i of arc.issues ?? []) arcOf[i] = { lane, arc };
 const noArc: Record<number, string> = {};
 for (const lane of L.lanes) for (const x of lane.no_arc ?? []) noArc[x.issue] = `${lane.slug}: ${x.reason}`;
 for (const x of L.unassigned ?? []) noArc[x.issue] = x.reason;
