@@ -4,7 +4,7 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd); K="$HERE/skills/start-orchy"; ORCHY="$K/scripts/orchy.sh"
 T=$(mktemp -d -t orchy-smoke-XXXX); trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
-export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_CAPACITY_ROOT="$T/cap" ORCHY_HOME="$T/cap/home" ORCHY_REPO=example/app ORCHY_WATCH_SLEEP=1 ORCHY_PROFILE_DIR="$T/profile"; mkdir -p "$MOCK_DIR"
+export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_CAPACITY_ROOT="$T/cap" ORCHY_HOME="$T/cap/home" ORCHY_REPO=example/app ORCHY_WATCH_SLEEP=1 ORCHY_PROFILE_DIR="$T/profile" ORCHY_ASKS_DIR="$T/asks"; mkdir -p "$MOCK_DIR"
 # a real local origin with a dev branch, so wt-new's fetch and reset work
 git init -q --bare "$T/origin.git"; git init -q -b dev "$T/repo"; git -C "$T/repo" remote add origin "$T/origin.git"
 (cd "$T/repo" && git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -q --allow-empty -m init && git push -q origin dev)
@@ -213,6 +213,61 @@ if ORCHY_HOME="$HR" "$ORCHY" receipt nope >/dev/null 2>&1; then fail "receipt of
 mkdir -p "$T/profile"; { jq -nc '{record:"a",category:"copy",agreed:false}'; jq -nc '{record:"a",category:"copy",agreed:true}'; jq -nc '{record:"b",category:"copy",agreed:false}'
   jq -nc '{record:"c",category:"layout",agreed:true,via_recommend_all:true}'; jq -nc '{record:"d",category:"layout",agreed:null}'; } > "$T/profile/example-app.jsonl"
 o=$(ORCHY_HOME="$HR" "$ORCHY" receipt q | tail -1); [ "$o" = "owner took the recommendation: copy 1/2; 1 taken all at once (not scored), 1 left to the orchestrator" ] || fail "owner-record footer: $o"
+# ask ledger: distinct ids under contention, transitions, a torn tail, the size cap
+LG="$T/asks/example-app.jsonl"; A() { "$ORCHY" ask "$@"; }
+for i in 1 2 3 4; do ( A add "parallel ask $i" > "$T/add.$i" ) & done; wait
+[ "$(cat "$T"/add.* | sort -u | grep -c '^ask[1-4]$')" = 4 ] || fail "parallel ask add reused an id: $(cat "$T"/add.*)"
+[ "$(stat -c %a "$T/asks") $(stat -c %a "$LG")" = "700 600" ] || fail "ledger modes: $(stat -c %a "$T/asks") $(stat -c %a "$LG")"
+o=$(A lane ask1 greet-1 "a repo change" 2>&1 || true); grep -q 'no public wording' <<<"$o" || fail "lane without a public wording: $o"
+A public ask1 "Add a greeting helper with a unit test" >/dev/null || fail "ask public"
+A lane ask1 greet-1 "a repo change" >/dev/null || fail "ask lane"
+A "done" ask1 "delivered in greet-1 PR #5" >/dev/null || fail "ask done"
+o=$(A "done" ask1 again 2>&1 || true); grep -q 'ask1 is done' <<<"$o" || fail "a refused transition does not name the state: $o"
+o=$(A note ask99 x 2>&1 || true); grep -q 'no ask99' <<<"$o" || fail "unknown id: $o"
+A public ask2 "Rename the config loader" >/dev/null || fail "public ask2"
+A lane ask2 cfg-1 "a repo change" >/dev/null || fail "lane ask2"
+A reopen ask2 "lane closed" >/dev/null || fail "reopen ask2"
+[ "$(A show ask2 | sed '/^-- history/,$d' | jq -r '.lane')" = null ] || fail "reopen kept the lane"
+A note ask3 "waiting: wording" >/dev/null; A public ask3 "Tidy the README" >/dev/null
+o=$(A lane ask3 docs-1 "a repo change" 2>&1 || true); grep -q 'waiting: wording' <<<"$o" || fail "lane ignored the wording gate: $o"
+A note ask3 "wording ok" >/dev/null; A public ask3 "Tidy the README intro" | grep -q "OK again" || fail "a new wording kept the old OK"
+A note ask3 "queued behind the docs lane" >/dev/null; A list | grep -q '^ask3 .*\[waiting\]' || fail "an ordinary note cleared the hold in list: $(A list)"
+o=$(A lane ask3 docs-1 "a repo change" 2>&1 || true); grep -q 'waiting: wording (changed)' <<<"$o" || fail "a replaced wording skipped the gate: $o"
+A note ask3 "wording ok" >/dev/null; A lane ask3 docs-1 "a repo change" >/dev/null || fail "lane after the OK"
+printf '{"id":"ask4","at":"2026-01-01T00:00:00Z","no' >> "$LG"
+[ "$(A add "after a torn tail")" = ask5 ] || fail "add after a torn tail"
+tail -n 1 "$LG" | jq -e '.id == "ask5"' >/dev/null || fail "the row after a torn tail does not start its own line"
+o=$(A add "$(head -c 17000 /dev/zero | tr '\0' a)" 2>&1 || true); grep -q '16 KiB' <<<"$o" || fail "16 KiB cap: $o"
+A list | grep -q '^ask2  open' || fail "list: $(A list)"; A list | grep -q '^ask1 ' && fail "list shows a done ask without --all"
+# the copy check: six words of the owner's text or later words, accents and curly quotes aside; template boilerplate exempt
+p=$(A add "Please add a greet function, my sister Ana asked for it last Tuesday")
+o=$(A public "$p" "Context: my sister Ana asked for it last Tuesday" 2>&1 || true); grep -q 'copies the owner' <<<"$o" || fail "public copied six words: $o"
+A public "$p" "Add greet(name); my sister Ana asked for help" >/dev/null || fail "a five-word overlap was refused"
+A said "$p" "Sí, añadí la función greet para mi hermana" >/dev/null
+o=$(A public "$p" 'Añadí la función “greet” para mi hermana' 2>&1 || true); grep -q 'copies the owner' <<<"$o" || fail "copied Spanish from a said row passed: $o"
+A add "You are a subagent. Don't run memo. Summarize this email for me" >/dev/null
+printf 'You are a subagent. Don'"'"'t run memo.\nRead your brief.\n' > "$T/boiler.md"; "$ORCHY" check-private "$T/boiler.md" >/dev/null || fail "template boilerplate counted as a copy"
+# check-public: leak, sensitive word, a planted secret (assembled here, so this file carries none), and failing closed
+printf 'see %s/someone/x\n' "/ho""me" > "$T/p1"; printf 'a vulnerability in login\n' > "$T/p2"; printf 'clean text\n' > "$T/p0"
+printf 'aws_access_key_id = %s\naws_secret_access_key = %s\n' "AKIA""QYLPMN5HHHFPZAM2" "wJalrXUtnFEMI/K7MDENG/bPxRfiCY""EXAMPLEKEYzz" > "$T/p3"
+"$ORCHY" check-public "$T/p0" >/dev/null || fail "check-public refused clean text"
+for n in 1 2 3; do if "$ORCHY" check-public "$T/p$n" >/dev/null 2>&1; then fail "check-public accepted p$n: $(cat "$T/p$n")"; fi; done
+"$ORCHY" check-public --no-sensitive "$T/p2" >/dev/null || fail "--no-sensitive still applied the sensitive pattern"
+o=$(ORCHY_GITLEAKS=no-such-gitleaks "$ORCHY" check-public "$T/p0" 2>&1; echo "rc=$?"); grep -q 'rc=2' <<<"$o" || fail "check-public without gitleaks did not refuse: $o"
+# ask file: every refusal leaves no create call; an exact title, a failed search and a failed create file nothing; one lock spans it all
+f=$(A add "File the flaky login test"); A public "$f" "The login test fails intermittently" >/dev/null
+printf '## Problem\nThe login test fails about one run in ten.\n' > "$T/body.md"; jq -n '[{number:9,title:"Flaky login test"}]' > "$MOCK_DIR/issues.json"; : > "$MOCK_DIR/created.log"
+for b in p1 p2 p3; do if A file "$f" "Login test is flaky" "$T/$b" >/dev/null 2>&1; then fail "file accepted body $b"; fi; done
+o=$(A file "$f" "flaky LOGIN test" "$T/body.md" 2>&1 || true); grep -q 'issue #9 already has this exact title' <<<"$o" || fail "exact title: $o"
+o=$(MOCK_GH_FAIL=search A file "$f" "Login test is flaky" "$T/body.md" 2>&1 || true); grep -q 'duplicate search failed' <<<"$o" || fail "search error: $o"
+[ ! -s "$MOCK_DIR/created.log" ] || fail "a refused file still called gh issue create"
+n0=$(wc -l < "$LG"); o=$(MOCK_GH_FAIL=create A file "$f" "Login test is flaky" "$T/body.md" 2>&1 || true)
+grep -q 'ledger is unchanged' <<<"$o" && [ "$(wc -l < "$LG")" = "$n0" ] || fail "a failed create changed the ledger: $o"
+( MOCK_GH_DELAY=2 A file "$f" "Login test is flaky" "$T/body.md" > "$T/file.out" 2>&1 ) & fp=$!; sleep 0.5
+o=$(A drop "$f" "never mind" 2>&1 || true); wait "$fp"
+grep -q "$f filed as #77" "$T/file.out" || fail "file: $(cat "$T/file.out")"; grep -q "$f is filed" <<<"$o" || fail "a drop during the create was not refused after it: $o"
+[ "$(A show "$f" | sed '/^-- history/,$d' | jq -r '"\(.state) \(.issue)"')" = "filed 77" ] || fail "filed state"
+rm -f "$MOCK_DIR/issues.json"
 # the page toolchain's own smoke
 [ -x "$K/page/smoke.sh" ] || fail "page/smoke.sh missing"; bash "$K/page/smoke.sh" > "$T/page.log" 2>&1 || { tail -n 20 "$T/page.log"; fail "page smoke"; }
 # no project names, home paths or roster names anywhere in the skill
