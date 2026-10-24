@@ -7,12 +7,13 @@ set -u
 export LC_ALL=C   # byte lengths, not characters: the cursor is a byte offset
 f=${1:?usage: inbox-hook.sh <inbox.jsonl>}; c="${f%.jsonl}.cursor"
 size=$(stat -c %s "$f" 2>/dev/null) || exit 0
-cur=$(cat "$c" 2>/dev/null); [[ "$cur" =~ ^[0-9]+$ ]] || cur=0
+cursor() { cur=$(cat "$c" 2>/dev/null); [[ "$cur" =~ ^[0-9]{1,15}$ ]] && cur=$((10#$cur)) || cur=0; }   # 10#: "08" is octal to bash
+cursor
 [ "$size" -gt "$cur" ] || exit 0
 # a subagent's tool call fires this hook too; a note it consumed would never reach the lead
 [ -z "$(jq -r '.agent_id // empty' 2>/dev/null)" ] || exit 0
 exec 8>>"$f"; flock -w 5 8 || exit 0
-cur=$(cat "$c" 2>/dev/null); [[ "$cur" =~ ^[0-9]+$ ]] || cur=0
+cursor
 rest=$(tail -c +"$((cur + 1))" "$f" | head -c 65536; echo .); rest=${rest%.}
 # Whole lines only, at most 4 KiB, never fewer than one (say caps a line at 3 KiB); a line without its newline is still being written.
 take=""

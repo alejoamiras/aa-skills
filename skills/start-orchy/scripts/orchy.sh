@@ -44,10 +44,14 @@ case "$cmd" in help|-h|--help) usage 0;; home) echo "$H"; exit 0;; esac
 cfg() { jq -r "$1" "$CFG"; }
 lcl() { [ -f "$LOCAL" ] && jq -r "$1" "$LOCAL" || echo ""; }
 TRUNK=$(cfg '.trunk // "main"')
+# A lead runs the hook its settings file names, so nobody but the owner may write here. chmod tightens a fresh or loose
+# home (a umask would also reach wt-new's product checkout), but cannot undo what another user planted while it was loose.
+under=0; ds=("$H"); [ "$(dirname "$H")" = "$CAP" ] && under=1 && ds+=("$CAP")
+for d in "${ds[@]}"; do [ ! -L "$d" ] && [ -O "$d" ] || { echo "orchy: $d must be a directory owned by $(id -un), not a symlink" >&2; exit 1; }; done
+f=$({ find "$H" -maxdepth 2 ! -user "$(id -u)"; [ $under = 0 ] || find "$CAP" -maxdepth 1 ! -user "$(id -u)"; } 2>/dev/null | head -1)
+[ -z "$f" ] || { echo "orchy: $f belongs to another user; refusing a home someone else could write" >&2; exit 1; }
 mkdir -p "$H"/{briefs,prompts,reports,leads,watch,wt,scratch,inbox,page/shots,page/build}
-# A lead runs the hook its settings file names, so nobody but the owner may write here. chmod on the directories, not a
-# umask: a umask would also reach wt-new's checkout and install inside the product worktree.
-chmod 700 "$H"; [ "$(dirname "$H")" = "$CAP" ] && [ -O "$CAP" ] && chmod 700 "$CAP"
+chmod 700 "$H"; [ $under = 1 ] && chmod 700 "$CAP"
 WT_ROOT="$ROOT/$(cfg '.worktrees.root // ".claude/worktrees"')"
 ARCHIVE=$(cfg '.plans.archive // "implementations-plan/archive"')
 now() { date -u +%FT%TZ; }
@@ -64,24 +68,25 @@ refuse_account() {
   if [ -f "$LOCAL" ] && jq -e --arg a "$a" '.accounts.never // [] | index($a)' "$LOCAL" >/dev/null; then echo "refused: $a is on accounts.never" >&2; return 1; fi
   if [ -f "$LOCAL" ] && [ "$(jq -r '.accounts.use // [] | length' "$LOCAL")" != "0" ] && ! jq -e --arg a "$a" '.accounts.use | index($a)' "$LOCAL" >/dev/null; then echo "refused: $a is not on accounts.use" >&2; return 1; fi
 }
-all_rows() { # <home> <acct> <weight>: every live lead of every program under the capacity root
+all_rows() { # <acct> <weight> <home>: every live lead of every program under the capacity root
   local f pid st acct t weight
-  for f in "$CAP"/*/leads/*.started; do [ -f "$f" ] || continue; read -r pid st acct t weight _ < "$f"; alive "$pid" "$st" && echo "${f%/leads/*} $acct ${weight:-heavy}"; done
+  for f in "$CAP"/*/leads/*.started; do [ -f "$f" ] || continue; read -r pid st acct t weight _ < "$f"; alive "$pid" "$st" && echo "$acct ${weight:-heavy} ${f%/leads/*}"; done
 }
 cap_root_ok() { # the root holds every home and the spawn lock: whoever can rename or replace it can swap a lead's hook settings
   local p
   [ -d "$CAP" ] && [ ! -L "$CAP" ] && [ -O "$CAP" ] || { echo "refused: capacity root $CAP must be a directory owned by $(id -un), not a symlink" >&2; return 1; }
   for p in "$CAP" "$(dirname "$CAP")"; do case "$(stat -c %a "$p")" in *[2367]?|*[2367]) echo "refused: $p is group- or world-writable" >&2; return 1;; esac; done
+  case "$(basename "$H")" in .*) echo "refused: a home named $(basename "$H") is invisible to the capacity count" >&2; return 1;; esac
   [ "$(cd "$(dirname "$H")" && pwd -P)" = "$(cd "$CAP" && pwd -P)" ] || { echo "refused: $H is not directly under the capacity root $CAP (ORCHY_CAPACITY_ROOT); its leads would escape the shared cap" >&2; return 1; }
 }
 refuse_cap() { # refuse_cap <account> <heavy|light>: the strictest cap among this program and the programs already running on the account
   local a=$1 w=$2 cap c n rows home
   cap=$(lcl ".accounts.${w}_per_account // empty")
-  rows=$(all_rows | awk -v a="$a" -v w="$w" '$2==a && $3==w')
-  for home in $(awk '{print $1}' <<<"$rows" | sort -u); do
+  rows=$(all_rows | awk -v a="$a" -v w="$w" '$1==a && $2==w')
+  while IFS= read -r home; do
     c=$(jq -r ".accounts.${w}_per_account // empty" "$home/local.json" 2>/dev/null); [ -n "$c" ] || continue
     { [ -z "$cap" ] || [ "$c" -lt "$cap" ]; } && cap=$c
-  done
+  done < <([ -n "$rows" ] && cut -d' ' -f3- <<<"$rows" | sort -u)
   [ -n "$cap" ] || return 0
   n=$(grep -c . <<<"$rows")
   [ "$n" -lt "$cap" ] || { echo "refused: $a already runs $n $w lead(s) across programs (cap $cap); --force-cap only on the owner's word" >&2; return 1; }
@@ -182,9 +187,9 @@ stop)
   mapfile -t tree < <(ps -eo pid=,ppid= | awk -v r="$pid" '{p[$1]=$2} END {s[r]=1; c=1; while (c) {c=0; for (x in p) if (!(x in s) && (p[x] in s)) {s[x]=1; c=1}}; for (x in s) print x}')
   ids=(); for q in "${tree[@]}"; do ids+=("$q:$(pstart "$q")"); done
   [ "${pg:-?}" = "$pid" ] && kill -TERM -- "-$pg" 2>/dev/null
-  for e in "${ids[@]}"; do kill -TERM "${e%%:*}" 2>/dev/null; done
+  for e in "${ids[@]}"; do [ -n "${e#*:}" ] && [ "$(pstart "${e%%:*}")" = "${e#*:}" ] && kill -TERM "${e%%:*}" 2>/dev/null; done
   for _ in 1 2 3 4 5 6 7 8 9 10; do left=0; for e in "${ids[@]}"; do [ "$(pstart "${e%%:*}")" = "${e#*:}" ] && left=1; done; [ "$left" = 0 ] && break; sleep 0.5; done
-  for e in "${ids[@]}"; do [ "$(pstart "${e%%:*}")" = "${e#*:}" ] && kill -KILL "${e%%:*}" 2>/dev/null; done
+  for e in "${ids[@]}"; do [ -n "${e#*:}" ] && [ "$(pstart "${e%%:*}")" = "${e#*:}" ] && kill -KILL "${e%%:*}" 2>/dev/null; done
   echo "$k: stopped pid $pid and ${#ids[@]} process(es) in its tree";;
 say)
   need flock; k=$1; shift; t="$*"
@@ -218,7 +223,7 @@ snapshot)
     echo "alive $k $a $w pid $p ${flag}quiet $((q / 60))m progress $pa ${newest:+$newest}"
   done
   echo "-- inbox"; for f in "$H"/inbox/*.jsonl; do [ -f "$f" ] || continue
-    c=$(cat "${f%.jsonl}.cursor" 2>/dev/null); [[ "$c" =~ ^[0-9]+$ ]] || c=0
+    c=$(cat "${f%.jsonl}.cursor" 2>/dev/null); [[ "$c" =~ ^[0-9]{1,15}$ ]] && c=$((10#$c)) || c=0
     n=$(tail -c +"$((c + 1))" "$f" | grep -c ''); [ "$n" -gt 0 ] && echo "$(basename "$f" .jsonl): $n undelivered"; done
   echo "-- watchers"; for f in "$H"/watch/*.pid; do [ -f "$f" ] || continue; n=$(basename "$f" .pid); if watcher_alive "$f"; then echo "alive $n pid $(cut -d' ' -f1 "$f")"; else echo "ended $n: $(tail -n 1 "$H/watch/$n.out" 2>/dev/null | cut -c1-120)"; fi; done
   echo "-- open PRs"; gh pr list --repo "$REPO" --state open --json number,title,headRefOid,mergeable,mergeStateStatus,isDraft,baseRefName --jq '.[]|"#\(.number) \(.headRefOid[0:8]) \(.mergeable) \(.mergeStateStatus) draft=\(.isDraft) -> \(.baseRefName) \(.title)"' 2>/dev/null || echo "(gh pr list failed)"
@@ -379,7 +384,7 @@ for sid, ss in by_sid.items():
         r = ss[done[-1]]["result"]; L["cost"] += float(r.get("total_cost_usd") or 0)
         for mu in (r.get("modelUsage") or {}).values():
             for name, _, camel in KINDS: L["tok"][name] += int(mu.get(camel) or 0)
-    for s in ss[(done[-1] + 1) if done else 0:]:
+    for s in ss[done[-1] if done else 0:]:
         L["partial"] += sum(int(u.get(snake) or 0) for u in s["after"].values() for _, snake, _ in KINDS)
     for s in ss:
         L["keys"].add(s["key"]); L["end"] = max(L["end"], s["mtime"])

@@ -48,7 +48,8 @@ jq '.leads.permission_mode="bypass"' "$ORCHY_HOME/orchy.json" > "$tmp" && cp "$O
 cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/x-b1.md"; "$ORCHY" launch x-b1 x acct-b >/dev/null || fail "bypass launch"
 tail -1 "$MOCK_DIR/cu.log" | grep -q -- '--dangerously-skip-permissions' || fail "bypass mode flag missing"; cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"
 # the cap holds across every program under the capacity root, at the strictest cap among them
-H2="$T/cap/home2"; mkdir -p "$H2/prompts"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$H2/"; cp "$ORCHY_HOME/prompts/x-plan.md" "$H2/prompts/y-a1.md"
+# the second home's name carries a space, which must not shift the fields its rows are counted by
+H2="$T/cap/home 2"; mkdir -p "$H2/prompts"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$H2/"; cp "$ORCHY_HOME/prompts/x-plan.md" "$H2/prompts/y-a1.md"
 o=$(ORCHY_HOME="$H2" "$ORCHY" launch y-a1 x acct-a 2>&1 || true); grep -q 'across programs (cap 2)' <<<"$o" || fail "a second program exceeded the account cap: $o"
 jq '.accounts.heavy_per_account=1' "$H2/local.json" > "$tmp" && mv "$tmp" "$H2/local.json"
 ORCHY_HOME="$H2" "$ORCHY" launch y-a1 x acct-d >/dev/null || fail "second program launch"
@@ -57,18 +58,23 @@ o=$("$ORCHY" launch x-d1 x acct-d 2>&1 || true); grep -q 'cap 1' <<<"$o" || fail
 # concurrent launches never pass the cap together
 for k in x-c1 x-c2 x-c3; do ( "$ORCHY" launch "$k" x acct-c > "$T/$k.out" 2>&1 ) & done; wait
 [ "$(cat "$T"/x-c?.out | grep -c ' on acct-c pid ')" = 2 ] || fail "concurrent launches broke the cap: $(cat "$T"/x-c?.out)"
-# a home outside the capacity root, or a writable root, is refused
+# a home outside the capacity root, a dot-named or symlinked home, or a writable root, is refused
+mkdir -p "$T/cap/.hid/prompts"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$T/cap/.hid/"; cp "$ORCHY_HOME/prompts/x-plan.md" "$T/cap/.hid/prompts/z.md"
+o=$(ORCHY_HOME="$T/cap/.hid" "$ORCHY" launch z x acct-e 2>&1 || true); grep -q 'invisible to the capacity count' <<<"$o" || fail "a dot-named home launched: $o"
+ln -s "$T/cap/.hid" "$T/cap/lnk"; o=$(ORCHY_HOME="$T/cap/lnk" "$ORCHY" snapshot 2>&1 || true); grep -q 'not a symlink' <<<"$o" || fail "a symlinked home was used: $o"
 mkdir -p "$T/elsewhere/h/prompts"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$T/elsewhere/h/"; cp "$ORCHY_HOME/prompts/x-plan.md" "$T/elsewhere/h/prompts/z.md"
 o=$(ORCHY_HOME="$T/elsewhere/h" "$ORCHY" launch z x acct-e 2>&1 || true); grep -q 'not directly under the capacity root' <<<"$o" || fail "a home outside the root launched: $o"
 chmod 775 "$T"; o=$("$ORCHY" launch z x acct-e 2>&1 || true); chmod 700 "$T"; grep -q 'group- or world-writable' <<<"$o" || fail "a writable root parent was accepted: $o"
 # stop ends the lead and the session-leader grandchild a group kill would miss
 read -r sp _ < "$ORCHY_HOME/leads/x-b1.started"; gc=$(cat "$MOCK_DIR/gc.$sp"); [ -d "/proc/$gc" ] || fail "mock grandchild $gc not running"
 "$ORCHY" stop x-b1 | grep -q 'stopped' || fail "stop"; sleep 0.5; [ ! -d "/proc/$sp" ] && [ ! -d "/proc/$gc" ] || fail "stop left $sp or grandchild $gc alive"
-MOCK_SESSION=00000000-0000-4000-8000-000000000002 "$ORCHY" launch x-b1 x acct-b >/dev/null || fail "relaunch after stop"
+MOCK_LEAD_SECS=120 MOCK_SESSION=00000000-0000-4000-8000-000000000002 "$ORCHY" launch x-b1 x acct-b >/dev/null || fail "relaunch after stop"
 [ "$("$ORCHY" session-id x-b1)" = 00000000-0000-4000-8000-000000000002 ] || fail "session-id is not the latest run's"
 [ "$(grep -c orchy_invocation "$ORCHY_HOME/leads/x-b1.log")" = 2 ] || fail "the relaunch did not append to the log"
 # say + inbox-hook: one delivery per note, to the lead's thread only, whole lines, cursor moved only after the write
 IB="$ORCHY_HOME/inbox/x-b1.jsonl"; hook() { bash "$K/scripts/inbox-hook.sh" "$IB"; }; ctx() { jq -r '.hookSpecificOutput.additionalContext'; }
+printf '{"a":1}\n{"at":"x","text":"eighth byte"}\n' > "$T/ib.jsonl"; printf '08\n' > "$T/ib.cursor"
+[ "$(bash "$K/scripts/inbox-hook.sh" "$T/ib.jsonl" <<<'{}' 2>&1 | ctx)" = "ORCHY-STEER: eighth byte" ] || fail "a zero-padded cursor was not read as decimal"
 "$ORCHY" say x-b1 "$(printf 'café\nsecond line')" | grep -q 'queued' || fail "say"
 [ -z "$(hook <<<'{"agent_id":"a1"}')" ] || fail "a subagent's tool call consumed a note"
 o=$("$ORCHY" snapshot 2>&1); grep -q "^x-b1: 1 undelivered" <<<"$o" || fail "snapshot does not count the undelivered note: $o"
@@ -151,10 +157,10 @@ for f in "$T"/cap/*/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/nul
 HR="$T/cap/rcpt"; mkdir -p "$HR"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HR/"; cp -r "$HERE/tests/mocks/orchy/receipt/." "$HR/"
 jq -n '{closingIssuesReferences:[{number:3},{number:4}]}' > "$MOCK_DIR/pr-21.json"; jq -n '{state:"CLOSED"}' > "$MOCK_DIR/issue-3.json"; jq -n '{state:"OPEN"}' > "$MOCK_DIR/issue-4.json"
 o=$(ORCHY_HOME="$HR" "$ORCHY" receipt) || fail "receipt: $o"
-grep -qF 'r: $1.50 API-equivalent + 27 unpriced tokens from killed runs; 2 session(s); tokens in 150 out 20 cache-read 1500 cache-write 60;' <<<"$o" || fail "receipt cost or tokens: $o"
+grep -qF 'r: $1.50 API-equivalent + 37 unpriced tokens from killed runs; 2 session(s); tokens in 150 out 20 cache-read 1500 cache-write 60;' <<<"$o" || fail "receipt cost or tokens: $o"
 grep -qF 'PRs #21 #22 (merged #21); issues closed 1 (#3); failed arcs 1; Codex rounds 2' <<<"$o" || fail "receipt joins: $o"
 grep -qF 'q: $0.25 API-equivalent; 1 session(s); tokens in 1 out 2 cache-read 3 cache-write 4; wall ?;' <<<"$o" || fail "receipt of a log without markers: $o"
-grep -qF 'total: $1.75 API-equivalent + 27 unpriced tokens' <<<"$o" || fail "receipt total: $o"
+grep -qF 'total: $1.75 API-equivalent + 37 unpriced tokens' <<<"$o" || fail "receipt total: $o"
 [ "$(ORCHY_HOME="$HR" "$ORCHY" receipt q | wc -l)" = 1 ] || fail "receipt <lane> printed other lanes"
 if ORCHY_HOME="$HR" "$ORCHY" receipt nope >/dev/null 2>&1; then fail "receipt of an unknown lane succeeded"; fi
 # the page toolchain's own smoke
