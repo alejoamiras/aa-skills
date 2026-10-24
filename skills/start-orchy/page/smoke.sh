@@ -112,13 +112,14 @@ mkdir -p "$T/prof2"; printf '{"record":"torn"' > "$T/prof2/example-app.jsonl"
 ORCHY_PROFILE_DIR="$T/prof2" PATH="$G:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans10" --apply > /dev/null 2>&1 || fail "apply with taken_all"
 jq -Rr 'fromjson? | select(.record == "P1-01") | .via_recommend_all' "$T/prof2/example-app.jsonl" | grep -qx true || fail "take-all not read from the signoff, or the torn line ate the row: $(cat "$T/prof2/example-app.jsonl")"
 ok "take-all provenance from the signoff; a torn owner-record line keeps the next row"
-# the scan's leak pattern holds a note that would put a local path in a public issue
-echo '{"scan":{"leak":"/m[n]t/[a-z]"}}' > "$ORCHY_HOME/orchy.json"; cp -r "$P/answers" "$T/ans11"
+# scan.leak and prompt_ban hold free text bound for a public issue, with grep -E's own semantics (per line, POSIX classes)
+echo '{"scan":{"leak":"/m[n]t/[a-z]"}}' > "$ORCHY_HOME/orchy.json"; echo '{"prompt_ban":"^acct-z([[:space:]]|$)"}' > "$ORCHY_HOME/local.json"; cp -r "$P/answers" "$T/ans11"
 jq --arg n "see /m""nt/x for the file" '.note=$n' "$T/ans11/decisions/choice-P1-01.json" > "$T/c.json" && mv "$T/c.json" "$T/ans11/decisions/choice-P1-01.json"
-if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans11" > "$T/apply12.out" 2>&1; then fail "a note with a local path passed"; fi
-grep -q 'carry a local path.*P1-01.note' "$T/apply12.out" || fail "leaked note not named: $(cat "$T/apply12.out")"
-rm "$ORCHY_HOME/orchy.json"
-ok "a note that matches scan.leak is refused before anything is written"
+jq --arg e $'Hold the footer\nacct-z' '.except=$e' "$T/ans11/decisions/signoff-P1.json" > "$T/c.json" && mv "$T/c.json" "$T/ans11/decisions/signoff-P1.json"
+if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans11" > "$T/apply12.out" 2>&1; then fail "free text with a local path or a banned name passed"; fi
+grep 'carry a local path' "$T/apply12.out" | grep -q 'P1-01.note' && grep 'carry a local path' "$T/apply12.out" | grep -q 'signoff-P1.except' || fail "leaked fields not named: $(cat "$T/apply12.out")"
+rm "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json"
+ok "free text matching scan.leak or prompt_ban is refused before anything is written"
 
 # a choice changed after signing is held, never written; an except note holds the page; a sensitive result holds everything
 cp -r "$P/answers" "$T/ans2"; jq '.choice="A"' "$T/ans2/decisions/choice-P1-01.json" > "$T/c.json" && mv "$T/c.json" "$T/ans2/decisions/choice-P1-01.json"

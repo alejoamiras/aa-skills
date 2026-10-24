@@ -35,10 +35,16 @@ const docs = loadAnswers(answersPath);
 const publicNotesPath = join(O, "public-notes.json");
 const publicNotes: Record<string, string> = existsSync(publicNotesPath) ? JSON.parse(readFileSync(publicNotesPath, "utf8")) : {};
 const SENSITIVE = S.sensitive ? new RegExp(S.sensitive, "i") : /\bfindings?\b|advisor(y|ies)|GHSA|vulnerab|exploit|\battack|confidential/i;
-// a home path, an account name or a page link never reaches a public issue, reviewed wording included: the scan's own patterns
+// a home path, an account name or a page link never reaches a public issue, reviewed wording included: the scan's own
+// patterns through the scan's own engine (grep -E, line by line), so the two never disagree on what leaks
 const readCfg = (f: string) => existsSync(join(process.env.ORCHY_HOME!, f)) ? JSON.parse(readFileSync(join(process.env.ORCHY_HOME!, f), "utf8")) : {};
-const LEAKS = [readCfg("orchy.json").scan?.leak, readCfg("local.json").prompt_ban].filter((r): r is string => typeof r === "string" && r !== "").map(r => new RegExp(r));
-const leaks = (t: string) => LEAKS.some(r => r.test(t));
+const LEAK = [readCfg("orchy.json").scan?.leak, readCfg("local.json").prompt_ban].filter((r): r is string => typeof r === "string" && r !== "").map(r => `(${r})`).join("|");
+const leaks = (t: string) => {
+  if (!LEAK) return false;
+  const rc = Bun.spawnSync(["grep", "-qE", "--", LEAK], { stdin: new TextEncoder().encode(t) }).exitCode;
+  if (rc !== 0 && rc !== 1) { console.error("refused: scan.leak or prompt_ban is not a valid grep -E pattern"); process.exit(2); }
+  return rc === 0;
+};
 const held: string[] = [], leaked: string[] = [];
 // every free-text field that can reach an issue body goes through the same filter
 const FREE_TEXT = ["note", "result", "next_step", "recorded", "except"];
