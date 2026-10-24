@@ -4,7 +4,7 @@ set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # ORCHY_SMOKE_TMP moves the scratch dir without moving Chrome's TMPDIR, whose socket path must stay short.
 T=$(mktemp -d "${ORCHY_SMOKE_TMP:-${TMPDIR:-/tmp}}/orchy-page-smoke.XXXXXX"); trap 'rm -rf "$T"' EXIT
-export ORCHY_HOME="$T/home"; unset ORCHY_PAGE_BUILD DROP_PAGES UNSIGNED
+export ORCHY_HOME="$T/home" ORCHY_PROFILE_DIR="$T/profile"; unset ORCHY_PAGE_BUILD DROP_PAGES UNSIGNED
 P="$ORCHY_HOME/page"; B="$P/build"
 mkdir -p "$P" "$T/bin"; cp -R "$HERE/fixtures/." "$P/"
 # A dry-run must never reach GitHub: this gh records the call and fails.
@@ -30,6 +30,7 @@ ok "check-brief.py: $(cat "$T/brief.out")"
 python3 -I "$HERE/add-page.py" "$HERE/fixtures/page-2.json" > "$T/add.out" || fail "add-page.py page 2"
 ok "add-page.py: $(cat "$T/add.out")"
 ls "$P"/decisions.json.bak-p2-* "$P"/shots/manifest.json.bak-p2-* >/dev/null || fail "add-page.py made no backups"
+jq -e '.pages[] | select(.no == 2) | .added_at | fromdateiso8601' "$P/decisions.json" >/dev/null || fail "add-page.py did not stamp added_at"
 sum=$(cksum < "$P/decisions.json")
 if python3 -I "$HERE/add-page.py" "$HERE/fixtures/page-2.json" 2> "$T/re.err"; then fail "add-page.py re-added page 2"; fi
 grep -q 'exists already' "$T/re.err" || fail "re-add refused for the wrong reason: $(cat "$T/re.err")"
@@ -42,7 +43,10 @@ PY
 if python3 -I "$HERE/add-page.py" "$T/bad.json" 2> "$T/bad.err"; then fail "add-page.py accepted a bad spec"; fi
 if ! { grep -q 'must end with -<option key>' "$T/bad.err" && grep -q 'is banned' "$T/bad.err"; }; then fail "bad spec refused for the wrong reason: $(cat "$T/bad.err")"; fi
 [ "$(cksum < "$P/decisions.json")" = "$sum" ] || fail "a refused add-page.py changed decisions.json"
-ok "add-page.py refuses a re-added page, a bad option suffix and a banned caption"
+jq '.records[0].category="vibes"' "$HERE/fixtures/page-2.json" | jq '.page.no=9 | .records[0].id="P9-01" | .records[0].page_no=9 | .records |= .[:1] | .manifest_rows=[]' > "$T/cat.json"
+if python3 -I "$HERE/add-page.py" "$T/cat.json" 2> "$T/cat.err"; then fail "add-page.py accepted an unknown category"; fi
+grep -q 'category must be one of' "$T/cat.err" || fail "unknown category not named: $(cat "$T/cat.err")"
+ok "add-page.py refuses a re-added page, a bad option suffix, a banned caption and an unknown category"
 
 python3 -I "$HERE/gen.py" 2> "$T/gen.err" || { cat "$T/gen.err" >&2; fail "gen.py after add-page"; }
 grep -q '"no": 2, "name": "Settings list"' "$B/decisions.html" || fail "page 2 missing from the build"
@@ -66,6 +70,7 @@ grep -q '^dry-run: pages signed 1; issues 2; written 0; skipped 0' "$T/apply.out
 V="$P/apply-preview"
 if ! { grep -q '^<!-- orchy:decision -->$' "$V/1.md" && grep -q '\*\*Option B\*\*. The title and the date share one line.' "$V/1.md"; }; then fail "preview 1: $(cat "$V/1.md")"; fi
 if ! { grep -q '^Lane .home-1., arc-1 (home screen polish); wave 1.$' "$V/1.md" && grep -q '^- P1-01: the header pick sets the layout$' "$V/1.md"; }; then fail "pickup 1: $(cat "$V/1.md")"; fi
+grep -qF 'Gates before the PR opens: `tests/e2e/home.spec.ts`; a visible change ships with its after shot in the PR.' "$V/1.md" || fail "pickup gates: $(cat "$V/1.md")"
 grep -q '\*\*approved\*\*' "$V/2.md" || fail "preview 2: $(cat "$V/2.md")"
 if grep -q 'Owner note' "$V/1.md"; then fail "an empty note leaked into preview 1"; fi
 cp "$V/1.md" "$T/1.first"; PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$P/answers/decisions" > /dev/null 2>&1 || fail "apply with the export dir itself"
@@ -97,13 +102,33 @@ jq -r '[.labels[].name]|join(",")' "$T/issues/1.json" | grep -q 'owner-decision'
 jq -e '."1".lane=="home-1"' "$P/apply-receipts.json" >/dev/null || fail "no receipt for #1"
 PATH="$G:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans1" --apply > "$T/apply3.out" 2>&1 || fail "second apply"
 grep -q 'written 0; skipped 2' "$T/apply3.out" || fail "second apply rewrote unchanged blocks: $(head -1 "$T/apply3.out")"
-ok "apply --apply: marker block below the original body, lane label, receipts, idempotent"
+R="$ORCHY_PROFILE_DIR/example-app.jsonl"
+[ "$(wc -l < "$R")" = 2 ] || fail "two applies did not leave one owner-record row per record: $(cat "$R")"
+jq -se 'map({(.record): [.chosen, .agreed, .explicit, .via_recommend_all]}) | add == {"P1-01": ["B", true, true, false], "P1-02": ["approve", true, false, false]}' "$R" >/dev/null || fail "owner-record rows: $(cat "$R")"
+ok "apply --apply: marker block below the original body, lane label, receipts, idempotent, one owner-record row per record"
+# take-all provenance is the signoff's, not the live doc's; a torn last line in the owner record swallows no row
+cp -r "$P/answers" "$T/ans10"; jq '.taken_all=["P1-01"]' "$T/ans10/decisions/signoff-P1.json" > "$T/c.json" && mv "$T/c.json" "$T/ans10/decisions/signoff-P1.json"
+mkdir -p "$T/prof2"; printf '{"record":"torn"' > "$T/prof2/example-app.jsonl"
+ORCHY_PROFILE_DIR="$T/prof2" PATH="$G:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans10" --apply > /dev/null 2>&1 || fail "apply with taken_all"
+jq -Rr 'fromjson? | select(.record == "P1-01") | .via_recommend_all' "$T/prof2/example-app.jsonl" | grep -qx true || fail "take-all not read from the signoff, or the torn line ate the row: $(cat "$T/prof2/example-app.jsonl")"
+ok "take-all provenance from the signoff; a torn owner-record line keeps the next row"
+# scan.leak and prompt_ban hold free text bound for a public issue, with grep -E's own semantics (per line, POSIX classes)
+echo '{"scan":{"leak":"/m[n]t/[a-z]"}}' > "$ORCHY_HOME/orchy.json"; echo '{"prompt_ban":"^acct-z([[:space:]]|$)"}' > "$ORCHY_HOME/local.json"; cp -r "$P/answers" "$T/ans11"
+jq --arg n "see /m""nt/x for the file" '.note=$n' "$T/ans11/decisions/choice-P1-01.json" > "$T/c.json" && mv "$T/c.json" "$T/ans11/decisions/choice-P1-01.json"
+jq --arg e $'Hold the footer\nacct-z' '.except=$e' "$T/ans11/decisions/signoff-P1.json" > "$T/c.json" && mv "$T/c.json" "$T/ans11/decisions/signoff-P1.json"
+if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans11" > "$T/apply12.out" 2>&1; then fail "free text with a local path or a banned name passed"; fi
+grep 'carry a local path' "$T/apply12.out" | grep -q 'P1-01.note' && grep 'carry a local path' "$T/apply12.out" | grep -q 'signoff-P1.except' || fail "leaked fields not named: $(cat "$T/apply12.out")"
+rm "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json"
+ok "free text matching scan.leak or prompt_ban is refused before anything is written"
 
 # a choice changed after signing is held, never written; an except note holds the page; a sensitive result holds everything
 cp -r "$P/answers" "$T/ans2"; jq '.choice="A"' "$T/ans2/decisions/choice-P1-01.json" > "$T/c.json" && mv "$T/c.json" "$T/ans2/decisions/choice-P1-01.json"
 rm -rf "$P/apply-preview"
 if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans2" > "$T/apply4.out" 2>&1; then fail "apply with a changed choice exited 0"; fi
 grep -q 'P1-01 changed after page 1 was signed (signed B, now A)' "$T/apply4.out" || fail "a changed choice was not held: $(cat "$T/apply4.out")"
+cp -r "$P/answers" "$T/ans5"; rm "$T/ans5/decisions/choice-P1-01.json"
+if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans5" > "$T/apply4b.out" 2>&1; then fail "apply with a signed choice deleted after signing exited 0"; fi
+grep -q 'P1-01 changed after page 1 was signed (signed B, now the default)' "$T/apply4b.out" || fail "a deleted signed choice was not held: $(cat "$T/apply4b.out")"
 [ ! -e "$P/apply-preview/1.md" ] || fail "the held record's issue got a preview"
 grep -q '#1 NOT WRITTEN' "$T/apply4.out" || fail "the held record's issue was not reported as held: $(cat "$T/apply4.out")"
 # an approve record changed to "change" after signing is held, never approved by default, and its issue is not touched
@@ -114,6 +139,7 @@ if PATH="$G:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans6" --apply > 
 grep -q 'P1-02 changed after page 1 was signed (signed approve, now change)' "$T/apply8.out" || fail "held approve not reported: $(cat "$T/apply8.out")"
 [ ! -e "$T/issues/2.json" ] || fail "a held approve record's issue was written: $(jq -r .body "$T/issues/2.json")"
 [ -e "$T/issues/1.json" ] || fail "the unaffected issue was not written"
+jq -e 'select(.record == "P1-02")' "$R" | grep -q change && fail "a held record reached the owner record"
 # a null snapshot is the signed default even when a doc appears later
 cp -r "$P/answers" "$T/ans7"; jq -n '{"__id":"choice-P1-02","page":"decisions","page_no":1,"id":"P1-02","kind":"approve","issue":[2],"choice":"change","note":"later","at":"2026-01-07T10:00:00.000Z","by":"u_example"}' > "$T/ans7/decisions/choice-P1-02.json"
 PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans7" > /dev/null 2>&1 || fail "apply with a post-signing doc on a null snapshot"

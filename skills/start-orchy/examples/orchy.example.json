@@ -39,7 +39,9 @@
     "codex_model": "gpt-6.1-sol",
     "codex_model_short": "sol",
     "codex_effort": "high",
-    "tier_default": "mid"
+    "tier_default": "mid",
+    "permission_mode": "auto",
+    "stall_after_min": 20
   },
   "never_open": [],
   "delegations": [],

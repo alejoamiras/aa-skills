@@ -184,7 +184,7 @@ lb.addEventListener("click", e => { if (e.target === lb) lb.close(); });
 
 /* ---------- state + render ---------- */
 const state = { choices: {}, signoffs: {} };
-let db = null, uid = null, writable = true;
+let db = null, uid = null, writable = true, loaded = false;
 const line = (id, text, err) => { const el = document.getElementById(id); if (!el) return; el.textContent = text; el.classList.toggle("err", !!err); };
 const banner = document.getElementById("store-banner");
 const showBanner = t => { banner.textContent = t; banner.classList.remove("hide"); };
@@ -226,8 +226,13 @@ function renderPage(p){
   const its = pageItems(p.no), st = pageStatus(p);
   document.getElementById(`sgrid-${p.no}`).innerHTML = its.map(i => { const c = state.choices[i.id]; const v = c ? label(i, c.choice) : defaultLabel(i); return `<div><span class="eyebrow">${i.id}</span><span class="${c||needsChoice(i)?"":"muted"}">${esc(v)}</span></div>`; }).join("");
   const btn = document.querySelector(`button.sign[data-page="${p.no}"]`);
-  btn.disabled = st.open.length > 0 || !db || !writable;
-  const ex = document.getElementById(`except-${p.no}`); if (st.s && typeof st.s.except === "string" && document.activeElement !== ex && !ex.value) ex.value = st.s.except;
+  btn.disabled = st.open.length > 0 || !db || !writable || !loaded;
+  const ex = document.getElementById(`except-${p.no}`);
+  if (st.s && typeof st.s.except === "string") {
+    // a settled note must not ride along on the next signature, even from a focused box; a note the owner rewrote stays
+    if (!st.s.except_resolved && !ex.value && document.activeElement !== ex) { ex.value = st.s.except; ex.dataset.filled = st.s.except; }
+    else if (st.s.except_resolved && ex.value === ex.dataset.filled) { ex.value = ""; delete ex.dataset.filled; }
+  }
   const box = document.getElementById(`signoff-${p.no}`); box.classList.toggle("done", st.signed);
   if (st.s) line(`sline-${p.no}`, st.stale ? `Signed ${fmt(st.s.at)}, but an answer changed since. Sign again to update the record.` : st.open.length ? `Signed ${fmt(st.s.at)}, but ${st.open.map(i => i.id).join(", ")} was added since. Choose it, then sign again.` : `Signed ${fmt(st.s.at)}${st.s.except ? " · except: " + st.s.except : ""}.`, st.stale || st.open.length > 0);
   else line(`sline-${p.no}`, st.open.length ? `Choose ${st.open.map(i => i.id).join(", ")} first.` : "Signing approves every item on this page as shown above.");
@@ -244,7 +249,7 @@ function renderAll(){
   PAGES.forEach(p => { const sg = pageStatus(p).signed; document.getElementById(`page-${p.no}`).hidden = hide && sg; document.getElementById(`toc-${p.no}`).hidden = hide && sg; });
   const hiddenN = hide ? PAGES.filter(p => pageStatus(p).signed).length : 0; const hs = document.getElementById("hidden-signed"); if (hs) { hs.textContent = hiddenN ? `${hiddenN} signed page${hiddenN === 1 ? "" : "s"} hidden; untick "Hide signed pages" to see them.` : ""; hs.hidden = !hiddenN; }
   document.getElementById("cnt").textContent = `${made} of ${choiceItems.length} choices made · ${checksDone} of ${checks.length} manual checks recorded · ${signed} of ${PAGES.length} pages signed`;
-  const canWrite = db && writable;
+  const canWrite = db && writable && loaded;
   document.getElementById("take-recs").disabled = !canWrite || made === choiceItems.length;
   document.getElementById("sign-all").disabled = !canWrite || choiceItems.some(i => !state.choices[i.id]) || signed === PAGES.length;
   document.getElementById("final-line").textContent = signed === PAGES.length ? "Every page is signed. The orchestrator writes each decision into its issue and starts wave 1." : `${PAGES.length - signed} page${PAGES.length - signed === 1 ? "" : "s"} still unsigned.`;
@@ -256,7 +261,10 @@ renderAll();
 const busy = new Set();
 async function write(docId, data, lineId){
   if (!db) { line(lineId, "Answers can't be saved from this view.", true); return false; }
-  if (busy.has(docId)) return false; busy.add(docId);
+  // a write before the first snapshot would sign or answer over answers this view has not seen yet
+  if (!loaded) { line(lineId, "Still loading the saved answers; try again in a moment.", true); return false; }
+  if (busy.has(docId)) { line(lineId, "Still saving the last answer; try again in a moment.", true); return false; }
+  busy.add(docId);
   try { if (data === null) await db.doc(`${COLL}/${docId}`).delete(); else await db.doc(`${COLL}/${docId}`).set(data); return true; }
   catch (e) { line(lineId, `Couldn't save: ${e?.code||""} ${e?.message||e}`.trim(), true); return false; }
   finally { busy.delete(docId); }
@@ -272,10 +280,11 @@ async function saveChoice(it, choice, extra = {}){
 }
 async function signPage(p){
   const its = pageItems(p.no), choices = {}, notes = {};
-  its.forEach(i => { const c = state.choices[i.id]; choices[i.id] = c?.choice ?? null; if (c?.note) notes[i.id] = c.note; });
+  const taken_all = [];
+  its.forEach(i => { const c = state.choices[i.id]; choices[i.id] = c?.choice ?? null; if (c?.note) notes[i.id] = c.note; if (c?.viaRecommendAll) taken_all.push(i.id); });
   const except = document.getElementById(`except-${p.no}`).value.trim();
   line(`sline-${p.no}`, "Recording…");
-  return write(`signoff-P${p.no}`, { page: DATA.page, page_no: p.no, name: p.name, head: DATA.head, choices, notes, except, changed: its.filter(i => state.choices[i.id]).length, at: new Date().toISOString(), by: uid }, `sline-${p.no}`);
+  return write(`signoff-P${p.no}`, { page: DATA.page, page_no: p.no, name: p.name, head: DATA.head, choices, notes, taken_all, except, changed: its.filter(i => state.choices[i.id]).length, at: new Date().toISOString(), by: uid }, `sline-${p.no}`);
 }
 document.addEventListener("click", async e => {
   const act = e.target.closest("button.act");
@@ -333,7 +342,7 @@ document.addEventListener("click", async e => {
   db.collection(COLL).onSnapshot(snap => {
     const choices = {}, signoffs = {};
     snap.docs.forEach(doc => { const id = doc.id, v = doc.data(); if (id.startsWith("choice-")) choices[id.slice(7)] = v; else if (id.startsWith("signoff-P")) signoffs[Number(id.slice(9))] = v; });
-    state.choices = choices; state.signoffs = signoffs; renderAll();
+    state.choices = choices; state.signoffs = signoffs; loaded = true; renderAll();
   }, err => showBanner(`Store error: ${err?.code||""} ${err?.message||""}`.trim()));
   renderAll();
 })();

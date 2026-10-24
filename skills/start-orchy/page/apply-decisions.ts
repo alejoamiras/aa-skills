@@ -3,8 +3,10 @@
 // Usage: bun apply-decisions.ts --answers <dir-or-json> [--apply] [--force]
 // A signed page writes the choices its signoff doc snapshotted; a later change to a choice holds that record until the page is signed again.
 // Reads $ORCHY_HOME/page/{decisions.json,lanes.json,public-notes.json}; a dry-run (no --apply) never calls gh.
-import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+// --apply also records each signed record against its recommendation in ${ORCHY_PROFILE_DIR:-~/.agents/orchy/profile}/<owner>-<repo>.jsonl.
+import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 if (!process.env.ORCHY_HOME) { console.error("ORCHY_HOME is not set: export the orchestrator's state dir (the page data lives in $ORCHY_HOME/page)"); process.exit(2); }
 const O = join(process.env.ORCHY_HOME, "page");
 const MARK = "<!-- orchy:decision -->";
@@ -33,7 +35,17 @@ const docs = loadAnswers(answersPath);
 const publicNotesPath = join(O, "public-notes.json");
 const publicNotes: Record<string, string> = existsSync(publicNotesPath) ? JSON.parse(readFileSync(publicNotesPath, "utf8")) : {};
 const SENSITIVE = S.sensitive ? new RegExp(S.sensitive, "i") : /\bfindings?\b|advisor(y|ies)|GHSA|vulnerab|exploit|\battack|confidential/i;
-const held: string[] = [];
+// a home path, an account name or a page link never reaches a public issue, reviewed wording included: the scan's own
+// patterns through the scan's own engine (grep -E, line by line), so the two never disagree on what leaks
+const readCfg = (f: string) => existsSync(join(process.env.ORCHY_HOME!, f)) ? JSON.parse(readFileSync(join(process.env.ORCHY_HOME!, f), "utf8")) : {};
+const LEAK = [readCfg("orchy.json").scan?.leak, readCfg("local.json").prompt_ban].filter((r): r is string => typeof r === "string" && r !== "").map(r => `(${r})`).join("|");
+const leaks = (t: string) => {
+  if (!LEAK) return false;
+  const rc = Bun.spawnSync(["grep", "-qE", "--", LEAK], { stdin: new TextEncoder().encode(t) }).exitCode;
+  if (rc !== 0 && rc !== 1) { console.error("refused: scan.leak or prompt_ban is not a valid grep -E pattern"); process.exit(2); }
+  return rc === 0;
+};
+const held: string[] = [], leaked: string[] = [];
 // every free-text field that can reach an issue body goes through the same filter
 const FREE_TEXT = ["note", "result", "next_step", "recorded", "except"];
 for (const d of docs) {
@@ -43,12 +55,15 @@ for (const d of docs) {
     const pub = publicNotes[k === "note" ? id : `${id}.${k}`] ?? (k === "note" ? undefined : publicNotes[`${id}.${k}`]);
     if (pub !== undefined) d[k] = pub;
     else if (SENSITIVE.test(d[k])) held.push(`${id}.${k}`);
+    if (leaks(d[k])) leaked.push(`${id}.${k}`);
   }
   if (d.notes && typeof d.notes === "object") for (const k of Object.keys(d.notes)) {
     if (publicNotes[k] !== undefined) d.notes[k] = publicNotes[k];
     else if (typeof d.notes[k] === "string" && SENSITIVE.test(d.notes[k])) held.push(k);
+    if (typeof d.notes[k] === "string" && leaks(d.notes[k])) leaked.push(k);
   }
 }
+if (leaked.length) { console.error(`refused: these fields carry a local path, an account name or a page link (scan.leak or prompt_ban); reword them, or give a public wording in public-notes.json: ${[...new Set(leaked)].join(", ")}`); process.exit(4); }
 if (held.length) { console.error(`refused: these fields need a public wording in public-notes.json first (key "<record id>" for a note, "<record id>.<field>" for result, next_step, recorded or except): ${[...new Set(held)].join(", ")}`); process.exit(4); }
 const choices: Record<string, Doc> = {}, signoffs: Record<number, Doc> = {};
 for (const d of docs) { const id = d.__id ?? d.id; if (typeof id === "string" && id.startsWith("signoff-P")) signoffs[Number(id.slice(9))] = d; else if (d.id && d.kind) choices[d.id] = d; else if (typeof id === "string" && id.startsWith("choice-")) choices[id.slice(7)] = d; }
@@ -65,6 +80,15 @@ const recorded: string[] = [];
 // What a signoff snapshotted is what was signed. Three outcomes per record: a doc (answered), undefined (signed as the
 // default; a doc added after signing does not count), or HELD (changed after signing: nothing of its issues is written).
 const HELD: Doc = { __held: true };
+// Owner record: only what a signoff snapshotted counts; `explicit` is false for a default the owner signed without touching.
+// A take-all pick is kept but never scored as agreement, and a `read` (left to the orchestrator, or a note instead of an option) scores neither way.
+const ownerRows: Doc[] = [];
+const ownerRow = (s: Doc, p: any, r: any, a: Doc | undefined, recommended: string, agreeOn: (c: string) => boolean) => {
+  if (!(s.choices && typeof s.choices === "object" && r.id in s.choices)) return;
+  const chosen: string = a?.choice ?? recommended;
+  ownerRows.push({ repo: REPO, page: p.no, record: r.id, kind: r.kind ?? "charter", category: r.category ?? "other", recommended, chosen,
+    agreed: chosen === "read" ? null : agreeOn(chosen), explicit: s.choices[r.id] !== null, via_recommend_all: Array.isArray(s.taken_all) ? s.taken_all.includes(r.id) : a?.viaRecommendAll === true, note: a?.note ?? "", signed_at: s.at ?? "" });
+};
 const heldIssues = new Set<number>();
 const heldPages: number[] = [];
 const pagesToWrite = D.pages.filter((p: any) => signoffs[p.no]).filter((p: any) => {
@@ -83,8 +107,8 @@ const signed = (s: Doc, id: string): Doc | undefined => {
   if (!(s.choices && typeof s.choices === "object" && id in s.choices)) return live;   // a signoff without a snapshot: the live doc
   const snap = s.choices[id];
   if (snap === null) return undefined;
-  if (live && live.choice !== snap) {
-    manual.push(`${id} changed after page ${s.page_no} was signed (signed ${snap}, now ${live.choice}); held until the page is signed again`);
+  if ((live?.choice ?? null) !== snap) {
+    manual.push(`${id} changed after page ${s.page_no} was signed (signed ${snap}, now ${live?.choice ?? "the default"}); held until the page is signed again`);
     const rec = D.records.find((r: any) => r.id === id) ?? charterById[id]; for (const n of rec?.issue ?? rec?.applies_to ?? []) heldIssues.add(n);
     return HELD;
   }
@@ -97,6 +121,7 @@ for (const p of pagesToWrite) {
   if (p.no === 0) {
     for (const c of D.charter) {
       const a = signed(s, c.id); if (a === HELD) continue; if (!a) { manual.push(`${c.id} unanswered though page 0 is signed`); continue; }
+      ownerRow(s, p, c, a, c.recommend?.id ?? "", ch => ch === c.recommend?.id);
       const optText = c.options.find((o: any) => o.id === a.choice)?.text ?? "";
       for (const [key, tpl] of Object.entries<string>(c.writes_back)) {
         const targets = key === "*" ? c.applies_to : [Number(key)];
@@ -115,6 +140,9 @@ for (const p of pagesToWrite) {
   }
   for (const r of D.records.filter((r: any) => r.page_no === p.no)) {
     const a = signed(s, r.id), wb = r.writes_back; let text = ""; if (a === HELD) continue;
+    if (r.kind === "approve" && !r.check) ownerRow(s, p, r, a, "approve", ch => ch !== "change");
+    else if (r.kind === "veto") ownerRow(s, p, r, a, "accept", ch => ch !== "strike");
+    else if (r.kind === "visual" && a) ownerRow(s, p, r, a, r.recommend?.id ?? "", ch => ch === r.recommend?.id);
     if (r.check) { if (!a) { manual.push(`${r.id} (#${r.issue.join(", #")}) manual check not recorded; nothing written`); continue; } text = fill(wb.on_result, { date, result: a.result || "", next_step: a.next_step || "the orchestrator proposes one" }); }
     else if (r.kind === "approve") text = a?.choice === "change" ? fill(wb.on_change, { date, note: a.note || "" }) : fill(wb.on_approve, { date, note: a?.note || "" });
     else if (r.kind === "veto") text = a?.choice === "strike" ? fill(wb.on_strike, { date, note: a.note || "" }) : fill(wb.on_accept, { date });
@@ -146,7 +174,8 @@ function pickup(n: number): string {
   const lines = [`## Pickup`, ``, `Lane \`${a.lane.slug}\`, ${a.arc.id}${a.arc.name ? ` (${a.arc.name})` : ""}; wave ${wave}.`, ``];
   if (pre.length) lines.push(`Prerequisites:`, ...pre, ``);
   if (holds.length) lines.push(`Merge holds: ${holds.join(", ")} (decision page 0).`, ``);
-  if ((a.arc.e2e ?? []).length || a.arc.visible) lines.push(`Gates before the PR opens: ${(a.arc.e2e ?? []).map((g: string) => `\`${g}\``).join(", ")}${a.arc.visible ? "; a visible change ships with its after shot in the PR" : ""}.`);
+  const gates = [(a.arc.e2e ?? []).map((g: string) => `\`${g}\``).join(", "), a.arc.visible ? "a visible change ships with its after shot in the PR" : ""].filter(Boolean);
+  if (gates.length) lines.push(`Gates before the PR opens: ${gates.join("; ")}.`);
   return lines.join("\n") + "\n";
 }
 const sectionsFor = (n: number, withPickup = true) => { const segs = out[n].sort((x, y) => x.page - y.page || x.order - y.order); const [first, ...rest] = segs; return `${MARK}\n${first.text.trimEnd()}\n${rest.map(s => "\n" + s.text.replace(/^## Decision\n+/, "").trimEnd() + "\n").join("")}${withPickup ? "\n" + pickup(n) : ""}`; };
@@ -177,6 +206,16 @@ for (const n of issues) {
   await sh(edit); receipts[n] = { at: new Date().toISOString(), lane, pages: [...new Set(out[n].map(s => s.page))] }; written++;
   writeFileSync(receiptsPath, JSON.stringify(receipts, null, 1));
   await Bun.sleep(1200);
+}
+if (APPLY && ownerRows.length) {
+  // append-only, last row per record wins; a row equal to the record's live one is not appended again
+  const dir = process.env.ORCHY_PROFILE_DIR ?? join(homedir(), ".agents/orchy/profile"), file = join(dir, `${REPO.replace("/", "-")}.jsonl`);
+  const live: Record<string, string> = {}, text = existsSync(file) ? readFileSync(file, "utf8") : "";
+  for (const l of text.split("\n")) { try { const o = JSON.parse(l); live[o.record] = l; } catch {} }
+  const fresh = ownerRows.map(o => JSON.stringify(o)).filter(l => live[JSON.parse(l).record] !== l);
+  // a torn last line would otherwise swallow the first appended row
+  const lead = text && !text.endsWith("\n") ? "\n" : "";
+  if (fresh.length) { mkdirSync(dir, { recursive: true, mode: 0o700 }); appendFileSync(file, lead + fresh.join("\n") + "\n", { mode: 0o600 }); }
 }
 console.log(`${APPLY ? "applied" : "dry-run"}: pages signed ${pagesToWrite.map((p: any) => p.no).join(",") || "none"}; issues ${issues.length}; written ${written}; skipped ${skipped}; previews in ${prevDir}`);
 if (recorded.length) console.log("RECORDED READ OPTIONS (written from their recorded field):\n- " + recorded.join("\n- "));
