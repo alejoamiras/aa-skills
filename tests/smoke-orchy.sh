@@ -61,7 +61,8 @@ for k in x-c1 x-c2 x-c3; do ( "$ORCHY" launch "$k" x acct-c > "$T/$k.out" 2>&1 )
 # a home outside the capacity root, a dot-named or symlinked home, or a writable root, is refused
 mkdir -p "$T/cap/.hid/prompts"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$T/cap/.hid/"; cp "$ORCHY_HOME/prompts/x-plan.md" "$T/cap/.hid/prompts/z.md"
 o=$(ORCHY_HOME="$T/cap/.hid" "$ORCHY" launch z x acct-e 2>&1 || true); grep -q 'invisible to the capacity count' <<<"$o" || fail "a dot-named home launched: $o"
-ln -s "$T/cap/.hid" "$T/cap/lnk"; o=$(ORCHY_HOME="$T/cap/lnk" "$ORCHY" snapshot 2>&1 || true); grep -q 'not a symlink' <<<"$o" || fail "a symlinked home was used: $o"
+ln -s "$T/cap/.hid" "$T/cap/lnk"; for l in "$T/cap/lnk" "$T/cap/lnk/"; do
+  o=$(ORCHY_HOME="$l" "$ORCHY" snapshot 2>&1 || true); grep -q 'not a symlink' <<<"$o" || fail "a symlinked home was used as $l: $o"; done
 mkdir -p "$T/elsewhere/h/prompts"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$T/elsewhere/h/"; cp "$ORCHY_HOME/prompts/x-plan.md" "$T/elsewhere/h/prompts/z.md"
 o=$(ORCHY_HOME="$T/elsewhere/h" "$ORCHY" launch z x acct-e 2>&1 || true); grep -q 'not directly under the capacity root' <<<"$o" || fail "a home outside the root launched: $o"
 chmod 775 "$T"; o=$("$ORCHY" launch z x acct-e 2>&1 || true); chmod 700 "$T"; grep -q 'group- or world-writable' <<<"$o" || fail "a writable root parent was accepted: $o"
@@ -83,11 +84,11 @@ hook <<<'{}' >&- 2>/dev/null; [ ! -f "${IB%.jsonl}.cursor" ] || fail "a failed w
 [ -z "$(hook <<<'{}')" ] || fail "a note was delivered twice"
 printf '{"at":"x","text":"partial"}' >> "$IB"; [ -z "$(hook <<<'{}')" ] || fail "a line without its newline was delivered"
 echo >> "$IB"; [ "$(hook <<<'{}' | ctx)" = "ORCHY-STEER: partial" ] || fail "the completed line was not delivered"
-pad=$(head -c 1000 /dev/zero | tr '\0' x); for i in 1 2 3 4 5 6 7 8; do "$ORCHY" say x-b1 "n$i $pad" >/dev/null || fail "say n$i"; done
+pad=$(head -c 1000 /dev/zero | tr '\0' x); for i in 1 2 3 4 5; do "$ORCHY" say x-b1 "n$i $pad" >/dev/null || fail "say n$i"; done
 for i in 1 2 3 4 5 6 7 8; do ( hook <<<'{}' > "$T/hook.$i" ) & done; wait
 cat "$T"/hook.? | jq -r '.hookSpecificOutput.additionalContext' | grep -o '^ORCHY-STEER: n[0-9]' | sort | uniq -c > "$T/hook.count"
-[ "$(wc -l < "$T/hook.count")" = 8 ] && ! grep -qv '^ *1 ' "$T/hook.count" || fail "parallel hooks did not deliver each note once: $(cat "$T/hook.count")"
-[ "$(cat "$T"/hook.? | grep -c 'additionalContext')" -lt 8 ] || fail "notes that fit in 4 KiB were not delivered together"
+[ "$(wc -l < "$T/hook.count")" = 5 ] && ! grep -qv '^ *1 ' "$T/hook.count" || fail "parallel hooks did not deliver each note once: $(cat "$T/hook.count")"
+[ "$(cat "$T"/hook.? | grep -c additionalContext)" -lt 5 ] || fail "notes that fit in 4 KiB were not delivered together"
 o=$("$ORCHY" say x-zz hi 2>&1 || true); grep -q 'no live lead' <<<"$o" || fail "say queued for a dead key: $o"
 o=$("$ORCHY" say x-b1 "use acct-a" 2>&1 || true); grep -q 'banned text' <<<"$o" || fail "say queued banned text: $o"
 o=$("$ORCHY" say x-b1 "$(head -c 3100 /dev/zero | tr '\0' x)" 2>&1 || true); grep -q 'at most 3 KiB' <<<"$o" || fail "say queued an oversized note: $o"

@@ -35,8 +35,9 @@ REPO=${ORCHY_REPO:-$(printf '%s' "$origin" | sed -E 's#^(git@|ssh://git@|https?:
 [ -n "$REPO" ] || { echo "orchy: no origin remote; set ORCHY_REPO=owner/name" >&2; exit 1; }
 slug=$(echo "$REPO" | tr '/' '-')
 # Every program's home sits under one capacity root, so a launch can count all programs' leads under one lock.
-CAP=${ORCHY_CAPACITY_ROOT:-$HOME/.cache/orchy}
-ORCHY_HOME=${ORCHY_HOME:-$CAP/$slug}
+# Lexical normalization only: with a trailing slash, -L would look through a symlinked home to its target.
+CAP=$(realpath -sm "${ORCHY_CAPACITY_ROOT:-$HOME/.cache/orchy}")
+ORCHY_HOME=$(realpath -sm "${ORCHY_HOME:-$CAP/$slug}")
 H="$ORCHY_HOME"; CFG="$H/orchy.json"; LOCAL="$H/local.json"
 cmd=${1:-help}; shift || true
 case "$cmd" in help|-h|--help) usage 0;; home) echo "$H"; exit 0;; esac
@@ -48,7 +49,7 @@ TRUNK=$(cfg '.trunk // "main"')
 # home (a umask would also reach wt-new's product checkout), but cannot undo what another user planted while it was loose.
 under=0; ds=("$H"); [ "$(dirname "$H")" = "$CAP" ] && under=1 && ds+=("$CAP")
 for d in "${ds[@]}"; do [ ! -L "$d" ] && [ -O "$d" ] || { echo "orchy: $d must be a directory owned by $(id -un), not a symlink" >&2; exit 1; }; done
-f=$({ find "$H" -maxdepth 2 ! -user "$(id -u)"; [ $under = 0 ] || find "$CAP" -maxdepth 1 ! -user "$(id -u)"; } 2>/dev/null | head -1)
+f=$({ find "$H" -maxdepth 2 ! -user "$EUID"; [ $under = 0 ] || find "$CAP" -maxdepth 1 ! -user "$EUID"; } 2>/dev/null | head -1)
 [ -z "$f" ] || { echo "orchy: $f belongs to another user; refusing a home someone else could write" >&2; exit 1; }
 mkdir -p "$H"/{briefs,prompts,reports,leads,watch,wt,scratch,inbox,page/shots,page/build}
 chmod 700 "$H"; [ $under = 1 ] && chmod 700 "$CAP"
@@ -199,8 +200,9 @@ stop)
   # Claude Code starts each Bash-tool shell as its own session leader, so a group kill alone misses a hung tool process:
   # collect the whole tree first, while every child still points at its parent.
   mapfile -t tree < <(ps -eo pid=,ppid= | awk -v r="$pid" '{p[$1]=$2} END {s[r]=1; c=1; while (c) {c=0; for (x in p) if (!(x in s) && (p[x] in s)) {s[x]=1; c=1}}; for (x in s) print x}')
-  ids=(); for q in "${tree[@]}"; do ids+=("$q:$(pstart "$q")"); done
-  [ "${pg:-?}" = "$pid" ] && kill -TERM -- "-$pg" 2>/dev/null
+  ids=(); for q in "${tree[@]}"; do if [ "$q" = "$pid" ]; then ids+=("$q:$st"); else ids+=("$q:$(pstart "$q")"); fi; done
+  # a lead that exited during the walk may have handed its pid, and so its group id, to a stranger
+  [ "${pg:-?}" = "$pid" ] && [ "$(pstart "$pid")" = "$st" ] && kill -TERM -- "-$pg" 2>/dev/null
   for e in "${ids[@]}"; do [ -n "${e#*:}" ] && [ "$(pstart "${e%%:*}")" = "${e#*:}" ] && kill -TERM "${e%%:*}" 2>/dev/null; done
   for _ in 1 2 3 4 5 6 7 8 9 10; do left=0; for e in "${ids[@]}"; do [ "$(pstart "${e%%:*}")" = "${e#*:}" ] && left=1; done; [ "$left" = 0 ] && break; sleep 0.5; done
   for e in "${ids[@]}"; do [ -n "${e#*:}" ] && [ "$(pstart "${e%%:*}")" = "${e#*:}" ] && kill -KILL "${e%%:*}" 2>/dev/null; done
