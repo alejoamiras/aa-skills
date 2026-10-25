@@ -178,6 +178,7 @@ sleep 1; [ ! -d "/proc/$wp" ] || fail "watcher $wp still alive after disarm"
 [ -d "/proc/$wp2" ] || fail "disarm in one home killed another home's watcher on the same PR number"
 [ "$(ps -eo pid,args | grep "[w]atch-merge 9 " | grep -vc "^ *$wp2 ")" = 0 ] || fail "a watch-merge 9 process of this home survived disarm: $(ps -eo pid,args | grep "[w]atch-merge 9 ")"
 ORCHY_HOME="$H2" "$ORCHY" disarm 9 | grep -q 'stopped merge-9' || fail "disarm in the second home"
+[ "$(grep -c '' "$H2/events.jsonl")" = 1 ] && jq -e '.kind == "merge.disarmed" and .pr == 9' "$H2/events.jsonl" >/dev/null || fail "disarm event: $(cat "$H2/events.jsonl")"
 sleep 1; [ ! -d "/proc/$wp2" ] || fail "the second home's watcher survived its own disarm"
 sleep 60 & hp=$!; echo "$hp $(awk '{print $22}' /proc/$hp/stat) 2026-01-01T00:00:00Z other" > "$ORCHY_HOME/orchestrator.lock"
 if "$ORCHY" lock >/dev/null 2>&1; then fail "lock did not refuse a live holder"; fi
@@ -206,6 +207,7 @@ grep -q -- '--state open --limit 1000' "$MOCK_DIR/gh.log" || fail "the close-out
 rm -f "$MOCK_DIR/open.json"
 # receipt: a session counts its last (running-total) result once; a killed run adds deduped, unpriced usage; only closed issues count
 HR="$T/cap/rcpt"; mkdir -p "$HR"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HR/"; cp -r "$HERE/tests/mocks/orchy/receipt/." "$HR/"
+find "$HR/leads" "$HR/reports" "$HR/watch" -type f -exec touch -d 2026-10-24T03:00:00Z {} +
 jq -n '{closingIssuesReferences:[{number:3},{number:4}]}' > "$MOCK_DIR/pr-21.json"; jq -n '{state:"CLOSED"}' > "$MOCK_DIR/issue-3.json"; jq -n '{state:"OPEN"}' > "$MOCK_DIR/issue-4.json"
 o=$(ORCHY_HOME="$HR" "$ORCHY" receipt) || fail "receipt: $o"
 grep -qF 'r: $1.50 API-equivalent + 37 unpriced tokens from killed runs; 2 session(s); tokens in 150 out 20 cache-read 1500 cache-write 60;' <<<"$o" || fail "receipt cost or tokens: $o"
@@ -218,6 +220,48 @@ if ORCHY_HOME="$HR" "$ORCHY" receipt nope >/dev/null 2>&1; then fail "receipt of
 mkdir -p "$T/profile"; { jq -nc '{record:"a",category:"copy",agreed:false}'; jq -nc '{record:"a",category:"copy",agreed:true}'; jq -nc '{record:"b",category:"copy",agreed:false}'
   jq -nc '{record:"c",category:"layout",agreed:true,via_recommend_all:true}'; jq -nc '{record:"d",category:"layout",agreed:null}'; } > "$T/profile/example-app.jsonl"
 o=$(ORCHY_HOME="$HR" "$ORCHY" receipt q | tail -1); [ "$o" = "owner took the recommendation: copy 1/2; 1 taken all at once (not scored), 1 left to the orchestrator" ] || fail "owner-record footer: $o"
+# the JSON views: one object each with its schema, the text's numbers, and a stable shape for pollers (goldens; volatile fields dropped)
+G="$HERE/tests/mocks/orchy"
+ORCHY_HOME="$HR" "$ORCHY" receipt --json --offline > "$T/r.json" || fail "receipt --json --offline"
+diff <(jq -S . "$G/receipt.v1.json") <(jq -S . "$T/r.json") || fail "receipt JSON drifted from tests/mocks/orchy/receipt.v1.json"
+ORCHY_HOME="$HR" "$ORCHY" state > "$T/s.json" || fail "state"
+diff <(jq -S . "$G/state.v1.json") <(jq -S 'del(.at, .load1, .nproc)' "$T/s.json") || fail "state JSON drifted from tests/mocks/orchy/state.v1.json"
+o=$(ORCHY_HOME="$HR" "$ORCHY" receipt --offline r); grep -qF 'issues closed ? (offline);' <<<"$o" || fail "offline receipt text: $o"
+grep -q 'owner took' <"$T/r.json" && fail "receipt JSON carries the owner record"
+# a fresh home stays empty under every reader, and a missing ledger is not created
+HF="$T/cap/fresh"; mkdir -m 700 "$HF"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HF/"
+ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" state | jq -e '.schema == "orchy.state/1" and .leads == [] and .asks == []' >/dev/null || fail "state on a fresh home"
+ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" receipt --offline >/dev/null || fail "receipt on a fresh home"
+ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" ask list --json | jq -e '. == {schema: "orchy.asks/1", asks: []}' >/dev/null || fail "ask list on a missing ledger"
+[ -z "$(find "$HF" -mindepth 1 -type d)" ] && [ ! -e "$T/asks-none" ] || fail "a reader created $(find "$HF" -mindepth 1 -type d) $(ls -d "$T/asks-none" 2>/dev/null)"
+# one bad source never blanks the state: a huge triage list travels as a file, a junk stall setting takes the default
+seq 0 29999 > "$HF/triaged.txt"; jq '.leads.stall_after_min = "oops"' "$HF/orchy.json" > "$T/o.json" && mv "$T/o.json" "$HF/orchy.json"
+ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" state | jq -e '.triaged | length == 30000' >/dev/null || fail "state with a large triage list or a junk stall setting"
+# an unmarked log orders by its mtime and the session's running total, never by file name
+HL="$T/cap/legacy"; mkdir -p "$HL/leads"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HL/"
+for k in l-plan:1.0:2026-10-20T01:00:00Z l-a1:1.5:2026-10-20T02:00:00Z; do IFS=: read -r n c _ <<<"$k"; m=${k#*:*:}
+  printf '{"type":"system","subtype":"init","session_id":"s-legacy"}\n{"type":"result","total_cost_usd":%s}\n' "$c" > "$HL/leads/$n.log"; touch -d "$m" "$HL/leads/$n.log"; done
+ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline | jq -e '[.lanes[0].runs[] | {key, cost_usd}] == [{key: "l-plan", cost_usd: 1.0}, {key: "l-a1", cost_usd: 0.5}] and .lanes[0].cost_usd == 1.5' >/dev/null \
+  || fail "legacy run order: $(ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline | jq -c '.lanes[0].runs')"
+# a watcher's marker is its newest marker line, not its last line (a runs table follows REQUIRED FAILED, status lines follow a missing check)
+mkdir -p "$HL/watch"; for n in 5 6 7 8; do echo "999999 1" > "$HL/watch/merge-$n.pid"; done
+printf '10:00Z required ok=1/2\n10:01Z REQUIRED FAILED: lint\n| lint | failure |\n' > "$HL/watch/merge-5.out"
+printf '10:00Z MISSING REQUIRED CHECK (no run or status after 10 rounds): e2e\n10:02Z required ok=1/2 report_done=yes state: MERGEABLE CLEAN\n' > "$HL/watch/merge-6.out"
+printf '#7 state unreadable after the merge call; check it by hand\n' > "$HL/watch/merge-7.out"; printf '10:00Z TRUNK RED at 1234abcd: ci; waiting\n#8 MERGED 0123abc\n--- teardown x\n' > "$HL/watch/merge-8.out"
+ORCHY_HOME="$HL" "$ORCHY" state | jq -e '[.watchers[] | {pr, marker}] == [{pr: 5, marker: "REQUIRED FAILED"}, {pr: 6, marker: "MISSING REQUIRED CHECK"}, {pr: 7, marker: "AMBIGUOUS"}, {pr: 8, marker: "MERGED"}]' >/dev/null \
+  || fail "watcher markers: $(ORCHY_HOME="$HL" "$ORCHY" state | jq -c '[.watchers[] | {pr, marker, last}]')"
+# a killed resume stamped in the same second as the run it resumes still counts its tokens
+printf '%s\n' '{"type":"orchy_invocation","key":"t-a1","lane":"t","cmd":"launch","at":"2026-10-20T03:00:00Z"}' '{"type":"system","subtype":"init","session_id":"s-tie"}' \
+  '{"type":"result","total_cost_usd":1.0}' '{"type":"orchy_invocation","key":"t-a1","lane":"t","cmd":"resume","at":"2026-10-20T03:00:00Z"}' \
+  '{"type":"system","subtype":"init","session_id":"s-tie"}' '{"type":"assistant","message":{"id":"k1","usage":{"input_tokens":37}}}' > "$HL/leads/t-a1.log"
+ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline t | jq -e '.lanes[0] | .unpriced_tokens == 37 and ([.runs[].cost_usd] == [1.0, null])' >/dev/null \
+  || fail "a same-second killed resume lost its tokens: $(ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline t | jq -c '.lanes[0] | {unpriced_tokens, runs}')"
+# an older, costlier session earlier in the same log never reorders a newer session's runs
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-old"}' '{"type":"result","total_cost_usd":10.0}' \
+  '{"type":"orchy_invocation","key":"u-plan","lane":"u","cmd":"launch","at":"2026-10-20T04:00:00Z"}' '{"type":"system","subtype":"init","session_id":"s-new"}' '{"type":"result","total_cost_usd":1.0}' > "$HL/leads/u-plan.log"
+printf '%s\n' '{"type":"orchy_invocation","key":"u-a1","lane":"u","cmd":"resume","at":"2026-10-20T04:00:00Z"}' '{"type":"system","subtype":"init","session_id":"s-new"}' '{"type":"result","total_cost_usd":1.5}' > "$HL/leads/u-a1.log"
+ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline u | jq -e '.lanes[0] | .cost_usd == 11.5 and ([.runs[] | select(.session == "s-new") | {key, cost_usd}] == [{key: "u-plan", cost_usd: 1.0}, {key: "u-a1", cost_usd: 0.5}])' >/dev/null \
+  || fail "another session's total reordered a session: $(ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline u | jq -c '.lanes[0] | {cost_usd, runs}')"
 # ask ledger: distinct ids under contention, transitions, a torn tail, the size cap
 LG="$T/asks/example-app.jsonl"; A() { "$ORCHY" ask "$@"; }
 ps=(); for i in 1 2 3 4; do ( A add "parallel ask $i" > "$T/add.$i" ) & ps+=($!); done; wait "${ps[@]}" || true
@@ -305,6 +349,14 @@ grep -q 'Ana\|close-lane case' "$T/snap.out" && fail "snapshot printed an ask's 
 if sed -n '/^-- untriaged/,/^--/p' "$T/snap.out" | grep -q '^#'; then fail "untriaged issues listed for an empty backlog"; fi
 r=$(A add "receipt case"); A public "$r" "Receipt requirement" >/dev/null; A lane "$r" r "a repo change" >/dev/null; A "done" "$r" "delivered" >/dev/null
 o=$(ORCHY_HOME="$HR" "$ORCHY" receipt r); grep -qF "asks done 1 ($r)" <<<"$o" || fail "receipt asks: $o"
+# readers write nothing: the home, the ledger and gh's log stay byte-for-byte; the state names asks by id and flags only
+fp() { find "$HR" "$T/asks" -printf '%p %s %T@ %m\n' | sort; md5sum < "$MOCK_DIR/gh.log"; }
+b=$(fp); R() { ORCHY_HOME="$HR" "$ORCHY" "$@" >/dev/null || fail "reader $*"; }
+R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline
+[ "$(fp)" = "$b" ] || fail "a reader changed the home, the ledger or gh.log: $(diff <(echo "$b") <(fp))"
+"$ORCHY" state > "$T/st.json"; jq -e --arg g "$g" '.asks | any(.id == $g and .lane == "gone-1" and .has_public) and all(has("text") | not)' "$T/st.json" >/dev/null || fail "state asks: $(jq -c .asks "$T/st.json")"
+grep -q 'Ana' "$T/st.json" && fail "state printed an ask's text"
+"$ORCHY" ask list --json | jq -e --arg g "$g" '.schema == "orchy.asks/1" and (.asks | any(.id == $g and (.text | test("Ana")) and has("held") and has("age_s")))' >/dev/null || fail "ask list --json: $("$ORCHY" ask list --json | head -c 300)"
 # launch and say: an ask reaches a lead only as its stored wording, laned there, not held, never copied from the owner
 l=$(A add "Please add the greeting on the home page because my landlord asked twice"); A public "$l" "Show a greeting on the home page" >/dev/null; A lane "$l" x "a repo change" >/dev/null
 lt() { printf 'You are a subagent.\n%s\n' "$1" > "$ORCHY_HOME/prompts/x-lt.md"; "$ORCHY" launch x-lt x acct-a 2>&1 || true; }
@@ -353,6 +405,30 @@ w 2; rm "$MOCK_DIR/fail-issues"; grep -q 'TIMEOUT after 2s, no change; unreadabl
 jq '.wait.poll_sec=120' "$HW/orchy.json" > "$T/o.json" && mv "$T/o.json" "$HW/orchy.json"; jq -n '{sha:"4444444444444444444444444444444444444444"}' > "$MOCK_DIR/trunk.json"
 w 3; grep -q 'CHANGED (trunk)' "$T/w.out" || fail "the first tick of a wait did not read GitHub: $(cat "$T/w.out")"
 rm -f "$MOCK_DIR/issues.json" "$MOCK_DIR/trunk.json"
+# events: one orchy.event/1 line per hooked command, ids only; a relaunch keeps the failure it replaces; an unwritable log changes nothing
+E="$ORCHY_HOME/events.jsonl"; en() { grep -c '' "$E"; }
+one() { [ "$(en)" = $(( $1 + 1 )) ] && tail -1 "$E" | jq -e "$2" >/dev/null || fail "events after $3: $(tail -2 "$E")"; }
+n=$(en); "$ORCHY" lock >/dev/null; one "$n" '.kind == "seat.lock"' lock
+n=$(en); "$ORCHY" unlock >/dev/null; one "$n" '.kind == "seat.unlock"' unlock
+printf 'work\nARC_FAILED: gate red\nretry\nARC_FAILED: gate red again\n' > "$ORCHY_HOME/reports/x-ev.md"; printf 'You are a subagent.\n' > "$ORCHY_HOME/prompts/x-ev.md"
+sha=$(printf 'ARC_FAILED: gate red again' | sha256sum | cut -d' ' -f1)
+n=$(en); MOCK_LEAD_SECS=30 "$ORCHY" launch --force-cap x-ev x acct-b >/dev/null || fail "launch x-ev"
+one "$n" ".kind == \"lead.launch\" and .key == \"x-ev\" and .lane == \"x\" and .prior == \"ARC_FAILED\" and .prior_failed_lines == 2 and .prior_failed_sha == \"$sha\"" "a relaunch over a failed report"
+"$ORCHY" state | jq -e '.leads[] | select(.key == "x-ev") | .alive and .lane == "x" and .weight == "heavy" and (.newest.cmd | type) == "string" and (.quiet_s | type) == "number" and .stalled == false' >/dev/null || fail "state of a live lead: $("$ORCHY" state | jq -c '.leads')"
+n=$(en); "$ORCHY" stop x-ev >/dev/null; one "$n" '.kind == "lead.stop" and .key == "x-ev"' stop
+n=$(en); MOCK_LEAD_SECS=30 "$ORCHY" resume --force-cap x-ev x acct-b 00000000-0000-4000-8000-000000000009 >/dev/null || fail "resume x-ev"
+one "$n" '.kind == "lead.resume" and .key == "x-ev" and .prior_failed_lines == 2' resume; "$ORCHY" stop x-ev >/dev/null
+n=$(en); A add "an event row" >/dev/null; one "$n" '.kind == "ask.row" and (.ask | test("^ask[0-9]+$")) and .state == "open"' "ask add"
+grep -q 'acct-\|event row\|gate red' "$E" && fail "an event carries an account name or text: $(grep 'acct-\|event row\|gate red' "$E")"
+jq -se 'all(.schema == "orchy.event/1" and (.at | test("Z$")))' "$E" >/dev/null || fail "an event without its schema"
+q() { sed '/^rc=/!s/[0-9]\{1,\}/N/g'; }   # numbers vary run to run; exit codes must not
+w1=$({ "$ORCHY" lock; echo "rc=$?"; "$ORCHY" unlock; echo "rc=$?"; A add "writable"; echo "rc=$?"; } 2>&1 | q)
+chmod 400 "$E"; n=$(en)
+w2=$({ "$ORCHY" lock; echo "rc=$?"; "$ORCHY" unlock; echo "rc=$?"; A add "writable"; echo "rc=$?"; } 2>&1 | q); chmod 600 "$E"
+[ "$w1" = "$w2" ] && [ "$(en)" = "$n" ] || fail "an unwritable events log changed output or exit codes: $(diff <(echo "$w1") <(echo "$w2"))"
+# a symlink or a FIFO at the log's path is skipped: never followed, never waited on
+mv "$E" "$T/ev.keep"; ln -s "$T/ev.elsewhere" "$E"; "$ORCHY" lock >/dev/null; "$ORCHY" unlock >/dev/null; [ ! -e "$T/ev.elsewhere" ] || fail "an event followed a symlink"
+rm "$E"; mkfifo "$E"; timeout 10 "$ORCHY" lock >/dev/null || fail "an event waited on a FIFO"; timeout 10 "$ORCHY" unlock >/dev/null; rm "$E"; mv "$T/ev.keep" "$E"
 wait "$pgp" || { tail -n 20 "$T/page.log"; fail "page smoke"; }; pgp=
 # no project names, home paths or roster names anywhere in the skill
 if grep -rnE 'nulo|Nulo|program-2|program2|/mnt/user-data|/Users/|martu|proton|icloud|GzKw77' "$K" --include='*.md' --include='*.sh' --include='*.py' --include='*.js' --include='*.ts' --include='*.json' --include='*.cjs' | grep -v 'page/fixtures' ; then fail "project-specific text in the skill"; fi

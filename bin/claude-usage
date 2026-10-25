@@ -25,6 +25,8 @@
 #
 #   claude-usage                 table for every account
 #   claude-usage --json          machine-readable (statusline, cron)
+#   claude-usage --json --cached the snapshot's rows only: never probes or
+#                                spawns a refresh (exit 1 with no snapshot)
 #   claude-usage run [name|best] [claude args…]
 #                                start claude on that account (default: best);
 #                                any unique part of a name will do. `clu` is
@@ -1061,7 +1063,11 @@ jq_str() {
 
 json() {
   local rows first=1 key name email plan sl sr wl wr pl pv active org obs note days
-  rows=$(gather) || exit 1
+  if [[ ${1:-} == cached ]]; then
+    rows=$(snapshot_rows) || die "no snapshot yet: run claude-usage refresh"
+  else
+    rows=$(gather) || exit 1
+  fi
   printf '['
   while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
     [[ -z ${name} ]] && continue
@@ -1989,7 +1995,7 @@ spawn_refresh_if_stale() { (($(snapshot_age) > TTL)) && spawn_refresh; return 0;
 
 case "${1:-table}" in
   table|'')   table ;;
-  --json)     json ;;
+  --json)     if [[ ${2:-} == --cached ]]; then json cached; else json; fi ;;
   refresh)    cmd_refresh ;;
   best)       cmd_best ;;
   statusline) cmd_statusline ;;

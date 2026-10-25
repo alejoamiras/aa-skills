@@ -23,6 +23,8 @@
 #
 #   codex-usage                 table for every account
 #   codex-usage --json          machine-readable (statusline, cron)
+#   codex-usage --json --cached the snapshot's rows only: never probes or
+#                               spawns a refresh (exit 1 with no snapshot)
 #   codex-usage add <name>      one-time login for a new account (device code
 #                               over SSH, browser otherwise; --device/--browser)
 #   codex-usage show <name>     raw rate-limit payload, incl. per-model buckets
@@ -535,7 +537,12 @@ json_num() { if [[ $1 =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ]]; then printf '%s' "$1";
 
 json() {
   local rows first=1 key name email plan wl wr rl rr cr un seen active note
-  rows=$(gather) || exit 1
+  if [[ ${1:-} == cached ]]; then
+    [[ -f ${SNAPSHOT} ]] || die "no snapshot yet: run codex-usage refresh"
+    rows=$(cat "${SNAPSHOT}") || exit 1
+  else
+    rows=$(gather) || exit 1
+  fi
   printf '['
   while IFS=$'\t' read -r key name email plan wl wr rl rr cr un seen active note; do
     [[ -z ${name} ]] && continue
@@ -1045,7 +1052,7 @@ cmd_show() {
 
 case "${1:-table}" in
   table|'')   table ;;
-  --json)     json ;;
+  --json)     if [[ ${2:-} == --cached ]]; then json cached; else json; fi ;;
   refresh)    cmd_refresh ;;
   best)       cmd_best ;;
   home)       shift; cmd_home "$@" ;;
