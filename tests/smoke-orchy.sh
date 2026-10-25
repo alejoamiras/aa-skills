@@ -260,9 +260,18 @@ ps=(); for i in 1 2 3 4 5 6; do ( V add "issue:$i" "Answer the question on issue
 V list --json | jq -e '[.waiting[].ref | select(startswith("issue:"))] | sort == ["issue:1", "issue:2", "issue:3", "issue:4", "issue:5", "issue:6"]' >/dev/null || fail "concurrent adds lost an item: $(V list --json)"
 jq -se '[.[] | select(.kind | startswith("waiting."))] | all(keys == ["at", "kind", "ref", "schema"])
   and [.[:4][] | [.kind, .ref]] == [["waiting.add", "pr:12"], ["waiting.add", "page:0"], ["waiting.add", "pr:12"], ["waiting.done", "pr:12"]]' "$HV/events.jsonl" >/dev/null || fail "waiting events: $(head -4 "$HV/events.jsonl")"
-printf '%s\n' '{"schema":"orchy.waiting/1","waiting":[{"ref":"pr:1"}]}' > "$HV/waiting.json"; wb=$(md5sum "$HV/waiting.json")
-ORCHY_HOME="$HV" "$ORCHY" state | jq -e '.waiting == null and (.errors | index("waiting"))' >/dev/null || fail "state over a malformed waiting record"
-V add pr:2 "Merge it" >/dev/null 2>&1 && fail "waiting add replaced a malformed record"; [ "$(md5sum "$HV/waiting.json")" = "$wb" ] || fail "waiting add changed a malformed record"
+V add other:acct-z "Log in again" >/dev/null || fail "waiting add other:acct-z"
+jq '.prompt_ban += "|acct-z"' "$HV/local.json" > "$T/l.json" && mv "$T/l.json" "$HV/local.json"; wb=$(md5sum "$HV/waiting.json" "$HV/events.jsonl")
+o=$(V "done" other:acct-z 2>&1) && fail "done wrote a ref banned after its add into the events: $o"
+[ "$(grep -c '' <<<"$o")" = 1 ] || fail "a waiting refusal is not one line: $o"
+[ "$(md5sum "$HV/waiting.json" "$HV/events.jsonl")" = "$wb" ] || fail "a refused done changed the record or the events"
+one='{"ref":"pr:1","text":"a","since":"2026-01-01T00:00:00Z"}'; ok="{\"schema\":\"orchy.waiting/1\",\"waiting\":[$one]}"
+for m in '' "$ok"$'\n'"$ok" '{"schema":"orchy.waiting/1","waiting":[{"ref":"pr:1"}]}' "{\"schema\":\"orchy.waiting/1\",\"waiting\":[$one,$one]}" '{"schema":"orchy.waiting/1","waiting":[{"ref":"pr:1","text":"a","since":"bad-date"}]}'; do
+  printf '%s' "$m" > "$HV/waiting.json"; wb=$(md5sum "$HV/waiting.json")
+  V list --json >/dev/null 2>&1 && fail "waiting list read a malformed record: $m"
+  ORCHY_HOME="$HV" "$ORCHY" state | jq -e '.waiting == null and (.errors | index("waiting"))' >/dev/null || fail "state over a malformed waiting record: $m"
+  V add pr:2 "Merge it" >/dev/null 2>&1 && fail "waiting add replaced a malformed record: $m"; [ "$(md5sum "$HV/waiting.json")" = "$wb" ] || fail "waiting add changed a malformed record: $m"
+done
 ln -sf "$G/receipt/waiting.json" "$HV/waiting.json"; V list --json >/dev/null 2>&1 && fail "waiting list followed a symlink"
 # an unmarked log orders by its mtime and the session's running total, never by file name
 HL="$T/cap/legacy"; mkdir -p "$HL/leads"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HL/"

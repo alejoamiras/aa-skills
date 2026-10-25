@@ -206,11 +206,12 @@ append_row() { # inside the ledger lock (fd 9); a torn last line is ended first 
 with_ledger() { ( flock -w 60 9 || { echo "refused: ask ledger lock busy for 60 s" >&2; exit 1; }; "$@" ) 9>>"$LEDGER"; }
 WAITING="$H/waiting.json"
 WREF='^(pr|issue):[1-9][0-9]{0,8}$|^page:(0|[1-9][0-9]{0,8})$|^ask:ask[0-9]{1,9}$|^lane:[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$|^other:[a-z0-9-]{1,32}$'
-waiting_read() { # orchy.waiting/1 on stdout, a missing file as empty; a symlinked, non-regular or malformed one refuses
+waiting_read() { # orchy.waiting/1 on stdout, a missing file as empty; a symlinked or non-regular one refuses, as does a malformed one (shape, a repeated ref, a since jq cannot parse)
   if [ -L "$WAITING" ] || { [ -e "$WAITING" ] && [ ! -f "$WAITING" ]; }; then echo "refused: $WAITING must be a regular file, not a symlink" >&2; return 1; fi
   [ -e "$WAITING" ] || { echo '{"schema":"orchy.waiting/1","waiting":[]}'; return 0; }
   jq -sce 'select(length == 1) | .[0] | select(.schema == "orchy.waiting/1" and (.waiting | type) == "array"
-      and all(.waiting[]; type == "object" and ([.ref, .text, .since] | map(type)) == ["string", "string", "string"]))
+      and all(.waiting[]; type == "object" and ([.ref, .text, .since] | map(type)) == ["string", "string", "string"] and (.since | try fromdateiso8601 catch null) != null)
+      and ([.waiting[].ref] | length == (unique | length)))
     | {schema, waiting: [.waiting[] | {ref, text, since}]}' "$WAITING" 2>/dev/null || { echo "refused: $WAITING is not orchy.waiting/1" >&2; return 1; }
 }
 waiting_text_ok() { # one line of 1-160 code points; Python, since jq silently replaces invalid UTF-8
@@ -430,14 +431,12 @@ waiting)
   add|done)
     need flock; r=${1:-}; shift || true; t="$*"
     [[ "$r" =~ $WREF ]] || { echo "refused: a ref is pr:<n>, issue:<n>, page:<n>, ask:<askN>, lane:<slug> or other:<slug>" >&2; exit 1; }
-    # only add brings a ref in, so the ref an event names has passed check-public
-    if [ "$sub" = add ]; then
-      waiting_text_ok "$t" || exit 1
-      tf=$(mktemp "$H/scratch/waiting.XXXXXX") || exit 1; printf '%s\n%s\n' "$r" "$t" > "$tf"
-      o=$("$0" check-public "$tf" 2>&1); rc=$?; rm -f "$tf"
-      case $rc in 0) ;; 1) echo "refused: the ref or text fails check-public ($(grep -oE '^(LEAK|SENSITIVE|SECRET)|copies the owner' <<<"$o" | sort -u | paste -sd, -))" >&2; exit 1;;
-        *) echo "refused: check-public could not run" >&2; exit 1;; esac
-    fi
+    [ "$sub" = "done" ] || waiting_text_ok "$t" || exit 1
+    # done checks the ref too: a name banned after its add must not reach events.jsonl
+    tf=$(mktemp "$H/scratch/waiting.XXXXXX") || exit 1; { printf '%s\n' "$r"; [ "$sub" = "done" ] || printf '%s\n' "$t"; } > "$tf"
+    o=$("$0" check-public "$tf" 2>&1); rc=$?; rm -f "$tf"
+    case $rc in 0) ;; 1) echo "refused: the ref or text fails check-public ($(grep -oE '^(LEAK|SENSITIVE|SECRET)|copies the owner' <<<"$o" | sort -u | paste -sd, -))" >&2; exit 1;;
+      *) echo "refused: check-public could not run" >&2; exit 1;; esac
     # the lock file is never replaced, so one writer at a time spans the read, the rename and the event
     ( flock -w 30 8 || { echo "refused: the waiting lock is busy for 30 s" >&2; exit 1; }
       w=$(waiting_read) || exit 1
