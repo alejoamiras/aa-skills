@@ -829,9 +829,10 @@ for path in sorted(glob.glob(f"{H}/leads/*.log")):
 lanes, by_sid = {}, {}
 for i, s in enumerate(segs): s["sid"] = s["sid"] or f"unknown-{i}"
 def order(s):  # an unmarked segment sits just before the next marked one in its log, else at the log's mtime;
-    # ties go by the running total so far in the log (a killed run has none of its own), then by position in the log
+    # only order within a session matters: ties go by the session's running total so far in this log (a killed run has
+    # none of its own), then by position in the log
     i = s["file"].index(s); later = [x["at"] for x in s["file"][i + 1:] if x["at"]]
-    total = max([float(x["result"].get("total_cost_usd") or 0) for x in s["file"][:i + 1] if x["result"]] or [0.0])
+    total = max([float(x["result"].get("total_cost_usd") or 0) for x in s["file"][:i + 1] if x["result"] and x["sid"] == s["sid"]] or [0.0])
     return (s["at"] or (later[0] if later else iso(s["mtime"])), 1 if s["at"] else 0, total, i)
 for s in sorted(segs, key=order): by_sid.setdefault(s["sid"], []).append(s)
 for sid, ss in by_sid.items():

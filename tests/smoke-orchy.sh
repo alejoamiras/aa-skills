@@ -220,7 +220,7 @@ if ORCHY_HOME="$HR" "$ORCHY" receipt nope >/dev/null 2>&1; then fail "receipt of
 mkdir -p "$T/profile"; { jq -nc '{record:"a",category:"copy",agreed:false}'; jq -nc '{record:"a",category:"copy",agreed:true}'; jq -nc '{record:"b",category:"copy",agreed:false}'
   jq -nc '{record:"c",category:"layout",agreed:true,via_recommend_all:true}'; jq -nc '{record:"d",category:"layout",agreed:null}'; } > "$T/profile/example-app.jsonl"
 o=$(ORCHY_HOME="$HR" "$ORCHY" receipt q | tail -1); [ "$o" = "owner took the recommendation: copy 1/2; 1 taken all at once (not scored), 1 left to the orchestrator" ] || fail "owner-record footer: $o"
-# the JSON views: one object each with its schema, the text's numbers, and the shape the viewer decodes (goldens; volatile fields dropped)
+# the JSON views: one object each with its schema, the text's numbers, and a stable shape for pollers (goldens; volatile fields dropped)
 G="$HERE/tests/mocks/orchy"
 ORCHY_HOME="$HR" "$ORCHY" receipt --json --offline > "$T/r.json" || fail "receipt --json --offline"
 diff <(jq -S . "$G/receipt.v1.json") <(jq -S . "$T/r.json") || fail "receipt JSON drifted from tests/mocks/orchy/receipt.v1.json"
@@ -249,6 +249,12 @@ printf '%s\n' '{"type":"orchy_invocation","key":"t-a1","lane":"t","cmd":"launch"
   '{"type":"system","subtype":"init","session_id":"s-tie"}' '{"type":"assistant","message":{"id":"k1","usage":{"input_tokens":37}}}' > "$HL/leads/t-a1.log"
 ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline t | jq -e '.lanes[0] | .unpriced_tokens == 37 and ([.runs[].cost_usd] == [1.0, null])' >/dev/null \
   || fail "a same-second killed resume lost its tokens: $(ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline t | jq -c '.lanes[0] | {unpriced_tokens, runs}')"
+# an older, costlier session earlier in the same log never reorders a newer session's runs
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-old"}' '{"type":"result","total_cost_usd":10.0}' \
+  '{"type":"orchy_invocation","key":"u-plan","lane":"u","cmd":"launch","at":"2026-10-20T04:00:00Z"}' '{"type":"system","subtype":"init","session_id":"s-new"}' '{"type":"result","total_cost_usd":1.0}' > "$HL/leads/u-plan.log"
+printf '%s\n' '{"type":"orchy_invocation","key":"u-a1","lane":"u","cmd":"resume","at":"2026-10-20T04:00:00Z"}' '{"type":"system","subtype":"init","session_id":"s-new"}' '{"type":"result","total_cost_usd":1.5}' > "$HL/leads/u-a1.log"
+ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline u | jq -e '.lanes[0] | .cost_usd == 11.5 and ([.runs[] | select(.session == "s-new") | {key, cost_usd}] == [{key: "u-plan", cost_usd: 1.0}, {key: "u-a1", cost_usd: 0.5}])' >/dev/null \
+  || fail "another session's total reordered a session: $(ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline u | jq -c '.lanes[0] | {cost_usd, runs}')"
 # ask ledger: distinct ids under contention, transitions, a torn tail, the size cap
 LG="$T/asks/example-app.jsonl"; A() { "$ORCHY" ask "$@"; }
 ps=(); for i in 1 2 3 4; do ( A add "parallel ask $i" > "$T/add.$i" ) & ps+=($!); done; wait "${ps[@]}" || true
