@@ -20,6 +20,8 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   ask list [--all] [--json] | show <id>   one line per open or laned ask (every ask with --all; orchy.asks/1 with --json); one ask's fold and history
 #   ask file <id> <title> <body-file>   file an ask as a GitHub issue: check, dedupe, create and record under one lock
 #   ask close-lane <slug>        after teardown: each ask laned there is done (delivered, with its PR) or reopened, from the reports' ASKS: lines
+#   waiting add <ref> <text> | done <ref> | list [--json]   what waits on the owner, one item per ref (pr:N issue:N page:N
+#                                ask:askN lane:<slug> other:<slug>); add replaces the text and keeps since; orchy.waiting/1 with --json
 #   wt-new <slug>...             create worktrees from origin/<trunk> and install deps; sequential; refuses an existing slug
 #   launch [--light] <key> <slug> <account>            start a headless lead on prompts/<key>.md inside the lane worktree
 #   resume [--light] <key> <slug> <account> <session>  resume a lead's session with prompts/<key>.md
@@ -68,7 +70,7 @@ for d in "${ds[@]}"; do [ ! -L "$d" ] && [ -O "$d" ] || { echo "orchy: $d must b
 f=$({ find "$H" -maxdepth 2 ! -user "$EUID"; [ $under = 0 ] || find "$CAP" -maxdepth 1 ! -user "$EUID"; } 2>/dev/null | head -1)
 [ -z "$f" ] || { echo "orchy: $f belongs to another user; refusing a home someone else could write" >&2; exit 1; }
 # Readers keep the ownership checks but create nothing, so a poller never changes the home it reads.
-ro=0; case "$cmd" in state|config|local|session-id|receipt) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; esac
+ro=0; case "$cmd" in state|config|local|session-id|receipt) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting) case "${1:-}" in list) ro=1;; esac;; esac
 if [ $ro = 0 ]; then
   mkdir -p "$H"/{briefs,prompts,reports,leads,watch,wt,scratch,inbox,page/shots,page/build}
   chmod 700 "$H"; [ $under = 1 ] && chmod 700 "$CAP"
@@ -202,6 +204,25 @@ append_row() { # inside the ledger lock (fd 9); a torn last line is ended first 
   if [ ${#e[@]} = 3 ]; then ev ask.row "${e[@]}"; fi
 }
 with_ledger() { ( flock -w 60 9 || { echo "refused: ask ledger lock busy for 60 s" >&2; exit 1; }; "$@" ) 9>>"$LEDGER"; }
+WAITING="$H/waiting.json"
+WREF='^(pr|issue):[1-9][0-9]{0,8}$|^page:(0|[1-9][0-9]{0,8})$|^ask:ask[0-9]{1,9}$|^lane:[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$|^other:[a-z0-9-]{1,32}$'
+waiting_read() { # orchy.waiting/1 on stdout, a missing file as empty; a symlinked, non-regular or malformed one refuses
+  if [ -L "$WAITING" ] || { [ -e "$WAITING" ] && [ ! -f "$WAITING" ]; }; then echo "refused: $WAITING must be a regular file, not a symlink" >&2; return 1; fi
+  [ -e "$WAITING" ] || { echo '{"schema":"orchy.waiting/1","waiting":[]}'; return 0; }
+  jq -sce 'select(length == 1) | .[0] | select(.schema == "orchy.waiting/1" and (.waiting | type) == "array"
+      and all(.waiting[]; type == "object" and ([.ref, .text, .since] | map(type)) == ["string", "string", "string"]))
+    | {schema, waiting: [.waiting[] | {ref, text, since}]}' "$WAITING" 2>/dev/null || { echo "refused: $WAITING is not orchy.waiting/1" >&2; return 1; }
+}
+waiting_text_ok() { # one line of 1-160 code points; Python, since jq silently replaces invalid UTF-8
+  printf '%s' "$1" | python3 -I -c '
+import sys
+try: t = sys.stdin.buffer.read().decode("utf-8")
+except UnicodeDecodeError: sys.exit("refused: the text is not UTF-8")
+if not 1 <= len(t) <= 160: sys.exit(f"refused: the text is {len(t)} characters; 1 to 160")
+# C0, DEL and C1 controls, the line and paragraph separators, and every Bidi_Control character
+bad = {*range(0x20), *range(0x7f, 0xa0), 0x2028, 0x2029, 0x61c, 0x200e, 0x200f, *range(0x202a, 0x202f), *range(0x2066, 0x206a)}
+if any(ord(c) in bad for c in t): sys.exit("refused: the text carries a control, line separator or bidi character")'
+}
 case "$cmd" in
 config) cfg "$1";;
 local) lcl "$1";;
@@ -398,6 +419,38 @@ ask)
       done; }
     with_ledger ask_close;;
   esac;;
+waiting)
+  sub=${1:-}; shift || true
+  case "$sub" in
+  list)
+    w=$(waiting_read) || exit 1
+    if [ "${1:-}" = --json ]; then printf '%s\n' "$w"; exit 0; fi
+    jq -r --argjson now "$(date +%s)" '.waiting[] | ($now - (.since | fromdateiso8601? // $now)) as $s
+      | "\(.ref)  \(if $s < 3600 then "\($s / 60 | floor)m" else "\($s / 3600 | floor)h" end)  \(.text)"' <<<"$w";;
+  add|done)
+    need flock; r=${1:-}; shift || true; t="$*"
+    [[ "$r" =~ $WREF ]] || { echo "refused: a ref is pr:<n>, issue:<n>, page:<n>, ask:<askN>, lane:<slug> or other:<slug>" >&2; exit 1; }
+    # only add brings a ref in, so the ref an event names has passed check-public
+    if [ "$sub" = add ]; then
+      waiting_text_ok "$t" || exit 1
+      tf=$(mktemp "$H/scratch/waiting.XXXXXX") || exit 1; printf '%s\n%s\n' "$r" "$t" > "$tf"
+      o=$("$0" check-public "$tf" 2>&1); rc=$?; rm -f "$tf"
+      case $rc in 0) ;; 1) echo "refused: the ref or text fails check-public ($(grep -oE '^(LEAK|SENSITIVE|SECRET)|copies the owner' <<<"$o" | sort -u | paste -sd, -))" >&2; exit 1;;
+        *) echo "refused: check-public could not run" >&2; exit 1;; esac
+    fi
+    # the lock file is never replaced, so one writer at a time spans the read, the rename and the event
+    ( flock -w 30 8 || { echo "refused: the waiting lock is busy for 30 s" >&2; exit 1; }
+      w=$(waiting_read) || exit 1
+      if [ "$sub" = add ]; then
+        w=$(jq -c --arg r "$r" --arg t "$t" --arg at "$(now)" '.waiting |= if any(.[]; .ref == $r) then map(if .ref == $r then .text = $t else . end) else . + [{ref: $r, text: $t, since: $at}] end' <<<"$w") || exit 1
+      else
+        jq -e --arg r "$r" 'any(.waiting[]; .ref == $r)' <<<"$w" >/dev/null || { echo "refused: nothing waits on $r" >&2; exit 1; }
+        w=$(jq -c --arg r "$r" '.waiting |= map(select(.ref != $r))' <<<"$w") || exit 1
+      fi
+      if ! tmp=$(mktemp "$H/.waiting.XXXXXX") || ! printf '%s\n' "$w" > "$tmp" || ! mv -f "$tmp" "$WAITING"; then rm -f "${tmp:-}"; echo "refused: cannot write $WAITING" >&2; exit 1; fi
+      ev "waiting.$sub" ref="$r"; echo "waiting $sub $r" ) 8>>"$H/waiting.lock";;
+  *) echo "usage: waiting add <ref> <text> | done <ref> | list [--json]" >&2; exit 1;;
+  esac;;
 wt-new)
   need agent-worktree; install=$(cfg '.install // empty'); rc=0
   git -C "$ROOT" fetch -q origin "$TRUNK" || { echo "fetch failed"; exit 1; }
@@ -546,6 +599,7 @@ snapshot)
   else echo "(gh issue list failed)"; fi
   echo "-- unsigned pages"; [ -f "$H/page/unsigned.json" ] && jq -r --argjson now "$(date +%s)" --slurpfile u "$H/page/unsigned.json" '.pages[] | select(.no as $n | $u[0] | index($n)) |
     "page \(.no) \(.name): " + (if .added_at then (($now - (.added_at | fromdateiso8601)) | "waiting \(. / 86400 | floor)d\(. % 86400 / 3600 | floor)h") else "age unknown" end)' "$H/page/decisions.json" 2>/dev/null
+  echo "-- waiting"; "$0" waiting list 2>&1
   echo "-- headroom"; claude-usage 2>/dev/null | head -12;;
 state)
   # orchy.state/1 for a poller: local facts only (no gh, usage or network call) and nothing written. The seat and the
@@ -615,6 +669,7 @@ PY
       | {id, state, lane: (.lane // null), age_s: ($now - (.at | fromdateiso8601? // $now)), has_public: (.public != null),
          waiting: (([ '"$ASK_HOLD"' ] | length) > 0)}]') || { asks=null; errs+=(asks); }
   else errs+=(asks); fi
+  waiting=null; if w=$(waiting_read 2>/dev/null); then waiting=$(jq -c .waiting <<<"$w"); else errs+=(waiting); fi
   triaged=null; if [ -e "$H/triaged.txt" ]; then
     if [ -f "$H/triaged.txt" ] && [ -r "$H/triaged.txt" ]; then triaged=$(grep -xE '[0-9]+' "$H/triaged.txt" | jq -Rsc 'split("\n") | map(select(. != "") | tonumber)')
     else errs+=(triaged); fi
@@ -629,11 +684,11 @@ PY
       | map_values(if type == "number" then . else null end)' "$LOCAL" 2>/dev/null) || { caps=null; errs+=(caps); }; }
   j() { printf '%s' "${1:-null}"; }   # each source travels as a file: a large array would overflow one argv string
   jq -nc --arg repo "$REPO" --arg at "$(now)" --slurpfile leads <(j "$leads") --slurpfile rep <(j "$rep") --slurpfile watchers <(j "$watchers") \
-    --slurpfile inbox <(j "$inbox") --slurpfile asks <(j "$asks") --slurpfile triaged <(j "$triaged") --slurpfile wts <(j "$wts") --argjson caps "${caps:-null}" \
+    --slurpfile inbox <(j "$inbox") --slurpfile asks <(j "$asks") --slurpfile waiting <(j "$waiting") --slurpfile triaged <(j "$triaged") --slurpfile wts <(j "$wts") --argjson caps "${caps:-null}" \
     --arg mode "$(cfg '.mode // empty')" --arg boot "$(cfg '.bootstrap // empty')" --arg trunk "$TRUNK" \
     --arg load1 "$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)" --arg nproc "$(nproc 2>/dev/null)" --arg errs "${errs[*]}" \
     '{schema: "orchy.state/1", repo: $repo, at: $at, leads: $leads[0], reports: $rep[0].reports, progress: $rep[0].progress, watchers: $watchers[0],
-      inbox: $inbox[0], asks: $asks[0], triaged: $triaged[0], worktrees: $wts[0], caps: $caps,
+      inbox: $inbox[0], asks: $asks[0], waiting: $waiting[0], triaged: $triaged[0], worktrees: $wts[0], caps: $caps,
       mode: (if $mode == "" then null else $mode end), bootstrap: (if $boot == "" then null else $boot end), trunk: $trunk,
       load1: ($load1 | tonumber? // null), nproc: ($nproc | tonumber? // null), errors: ($errs | split(" ") | map(select(. != "")))}';;
 wait)

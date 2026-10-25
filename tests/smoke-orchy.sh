@@ -230,13 +230,40 @@ o=$(ORCHY_HOME="$HR" "$ORCHY" receipt --offline r); grep -qF 'issues closed ? (o
 grep -q 'owner took' <"$T/r.json" && fail "receipt JSON carries the owner record"
 # a fresh home stays empty under every reader, and a missing ledger is not created
 HF="$T/cap/fresh"; mkdir -m 700 "$HF"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HF/"
-ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" state | jq -e '.schema == "orchy.state/1" and .leads == [] and .asks == []' >/dev/null || fail "state on a fresh home"
+ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" state | jq -e '.schema == "orchy.state/1" and .leads == [] and .asks == [] and .waiting == []' >/dev/null || fail "state on a fresh home"
 ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" receipt --offline >/dev/null || fail "receipt on a fresh home"
 ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" ask list --json | jq -e '. == {schema: "orchy.asks/1", asks: []}' >/dev/null || fail "ask list on a missing ledger"
-[ -z "$(find "$HF" -mindepth 1 -type d)" ] && [ ! -e "$T/asks-none" ] || fail "a reader created $(find "$HF" -mindepth 1 -type d) $(ls -d "$T/asks-none" 2>/dev/null)"
+ORCHY_HOME="$HF" "$ORCHY" waiting list --json | jq -e '. == {schema: "orchy.waiting/1", waiting: []}' >/dev/null && [ -z "$(ORCHY_HOME="$HF" "$ORCHY" waiting list)" ] || fail "waiting list on a fresh home"
+[ -z "$(find "$HF" -mindepth 1 ! -name orchy.json ! -name local.json)" ] && [ ! -e "$T/asks-none" ] || fail "a reader created $(find "$HF" -mindepth 1 ! -name orchy.json ! -name local.json) $(ls -d "$T/asks-none" 2>/dev/null)"
 # one bad source never blanks the state: a huge triage list travels as a file, a junk stall setting takes the default
 seq 0 29999 > "$HF/triaged.txt"; jq '.leads.stall_after_min = "oops"' "$HF/orchy.json" > "$T/o.json" && mv "$T/o.json" "$HF/orchy.json"
 ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" state | jq -e '.triaged | length == 30000' >/dev/null || fail "state with a large triage list or a junk stall setting"
+# waiting: one item per ref, replaced in place with its since kept; a refusal is one line and changes nothing; events carry the ref only
+HV="$T/cap/hv"; mkdir -p "$HV"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HV/"; V() { ORCHY_HOME="$HV" "$ORCHY" waiting "$@"; }
+V add pr:12 "Rename the required check, then re-arm" >/dev/null && V add page:0 Sign page 0 >/dev/null || fail "waiting add"
+V list --json | jq -e '.schema == "orchy.waiting/1" and [.waiting[] | keys] == [["ref", "since", "text"], ["ref", "since", "text"]] and [.waiting[].ref] == ["pr:12", "page:0"]
+  and .waiting[1].text == "Sign page 0" and all(.waiting[].since; test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))' >/dev/null || fail "waiting list --json: $(V list --json)"
+jq '.waiting[0].since = "2026-01-01T00:00:00Z"' "$HV/waiting.json" > "$T/w.json" && mv "$T/w.json" "$HV/waiting.json"
+V add pr:12 "Fix the branch rules, then re-arm" >/dev/null || fail "waiting add on an existing ref"
+V list --json | jq -e '.waiting | length == 2 and .[0] == {ref: "pr:12", text: "Fix the branch rules, then re-arm", since: "2026-01-01T00:00:00Z"}' >/dev/null || fail "a second add did not replace the text in place and keep since: $(V list --json)"
+V "done" pr:12 >/dev/null && V list --json | jq -e '[.waiting[].ref] == ["page:0"]' >/dev/null || fail "waiting done: $(V list --json)"
+ORCHY_HOME="$HV" "$ORCHY" snapshot 2>&1 | sed -n '/^-- waiting/,/^--/p' | grep -qx 'page:0  [0-9]*m  Sign page 0' || fail "snapshot does not list the waiting record"
+e160=$(printf 'é%.0s' $(seq 160)); V add pr:13 "$e160" >/dev/null && V "done" pr:13 >/dev/null || fail "160 code points were refused"
+wb=$(md5sum "$HV/waiting.json" "$HV/events.jsonl")
+bad=("pr:012" x "pr:1x" x "page:" x "lane:-x" x "other:$(printf 'a%.0s' $(seq 33))" x $'pr:1\npr:2' x "ask:7" x "pr:1234567890" x "other:acct-a" x
+  pr:1 "" pr:1 "${e160}é" pr:1 $'a\tb' pr:1 $'a\xc2\x85b' pr:1 $'a\xe2\x80\xa8b' pr:1 $'a\xe2\x80\xaeb' pr:1 $'a\xe2\x81\xa6b' pr:1 $'\xff' pr:1 "Ask acct-a to log in again")
+for ((i = 0; i < ${#bad[@]}; i += 2)); do o=$(V add "${bad[i]}" "${bad[i+1]}" 2>&1) && fail "waiting add accepted $(printf '%q %q' "${bad[i]}" "${bad[i+1]}")"
+  [ "$(grep -c '' <<<"$o")" = 1 ] || fail "a waiting refusal is not one line: $o"; done
+o=$(V "done" pr:12 2>&1) && fail "done succeeded on a ref nothing waits on: $o"
+[ "$(md5sum "$HV/waiting.json" "$HV/events.jsonl")" = "$wb" ] || fail "a refused waiting command changed the record or the events"
+ps=(); for i in 1 2 3 4 5 6; do ( V add "issue:$i" "Answer the question on issue $i" >/dev/null ) & ps+=($!); done; wait "${ps[@]}" || true
+V list --json | jq -e '[.waiting[].ref | select(startswith("issue:"))] | sort == ["issue:1", "issue:2", "issue:3", "issue:4", "issue:5", "issue:6"]' >/dev/null || fail "concurrent adds lost an item: $(V list --json)"
+jq -se '[.[] | select(.kind | startswith("waiting."))] | all(keys == ["at", "kind", "ref", "schema"])
+  and [.[:4][] | [.kind, .ref]] == [["waiting.add", "pr:12"], ["waiting.add", "page:0"], ["waiting.add", "pr:12"], ["waiting.done", "pr:12"]]' "$HV/events.jsonl" >/dev/null || fail "waiting events: $(head -4 "$HV/events.jsonl")"
+printf '%s\n' '{"schema":"orchy.waiting/1","waiting":[{"ref":"pr:1"}]}' > "$HV/waiting.json"; wb=$(md5sum "$HV/waiting.json")
+ORCHY_HOME="$HV" "$ORCHY" state | jq -e '.waiting == null and (.errors | index("waiting"))' >/dev/null || fail "state over a malformed waiting record"
+V add pr:2 "Merge it" >/dev/null 2>&1 && fail "waiting add replaced a malformed record"; [ "$(md5sum "$HV/waiting.json")" = "$wb" ] || fail "waiting add changed a malformed record"
+ln -sf "$G/receipt/waiting.json" "$HV/waiting.json"; V list --json >/dev/null 2>&1 && fail "waiting list followed a symlink"
 # an unmarked log orders by its mtime and the session's running total, never by file name
 HL="$T/cap/legacy"; mkdir -p "$HL/leads"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HL/"
 for k in l-plan:1.0:2026-10-20T01:00:00Z l-a1:1.5:2026-10-20T02:00:00Z; do IFS=: read -r n c _ <<<"$k"; m=${k#*:*:}
@@ -352,7 +379,7 @@ o=$(ORCHY_HOME="$HR" "$ORCHY" receipt r); grep -qF "asks done 1 ($r)" <<<"$o" ||
 # readers write nothing: the home, the ledger and gh's log stay byte-for-byte; the state names asks by id and flags only
 fp() { find "$HR" "$T/asks" -printf '%p %s %T@ %m\n' | sort; md5sum < "$MOCK_DIR/gh.log"; }
 b=$(fp); R() { ORCHY_HOME="$HR" "$ORCHY" "$@" >/dev/null || fail "reader $*"; }
-R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline
+R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline; R waiting list; R waiting list --json
 [ "$(fp)" = "$b" ] || fail "a reader changed the home, the ledger or gh.log: $(diff <(echo "$b") <(fp))"
 "$ORCHY" state > "$T/st.json"; jq -e --arg g "$g" '.asks | any(.id == $g and .lane == "gone-1" and .has_public) and all(has("text") | not)' "$T/st.json" >/dev/null || fail "state asks: $(jq -c .asks "$T/st.json")"
 grep -q 'Ana' "$T/st.json" && fail "state printed an ask's text"

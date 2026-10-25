@@ -51,6 +51,18 @@
   "schema": "orchy.state/1",
   "triaged": null,
   "trunk": "dev",
+  "waiting": [
+    {
+      "ref": "page:0",
+      "since": "2026-10-24T02:00:00Z",
+      "text": "Sign page 0, the program charter"
+    },
+    {
+      "ref": "pr:21",
+      "since": "2026-10-24T03:00:00Z",
+      "text": "Rename the required check in the branch rules, then say re-arm"
+    }
+  ],
   "watchers": [],
   "worktrees": []
 }
