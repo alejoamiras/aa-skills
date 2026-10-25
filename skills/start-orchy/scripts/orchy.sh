@@ -599,8 +599,11 @@ print(json.dumps(out))
 PY
   ) || { rep='{"reports": null, "progress": null}'; errs+=(reports); }
   watchers=$(for f in "$H"/watch/*.pid; do [ -f "$f" ] || continue; n=$(basename "$f" .pid); a=false; watcher_alive "$f" && a=true
-      jq -nc --arg n "$n" --argjson a "$a" --arg last "$(tail -n 1 "$H/watch/$n.out" 2>/dev/null | cut -c1-120)" \
-        '{name: $n, alive: $a, pr: (($n | capture("^merge-(?<n>[0-9]+)$").n | tonumber) // null), last: (if $last == "" then null else $last end)}'
+      # the last line is often a runs table or a status line, so the newest watcher marker is read separately
+      mk=$(grep -oE '#[0-9]+ MERGED|HEAD MOVED|DIRTY|TRUNK RED|TRUNK UNREADABLE|REQUIRED FAILED|MISSING REQUIRED CHECK|NOT MERGED|TIMEOUT|REFUSED|state unreadable after the merge call' "$H/watch/$n.out" 2>/dev/null | tail -n 1)
+      jq -nc --arg n "$n" --argjson a "$a" --arg last "$(tail -n 1 "$H/watch/$n.out" 2>/dev/null | cut -c1-120)" --arg mk "$mk" \
+        '{name: $n, alive: $a, pr: (($n | capture("^merge-(?<n>[0-9]+)$").n | tonumber) // null), last: (if $last == "" then null else $last end),
+          marker: (if $mk == "" then null elif ($mk | test("^#[0-9]+ MERGED$")) then "MERGED" elif ($mk | startswith("state unreadable")) then "AMBIGUOUS" else $mk end)}'
     done | jq -sc .) || { watchers=null; errs+=(watchers); }
   inbox=$(for f in "$H"/inbox/*.jsonl; do [ -f "$f" ] || continue
       c=$(cat "${f%.jsonl}.cursor" 2>/dev/null); [[ "$c" =~ ^[0-9]{1,15}$ ]] && c=$((10#$c)) || c=0

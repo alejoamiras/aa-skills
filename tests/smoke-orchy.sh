@@ -243,6 +243,13 @@ for k in l-plan:1.0:2026-10-20T01:00:00Z l-a1:1.5:2026-10-20T02:00:00Z; do IFS=:
   printf '{"type":"system","subtype":"init","session_id":"s-legacy"}\n{"type":"result","total_cost_usd":%s}\n' "$c" > "$HL/leads/$n.log"; touch -d "$m" "$HL/leads/$n.log"; done
 ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline | jq -e '[.lanes[0].runs[] | {key, cost_usd}] == [{key: "l-plan", cost_usd: 1.0}, {key: "l-a1", cost_usd: 0.5}] and .lanes[0].cost_usd == 1.5' >/dev/null \
   || fail "legacy run order: $(ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline | jq -c '.lanes[0].runs')"
+# a watcher's marker is its newest marker line, not its last line (a runs table follows REQUIRED FAILED, status lines follow a missing check)
+mkdir -p "$HL/watch"; for n in 5 6 7 8; do echo "999999 1" > "$HL/watch/merge-$n.pid"; done
+printf '10:00Z required ok=1/2\n10:01Z REQUIRED FAILED: lint\n| lint | failure |\n' > "$HL/watch/merge-5.out"
+printf '10:00Z MISSING REQUIRED CHECK (no run or status after 10 rounds): e2e\n10:02Z required ok=1/2 report_done=yes state: MERGEABLE CLEAN\n' > "$HL/watch/merge-6.out"
+printf '#7 state unreadable after the merge call; check it by hand\n' > "$HL/watch/merge-7.out"; printf '10:00Z TRUNK RED at 1234abcd: ci; waiting\n#8 MERGED 0123abc\n--- teardown x\n' > "$HL/watch/merge-8.out"
+ORCHY_HOME="$HL" "$ORCHY" state | jq -e '[.watchers[] | {pr, marker}] == [{pr: 5, marker: "REQUIRED FAILED"}, {pr: 6, marker: "MISSING REQUIRED CHECK"}, {pr: 7, marker: "AMBIGUOUS"}, {pr: 8, marker: "MERGED"}]' >/dev/null \
+  || fail "watcher markers: $(ORCHY_HOME="$HL" "$ORCHY" state | jq -c '[.watchers[] | {pr, marker, last}]')"
 # a killed resume stamped in the same second as the run it resumes still counts its tokens
 printf '%s\n' '{"type":"orchy_invocation","key":"t-a1","lane":"t","cmd":"launch","at":"2026-10-20T03:00:00Z"}' '{"type":"system","subtype":"init","session_id":"s-tie"}' \
   '{"type":"result","total_cost_usd":1.0}' '{"type":"orchy_invocation","key":"t-a1","lane":"t","cmd":"resume","at":"2026-10-20T03:00:00Z"}' \
