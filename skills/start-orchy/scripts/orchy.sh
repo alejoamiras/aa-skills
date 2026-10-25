@@ -828,9 +828,11 @@ for path in sorted(glob.glob(f"{H}/leads/*.log")):
 # plus the unpriced usage of runs killed after it. A run's own cost is its total minus the session's previous total.
 lanes, by_sid = {}, {}
 for i, s in enumerate(segs): s["sid"] = s["sid"] or f"unknown-{i}"
-def order(s):  # an unmarked segment sits just before the next marked one in its log, else at the log's mtime; ties go by running total
-    later = [x["at"] for x in s["file"][s["file"].index(s) + 1:] if x["at"]]
-    return (s["at"] or (later[0] if later else iso(s["mtime"])), 1 if s["at"] else 0, float((s["result"] or {}).get("total_cost_usd") or 0))
+def order(s):  # an unmarked segment sits just before the next marked one in its log, else at the log's mtime;
+    # ties go by the running total so far in the log (a killed run has none of its own), then by position in the log
+    i = s["file"].index(s); later = [x["at"] for x in s["file"][i + 1:] if x["at"]]
+    total = max([float(x["result"].get("total_cost_usd") or 0) for x in s["file"][:i + 1] if x["result"]] or [0.0])
+    return (s["at"] or (later[0] if later else iso(s["mtime"])), 1 if s["at"] else 0, total, i)
 for s in sorted(segs, key=order): by_sid.setdefault(s["sid"], []).append(s)
 for sid, ss in by_sid.items():
     L = lanes.setdefault(ss[0]["lane"], {"cost": 0.0, "tok": {k[0]: 0 for k in KINDS}, "partial": 0, "sessions": 0, "keys": set(), "start": None, "end": 0, "runs": []})

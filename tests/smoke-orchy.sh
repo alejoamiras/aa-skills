@@ -243,6 +243,12 @@ for k in l-plan:1.0:2026-10-20T01:00:00Z l-a1:1.5:2026-10-20T02:00:00Z; do IFS=:
   printf '{"type":"system","subtype":"init","session_id":"s-legacy"}\n{"type":"result","total_cost_usd":%s}\n' "$c" > "$HL/leads/$n.log"; touch -d "$m" "$HL/leads/$n.log"; done
 ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline | jq -e '[.lanes[0].runs[] | {key, cost_usd}] == [{key: "l-plan", cost_usd: 1.0}, {key: "l-a1", cost_usd: 0.5}] and .lanes[0].cost_usd == 1.5' >/dev/null \
   || fail "legacy run order: $(ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline | jq -c '.lanes[0].runs')"
+# a killed resume stamped in the same second as the run it resumes still counts its tokens
+printf '%s\n' '{"type":"orchy_invocation","key":"t-a1","lane":"t","cmd":"launch","at":"2026-10-20T03:00:00Z"}' '{"type":"system","subtype":"init","session_id":"s-tie"}' \
+  '{"type":"result","total_cost_usd":1.0}' '{"type":"orchy_invocation","key":"t-a1","lane":"t","cmd":"resume","at":"2026-10-20T03:00:00Z"}' \
+  '{"type":"system","subtype":"init","session_id":"s-tie"}' '{"type":"assistant","message":{"id":"k1","usage":{"input_tokens":37}}}' > "$HL/leads/t-a1.log"
+ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline t | jq -e '.lanes[0] | .unpriced_tokens == 37 and ([.runs[].cost_usd] == [1.0, null])' >/dev/null \
+  || fail "a same-second killed resume lost its tokens: $(ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline t | jq -c '.lanes[0] | {unpriced_tokens, runs}')"
 # ask ledger: distinct ids under contention, transitions, a torn tail, the size cap
 LG="$T/asks/example-app.jsonl"; A() { "$ORCHY" ask "$@"; }
 ps=(); for i in 1 2 3 4; do ( A add "parallel ask $i" > "$T/add.$i" ) & ps+=($!); done; wait "${ps[@]}" || true
