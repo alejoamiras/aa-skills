@@ -20,8 +20,8 @@ out=$("$ORCHY" render common-brief.md REPO=example/app PRODUCT="the app" TRUNK=d
 grep -q 'example/app backlog program (the app)' <<<"$out" || fail "render substitution"
 "$ORCHY" render --keep LANE,KEY,WORKTREE,BRANCH common-brief.md REPO=example/app PRODUCT=x TRUNK=dev PLANS_DIR=plans ARCHIVE_DIR=plans/archive ORCHY_HOME="$ORCHY_HOME" CODEX_EFFORT=high CODEX_MODEL=m CODEX_MODEL_SHORT=s LEAD_MODEL=opus LEAD_MODEL_NAME=x QUALITY_BAR=p GATES=g PROTECTED=main KNOWN_LIMIT_LABEL=k DELEGATIONS= NEVER_OPEN= | grep -q '<WORKTREE>' || fail "render --keep did not keep the lead-bound tokens"
 if "$ORCHY" render common-brief.md REPO=x >/dev/null 2>&1; then fail "render must fail on a leftover token"; fi
-for t in planner-brief implementer-brief lane-brief plan-spawn arc-spawn closeout-spawn shots-spawn goal tick; do [ -f "$K/templates/$t.md" ] || fail "template $t missing"; done
-for t in goal tick; do "$ORCHY" render "$t.md" REPO=example/app ORCHY_HOME="$ORCHY_HOME" ORCHY_SH="$ORCHY" MERGE_METHOD=squash PROTECTED=main TRUNK=dev CAPS="2 heavy, 3 light" LOAD_MAX=6 BLOCKED_LABEL=blocked:external > "$T/$t.txt" || fail "render $t left a token"; "$ORCHY" check-text "$T/$t.txt" >/dev/null || fail "check-text $t"; done
+for t in planner-brief implementer-brief lane-brief plan-spawn arc-spawn closeout-spawn shots-spawn tick; do [ -f "$K/templates/$t.md" ] || fail "template $t missing"; done
+"$ORCHY" render tick.md REPO=example/app ORCHY_SH="$ORCHY" > "$T/tick.txt" || fail "render tick left a token"; "$ORCHY" check-text "$T/tick.txt" >/dev/null || fail "check-text tick"
 # every rendered brief passes check-text (no roster name, no account-variable assignment)
 printf '%s\n' "$out" > "$T/brief.md"; "$ORCHY" check-text "$T/brief.md" || fail "rendered common brief fails check-text"
 printf 'run it on acct-a\n' > "$T/bad.md"; if "$ORCHY" check-text "$T/bad.md" >/dev/null 2>&1; then fail "check-text accepted a roster name"; fi
