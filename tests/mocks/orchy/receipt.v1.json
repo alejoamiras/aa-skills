@@ -1,0 +1,98 @@
+{
+  "lanes": [
+    {
+      "asks_done": [],
+      "codex_rounds": 0,
+      "cost_usd": 0.25,
+      "failed_arcs": 0,
+      "gh_error": null,
+      "issues_closed": null,
+      "lane": "q",
+      "merged": [],
+      "prs": [],
+      "runs": [
+        {
+          "approx": true,
+          "at": null,
+          "cmd": null,
+          "cost_usd": 0.25,
+          "ended": "2026-10-24T03:00:00Z",
+          "key": "q-plan",
+          "session": "00000000-0000-4000-8000-0000000000a3"
+        }
+      ],
+      "sessions": 1,
+      "start": null,
+      "tokens": {
+        "cache_read": 3,
+        "cache_write": 4,
+        "in": 1,
+        "out": 2
+      },
+      "unpriced_tokens": 0,
+      "wall_s": null
+    },
+    {
+      "asks_done": [],
+      "codex_rounds": 3,
+      "cost_usd": 1.5,
+      "failed_arcs": 1,
+      "gh_error": null,
+      "issues_closed": null,
+      "lane": "r",
+      "merged": [
+        21
+      ],
+      "prs": [
+        21,
+        22,
+        23
+      ],
+      "runs": [
+        {
+          "approx": false,
+          "at": "2026-10-24T00:00:00Z",
+          "cmd": "launch",
+          "cost_usd": 1.0,
+          "ended": "2026-10-24T00:30:00Z",
+          "key": "r-plan",
+          "session": "00000000-0000-4000-8000-0000000000a1"
+        },
+        {
+          "approx": true,
+          "at": "2026-10-24T01:00:00Z",
+          "cmd": "resume",
+          "cost_usd": 0.5,
+          "ended": "2026-10-24T02:00:00Z",
+          "key": "r-a1",
+          "session": "00000000-0000-4000-8000-0000000000a1"
+        },
+        {
+          "approx": true,
+          "at": "2026-10-24T02:00:00Z",
+          "cmd": "launch",
+          "cost_usd": null,
+          "ended": "2026-10-24T03:00:00Z",
+          "key": "r-a1",
+          "session": "00000000-0000-4000-8000-0000000000a2"
+        }
+      ],
+      "sessions": 2,
+      "start": "2026-10-24T00:00:00Z",
+      "tokens": {
+        "cache_read": 1500,
+        "cache_write": 60,
+        "in": 150,
+        "out": 20
+      },
+      "unpriced_tokens": 37,
+      "wall_s": 10800
+    }
+  ],
+  "offline": true,
+  "schema": "orchy.receipt/1",
+  "total": {
+    "cost_usd": 1.75,
+    "unpriced_tokens": 37
+  }
+}

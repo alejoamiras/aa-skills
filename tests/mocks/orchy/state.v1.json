@@ -1,0 +1,56 @@
+{
+  "asks": [],
+  "bootstrap": "complete",
+  "caps": {
+    "heavy": 2,
+    "light": 3,
+    "load_max": 144,
+    "week_floor_pct": 70
+  },
+  "errors": [],
+  "inbox": [],
+  "leads": [],
+  "mode": null,
+  "progress": {},
+  "repo": "example/app",
+  "reports": [
+    {
+      "arc_failed_lines": 0,
+      "codex_rounds": 2,
+      "detail": null,
+      "head": "1111111111111111111111111111111111111111",
+      "key": "r-a1",
+      "last_failed_sha": null,
+      "marker": "LEAD_DONE",
+      "mtime": 1792810800,
+      "pr": 21
+    },
+    {
+      "arc_failed_lines": 0,
+      "codex_rounds": 1,
+      "detail": null,
+      "head": "2222222222222222222222222222222222222222",
+      "key": "r-arc1",
+      "last_failed_sha": null,
+      "marker": "LEAD_DONE",
+      "mtime": 1792810800,
+      "pr": 23
+    },
+    {
+      "arc_failed_lines": 1,
+      "codex_rounds": null,
+      "detail": "a0 gate red",
+      "head": null,
+      "key": "r-plan",
+      "last_failed_sha": "42e259e9af4bb82ecbe63497e44c237165f2011412e0934e7c213a8ef2a18915",
+      "marker": "ARC_FAILED",
+      "mtime": 1792810800,
+      "pr": 22
+    }
+  ],
+  "schema": "orchy.state/1",
+  "triaged": null,
+  "trunk": "dev",
+  "watchers": [],
+  "worktrees": []
+}

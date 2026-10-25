@@ -37,6 +37,7 @@ org=$(cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/org" 2>/dev/null || echo "org-$ac
 [[ $1 == --version ]] && { echo "9.9.9 (Claude Code)"; exit 0; }
 [[ $1 == auth ]] && { printf '{\n  "loggedIn": true,\n  "email": "%s@x",\n  "orgId": "%s",\n  "subscriptionType": "%s"\n}\n' "$acct" "$org" "$plan"; exit 0; }
 if [[ " $* " == *" /usage "* ]]; then
+  echo "$acct" >> "$CALLS.usage"
   echo "You are currently using your subscription to power your Claude Code usage"
   [[ -f $CLAUDE_CONFIG_DIR/reset ]] || exit 0   # idle: no window open anywhere
   # flaky: the first reply of a busy account comes back windowless.
@@ -95,6 +96,11 @@ t "flaky: one windowless reply is re-probed, not read as idle" grep -q '"account
 t "table: the CLI's comma is dropped from week resets" sh -c '"$1" > "$2" && grep -q "aaa-late" "$2" && ! grep -qE "[A-Z][a-z]{2} [0-9]{1,2}, " "$2"' _ "$CU" "$S/table.out"
 
 "$CU" refresh
+# --json --cached serves the snapshot: no /usage probe, no background refresh even when stale, exit 1 with nothing cached
+u=$(wc -l < "$CALLS.usage"); CLAUDE_USAGE_TTL=0 "$CU" --json --cached > "$S/cached.json"; sleep 1
+t "cached json: snapshot rows, never a probe or a refresh" sh -c 'test "$(wc -l < "$1")" -eq "$2" && grep -q "\"account\":\"aaa-late\"" "$3"' _ "$CALLS.usage" "$u" "$S/cached.json"
+tn "cached json: no snapshot is an error" env XDG_CACHE_HOME="$S/cache-none" "$CU" --json --cached
+t "cached json: no snapshot probes nothing either" test "$(wc -l < "$CALLS.usage")" -eq "$u"
 t "best: idle account wins" grep -q '^fresh (idle' <("$CU" best)
 t "other: skips the caller's own account" test "$(CLAUDE_USAGE_MODEL=sonnet CLAUDE_CONFIG_DIR="$CLAUDE_ACCOUNTS_ROOT/fresh" "$CU" resolve other)" = zzz-soon
 tn "other: Fable work refuses accounts with no Fable left" env CLAUDE_CONFIG_DIR="$CLAUDE_ACCOUNTS_ROOT/fresh" "$CU" resolve other
@@ -257,6 +263,8 @@ _CLAUDE_USAGE_PASSIVE=1 nr refresh
 CLAUDE_USAGE_TTL=99999 nr --json > "$S/pass.json"
 t "passive refresh: never probes, rows keep the reading's own age" sh -c 'test "$(wc -l < "$1")" -eq "$2" && grep -q "\"account\":\"tk-free\".*\"observed_at\":$3" "$4"' \
   _ "$NET/argv" "$calls" "$old" "$S/pass.json"
+calls=$(wc -l < "$NET/argv"); CLAUDE_USAGE_TTL=0 nr --json --cached > "$S/net-cached.json"
+t "cached json: token rows from their cached reading, never probed" sh -c 'test "$(wc -l < "$1")" -eq "$2" && grep -q "\"account\":\"tk-free\"" "$3"' _ "$NET/argv" "$calls" "$S/net-cached.json"
 t "statusline: an old token reading is marked stale" grep -q stale <(CLAUDE_CONFIG_DIR="$NR/tk-free" nr statusline)
 
 # Ranking and exhaustion, on tokens alone: <name> <session used> <week used> <fable used> [status].
@@ -458,5 +466,14 @@ CLAUDE_CODE_OAUTH_TOKEN=stray CLAUDE_ACCOUNTS_ROOT="$S/empty" XDG_CACHE_HOME="$S
 CD=$(ls -td "$TMPDIR"/claude-* | head -1)
 t "reviewer: no best account falls back to ~/.claude, stray creds stripped" sh -c '[ "$1" -eq 0 ] && grep -q "^dir=unset token=unset" "$2" && grep -q "^NOTE: claude-usage found no best account" "$3" && [ "$(cat "$4/account")" = main ]' _ "$rc" <(last) "$S/fb.err" "$CD"
 tn "reviewer: an unknown CLAUDE_ACCOUNT is a usage error" env CLAUDE_ACCOUNT=nobody "$RUNC" "$S/prompt" "$S/repo" low
+
+# --- codex-usage --json --cached ----------------------------------------------
+mkdir -p "$S/cxbin"; printf '#!/usr/bin/env bash\necho "$*" >> "%s/cx.calls"\nexit 1\n' "$S" > "$S/cxbin/codex"; chmod +x "$S/cxbin/codex"; : > "$S/cx.calls"
+cx() { env PATH="$S/cxbin:$PATH" CODEX_ACCOUNTS_ROOT="$S/cx-accounts" XDG_CACHE_HOME="$S/cache-cx" CODEX_USAGE_TTL=0 "$ROOT/bin/codex-usage" "$@"; }
+mkdir -p "$S/cx-accounts/cx-a"; tn "codex cached json: no snapshot is an error" cx --json --cached
+d="$S/cache-cx/codex-usage/$(printf '%s' "$(cd "$S/cx-accounts" && pwd -P)" | cksum | cut -d' ' -f1)"; mkdir -p "$d"
+printf 'k\tcx-a\ta@x\tplus\t40\t%s\t90\t%s\t-\tfalse\t%s\t0\t-\n' "$(( $(date +%s) + 86400 ))" "$(( $(date +%s) + 3600 ))" "$(date +%s)" > "$d/snapshot.tsv"
+cx --json --cached > "$S/cx.json"; sleep 1
+t "codex cached json: snapshot rows, never a probe or a refresh" sh -c 'grep -q "\"account\":\"cx-a\".*\"week_left_pct\":40" "$1" && ! test -s "$2"' _ "$S/cx.json" "$S/cx.calls"
 
 exit "$FAIL"

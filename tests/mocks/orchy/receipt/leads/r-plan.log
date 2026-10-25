@@ -1,4 +1,4 @@
 {"type":"orchy_invocation","key":"r-plan","lane":"r","cmd":"launch","at":"2026-10-24T00:00:00Z"}
 {"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-0000000000a1"}
 {"type":"assistant","message":{"id":"p1","usage":{"input_tokens":100,"output_tokens":10}}}
-{"type":"result","subtype":"success","total_cost_usd":1.0,"usage":{"input_tokens":100,"output_tokens":10},"modelUsage":{"claude-opus-5-5":{"inputTokens":100,"outputTokens":10,"cacheReadInputTokens":1000,"cacheCreationInputTokens":50,"costUSD":1.0}}}
+{"type":"result","subtype":"success","duration_ms":1800000,"total_cost_usd":1.0,"usage":{"input_tokens":100,"output_tokens":10},"modelUsage":{"claude-opus-5-5":{"inputTokens":100,"outputTokens":10,"cacheReadInputTokens":1000,"cacheCreationInputTokens":50,"costUSD":1.0}}}
