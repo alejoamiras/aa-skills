@@ -80,7 +80,8 @@ ev() { # ev <kind> [k=v | k:=<json>]...: one orchy.event/1 line in $H/events.jso
   local kind=$1 a args=(); shift
   for a in "$@"; do case "$a" in *:=*) args+=(--argjson "${a%%:=*}" "${a#*:=}");; *) args+=(--arg "${a%%=*}" "${a#*=}");; esac; done
   # one write under 1 KiB, so atomic under O_APPEND; a failed write never changes the caller's output or exit code
-  { jq -nc --arg kind "$kind" --arg at "$(now)" "${args[@]}" '{schema: "orchy.event/1"} + $ARGS.named' >> "$H/events.jsonl"; } 2>/dev/null || true
+  local f="$H/events.jsonl"; if [ -L "$f" ] || { [ -e "$f" ] && [ ! -f "$f" ]; }; then return 0; fi
+  { jq -nc --arg kind "$kind" --arg at "$(now)" "${args[@]}" '{schema: "orchy.event/1"} + $ARGS.named' >> "$f"; } 2>/dev/null || true
 }
 pstart() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null || echo ""; }   # a pid is reused; its start time is not
 alive() { # alive <pid> [<start>]: the process exists, is a claude or claude-usage run, and has the recorded start time
@@ -549,7 +550,7 @@ snapshot)
 state)
   # orchy.state/1 for a poller: local facts only (no gh, usage or network call) and nothing written. The seat and the
   # pages are left to the reader, who parses those files directly. An unreadable source is null and named in errors.
-  errs=(); tnow=$(date +%s); stall=$(( $(cfg '.leads.stall_after_min // 20') * 60 )); ps_rows=$(ps -eo pid=,ppid=,etimes=,args=)
+  errs=(); tnow=$(date +%s); sm=$(cfg '.leads.stall_after_min // 20' 2>/dev/null); [[ "$sm" =~ ^[0-9]{1,6}$ ]] || sm=20; stall=$(( 10#$sm * 60 )); ps_rows=$(ps -eo pid=,ppid=,etimes=,args=)
   leads=$(for f in "$H"/leads/*.started; do [ -f "$f" ] && [ ! -L "$f" ] || continue; k=$(basename "$f" .started)
       read -r pid st acct t weight _ pg lane _ < "$f" || continue
       a=false; alive "$pid" "$st" && a=true; nw=""; [ $a = true ] && nw=$(newest_proc "$pid" "$ps_rows")
@@ -623,12 +624,13 @@ PY
   else errs+=(worktrees); fi
   caps=null; [ -f "$LOCAL" ] && { caps=$(jq -c '{week_floor_pct: .accounts.min_week_left_pct, heavy: .accounts.heavy_per_account, light: .accounts.light_per_account, load_max}
       | map_values(if type == "number" then . else null end)' "$LOCAL" 2>/dev/null) || { caps=null; errs+=(caps); }; }
-  jq -nc --arg repo "$REPO" --arg at "$(now)" --argjson leads "${leads:-null}" --argjson rep "$rep" --argjson watchers "${watchers:-null}" \
-    --argjson inbox "${inbox:-null}" --argjson asks "${asks:-null}" --argjson triaged "${triaged:-null}" --argjson wts "${wts:-null}" --argjson caps "${caps:-null}" \
+  j() { printf '%s' "${1:-null}"; }   # each source travels as a file: a large array would overflow one argv string
+  jq -nc --arg repo "$REPO" --arg at "$(now)" --slurpfile leads <(j "$leads") --slurpfile rep <(j "$rep") --slurpfile watchers <(j "$watchers") \
+    --slurpfile inbox <(j "$inbox") --slurpfile asks <(j "$asks") --slurpfile triaged <(j "$triaged") --slurpfile wts <(j "$wts") --argjson caps "${caps:-null}" \
     --arg mode "$(cfg '.mode // empty')" --arg boot "$(cfg '.bootstrap // empty')" --arg trunk "$TRUNK" \
     --arg load1 "$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)" --arg nproc "$(nproc 2>/dev/null)" --arg errs "${errs[*]}" \
-    '{schema: "orchy.state/1", repo: $repo, at: $at, leads: $leads, reports: $rep.reports, progress: $rep.progress, watchers: $watchers,
-      inbox: $inbox, asks: $asks, triaged: $triaged, worktrees: $wts, caps: $caps,
+    '{schema: "orchy.state/1", repo: $repo, at: $at, leads: $leads[0], reports: $rep[0].reports, progress: $rep[0].progress, watchers: $watchers[0],
+      inbox: $inbox[0], asks: $asks[0], triaged: $triaged[0], worktrees: $wts[0], caps: $caps,
       mode: (if $mode == "" then null else $mode end), bootstrap: (if $boot == "" then null else $boot end), trunk: $trunk,
       load1: ($load1 | tonumber? // null), nproc: ($nproc | tonumber? // null), errors: ($errs | split(" ") | map(select(. != "")))}';;
 wait)
@@ -826,7 +828,10 @@ for path in sorted(glob.glob(f"{H}/leads/*.log")):
 # plus the unpriced usage of runs killed after it. A run's own cost is its total minus the session's previous total.
 lanes, by_sid = {}, {}
 for i, s in enumerate(segs): s["sid"] = s["sid"] or f"unknown-{i}"
-for s in sorted(segs, key=lambda s: s["at"]): by_sid.setdefault(s["sid"], []).append(s)
+def order(s):  # an unmarked segment sits just before the next marked one in its log, else at the log's mtime; ties go by running total
+    later = [x["at"] for x in s["file"][s["file"].index(s) + 1:] if x["at"]]
+    return (s["at"] or (later[0] if later else iso(s["mtime"])), 1 if s["at"] else 0, float((s["result"] or {}).get("total_cost_usd") or 0))
+for s in sorted(segs, key=order): by_sid.setdefault(s["sid"], []).append(s)
 for sid, ss in by_sid.items():
     L = lanes.setdefault(ss[0]["lane"], {"cost": 0.0, "tok": {k[0]: 0 for k in KINDS}, "partial": 0, "sessions": 0, "keys": set(), "start": None, "end": 0, "runs": []})
     L["sessions"] += 1

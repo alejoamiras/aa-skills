@@ -234,6 +234,15 @@ ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" state | jq -e '.schema =
 ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" receipt --offline >/dev/null || fail "receipt on a fresh home"
 ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" ask list --json | jq -e '. == {schema: "orchy.asks/1", asks: []}' >/dev/null || fail "ask list on a missing ledger"
 [ -z "$(find "$HF" -mindepth 1 -type d)" ] && [ ! -e "$T/asks-none" ] || fail "a reader created $(find "$HF" -mindepth 1 -type d) $(ls -d "$T/asks-none" 2>/dev/null)"
+# one bad source never blanks the state: a huge triage list travels as a file, a junk stall setting takes the default
+seq 0 29999 > "$HF/triaged.txt"; jq '.leads.stall_after_min = "oops"' "$HF/orchy.json" > "$T/o.json" && mv "$T/o.json" "$HF/orchy.json"
+ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" state | jq -e '.triaged | length == 30000' >/dev/null || fail "state with a large triage list or a junk stall setting"
+# an unmarked log orders by its mtime and the session's running total, never by file name
+HL="$T/cap/legacy"; mkdir -p "$HL/leads"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HL/"
+for k in l-plan:1.0:2026-10-20T01:00:00Z l-a1:1.5:2026-10-20T02:00:00Z; do IFS=: read -r n c _ <<<"$k"; m=${k#*:*:}
+  printf '{"type":"system","subtype":"init","session_id":"s-legacy"}\n{"type":"result","total_cost_usd":%s}\n' "$c" > "$HL/leads/$n.log"; touch -d "$m" "$HL/leads/$n.log"; done
+ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline | jq -e '[.lanes[0].runs[] | {key, cost_usd}] == [{key: "l-plan", cost_usd: 1.0}, {key: "l-a1", cost_usd: 0.5}] and .lanes[0].cost_usd == 1.5' >/dev/null \
+  || fail "legacy run order: $(ORCHY_HOME="$HL" "$ORCHY" receipt --json --offline | jq -c '.lanes[0].runs')"
 # ask ledger: distinct ids under contention, transitions, a torn tail, the size cap
 LG="$T/asks/example-app.jsonl"; A() { "$ORCHY" ask "$@"; }
 ps=(); for i in 1 2 3 4; do ( A add "parallel ask $i" > "$T/add.$i" ) & ps+=($!); done; wait "${ps[@]}" || true
@@ -393,11 +402,14 @@ one "$n" '.kind == "lead.resume" and .key == "x-ev" and .prior_failed_lines == 2
 n=$(en); A add "an event row" >/dev/null; one "$n" '.kind == "ask.row" and (.ask | test("^ask[0-9]+$")) and .state == "open"' "ask add"
 grep -q 'acct-\|event row\|gate red' "$E" && fail "an event carries an account name or text: $(grep 'acct-\|event row\|gate red' "$E")"
 jq -se 'all(.schema == "orchy.event/1" and (.at | test("Z$")))' "$E" >/dev/null || fail "an event without its schema"
-q() { sed 's/[0-9]\{1,\}/N/g'; }
+q() { sed '/^rc=/!s/[0-9]\{1,\}/N/g'; }   # numbers vary run to run; exit codes must not
 w1=$({ "$ORCHY" lock; echo "rc=$?"; "$ORCHY" unlock; echo "rc=$?"; A add "writable"; echo "rc=$?"; } 2>&1 | q)
 chmod 400 "$E"; n=$(en)
 w2=$({ "$ORCHY" lock; echo "rc=$?"; "$ORCHY" unlock; echo "rc=$?"; A add "writable"; echo "rc=$?"; } 2>&1 | q); chmod 600 "$E"
 [ "$w1" = "$w2" ] && [ "$(en)" = "$n" ] || fail "an unwritable events log changed output or exit codes: $(diff <(echo "$w1") <(echo "$w2"))"
+# a symlink or a FIFO at the log's path is skipped: never followed, never waited on
+mv "$E" "$T/ev.keep"; ln -s "$T/ev.elsewhere" "$E"; "$ORCHY" lock >/dev/null; "$ORCHY" unlock >/dev/null; [ ! -e "$T/ev.elsewhere" ] || fail "an event followed a symlink"
+rm "$E"; mkfifo "$E"; timeout 10 "$ORCHY" lock >/dev/null || fail "an event waited on a FIFO"; timeout 10 "$ORCHY" unlock >/dev/null; rm "$E"; mv "$T/ev.keep" "$E"
 wait "$pgp" || { tail -n 20 "$T/page.log"; fail "page smoke"; }; pgp=
 # no project names, home paths or roster names anywhere in the skill
 if grep -rnE 'nulo|Nulo|program-2|program2|/mnt/user-data|/Users/|martu|proton|icloud|GzKw77' "$K" --include='*.md' --include='*.sh' --include='*.py' --include='*.js' --include='*.ts' --include='*.json' --include='*.cjs' | grep -v 'page/fixtures' ; then fail "project-specific text in the skill"; fi
