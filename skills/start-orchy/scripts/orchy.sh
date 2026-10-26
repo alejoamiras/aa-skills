@@ -797,7 +797,8 @@ watch-merge)
       line=$(awk -F'\t' -v n="$name" '$1==n' <<<"$runs" | tail -1)
       case "$line" in "") absent="$absent $name";; *$'\t'completed$'\t'success) ok=$((ok+1));; *$'\t'completed$'\t'failure|*$'\t'completed$'\t'cancelled|*$'\t'completed$'\t'timed_out) bad="$bad $name";; esac
     done
-    [ -n "$bad" ] && { echo "$(date -u +%H:%MZ) REQUIRED FAILED:$bad"; echo "$runs"; exit 1; }
+    # the table is indented: a check name is untrusted and may carry a newline, and no line of it may start a marker
+    [ -n "$bad" ] && { echo "$(date -u +%H:%MZ) REQUIRED FAILED:$bad"; printf '  %s\n' "${runs//$'\n'/$'\n  '}"; exit 1; }
     if [ -n "$absent" ]; then missing_rounds=$((missing_rounds+1)); [ "$missing_rounds" = 10 ] && echo "$(date -u +%H:%MZ) MISSING REQUIRED CHECK (no run or status after 10 rounds):$absent; a renamed check waits here until the timeout"; else missing_rounds=0; fi
     if [ "$ok" = "${#REQ[@]}" ] && report_done && trunk_ok; then
       read -r state draft base head mergeable mstate <<<"$(pr_state)"; m="$mergeable $mstate"

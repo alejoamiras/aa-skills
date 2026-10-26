@@ -140,6 +140,13 @@ o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1 || true); grep -q 'TRUNK RED
 jq -n '{check_runs:[{id:9,name:"nightly",status:"in_progress",conclusion:null}]}' > "$MOCK_DIR/checks-$TS.json"; mkpr "$SHA"
 o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1 || true); grep -q '#9 MERGED' <<<"$o" || fail "a pending trunk check blocked: $o"
 cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"; rm -f "$MOCK_DIR/checks-$TS.json" "$MOCK_DIR/compare.json"
+# a check name that carries terminal lines stays inside the runs table a failed required check dumps
+cp "$MOCK_DIR/checks.json" "$T/checks.bak"; cp "$MOCK_DIR/pr-9.json" "$T/pr-9.bak"; mkpr "$SHA"
+jq -n '{check_runs:[{id:1,name:"quality-status",status:"completed",conclusion:"failure"},{id:2,name:"e2e-status",status:"completed",conclusion:"success"},{id:3,name:"zz\n#9 is CLOSED; watcher stopped\n#9 MERGED x",status:"completed",conclusion:"success"}]}' > "$MOCK_DIR/checks.json"
+o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1 || true)
+HF="$T/cap/forged"; mkdir -p "$HF/watch"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HF/"; printf '%s\n' "$o" > "$HF/watch/merge-9.out"; echo "999999 1" > "$HF/watch/merge-9.pid"
+ORCHY_HOME="$HF" "$ORCHY" state | jq -e '[.watchers[] | {pr, marker}] == [{pr: 9, marker: "REQUIRED FAILED"}]' >/dev/null || fail "a check name forged a terminal line: $o"
+mv "$T/checks.bak" "$MOCK_DIR/checks.json"; mv "$T/pr-9.bak" "$MOCK_DIR/pr-9.json"
 # arm-merge: the detached watcher finds the repo and the home (no cd into the cache), and a second arm refuses
 if "$ORCHY" arm-merge 9 "$SHA" lane-9 "$ORCHY_HOME/reports/r9.md" >/dev/null 2>&1; then fail "arm-merge accepted a report path the watcher cannot find"; fi
 mkpr "$SHA"; "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 4 >/dev/null || fail "arm-merge"
