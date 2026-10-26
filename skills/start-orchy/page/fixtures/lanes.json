@@ -1,6 +1,6 @@
 {
  "lanes": [
-  {"slug": "home-1", "arcs": [
+  {"slug": "home-1", "title": "Home screen header", "arcs": [
    {"id": "arc-1", "name": "home screen polish", "issues": [1, 2], "depends_on": [{"decision": "P1-01", "reason": "the header pick sets the layout"}], "e2e": ["tests/e2e/home.spec.ts"], "visible": true}
   ]}
  ],
