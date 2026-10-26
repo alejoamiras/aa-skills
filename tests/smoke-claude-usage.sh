@@ -139,7 +139,7 @@ chmod +x "$S/pinned/date"
 pinned() { local root=$1 now=$2; env PATH="$S/pinned:$PATH" PINNED_NOW="$now" CLAUDE_ACCOUNTS_ROOT="$root" XDG_CACHE_HOME="$root.cache" "$CU" --json; }
 mkacct() { mkdir -p "$1"; echo "$2" > "$1/reset"; echo "$3" > "$1/zone"; }
 DR="$S/dst-root"; mkacct "$DR/ny" "Nov 1, 1:30am" America/New_York; mkacct "$DR/near" "Nov 5, 9am" UTC; mkacct "$DR/far" "Nov 9, 9am" UTC
-pinned "$DR" 1793361600 > "$S/dst.json"   # 2026-10-30 12:00 UTC; New York falls back on Nov 1
+pinned "$DR" 1793507400 > "$S/dst.json"   # 2026-11-01 00:30 EDT: both of New York's 1:30ams lie inside the session window
 LR="$S/lh-root"; mkacct "$LR/lh" "Apr 4, 1:45am" Australia/Lord_Howe
 pinned "$LR" 1806624000 > "$S/lh.json"    # 2027-04-02 00:00 UTC; Lord Howe falls back half an hour on Apr 4
 TR="$S/troll-root"; mkacct "$TR/troll" "Oct 25, 1:30am" Antarctica/Troll
