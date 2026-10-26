@@ -179,7 +179,16 @@ sleep 1; [ ! -d "/proc/$wp" ] || fail "watcher $wp still alive after disarm"
 [ "$(ps -eo pid,args | grep "[w]atch-merge 9 " | grep -vc "^ *$wp2 ")" = 0 ] || fail "a watch-merge 9 process of this home survived disarm: $(ps -eo pid,args | grep "[w]atch-merge 9 ")"
 ORCHY_HOME="$H2" "$ORCHY" disarm 9 | grep -q 'stopped merge-9' || fail "disarm in the second home"
 [ "$(grep -c '' "$H2/events.jsonl")" = 1 ] && jq -e '.kind == "merge.disarmed" and .pr == 9' "$H2/events.jsonl" >/dev/null || fail "disarm event: $(cat "$H2/events.jsonl")"
+[ "$(grep -cxE '[0-9]{2}:[0-9]{2}Z DISARMED' "$H2/watch/merge-9.out")" = 1 ] || fail "disarm did not write one DISARMED line: $(cat "$H2/watch/merge-9.out")"
 sleep 1; [ ! -d "/proc/$wp2" ] || fail "the second home's watcher survived its own disarm"
+c=$(cksum < "$H2/watch/merge-9.out"); ORCHY_HOME="$H2" "$ORCHY" disarm 9 | grep -q 'merge-9 not running' || fail "disarm of a dead watcher"
+[ "$(cksum < "$H2/watch/merge-9.out")" = "$c" ] && [ "$(grep -c '' "$H2/events.jsonl")" = 1 ] || fail "a dead watcher's disarm wrote its log or an event"
+# snapshot shows a live watcher's newest marker after its pid, and nothing of a log without one
+sleep 60 & sp=$!; echo "$sp $(awk '{print $22}' /proc/$sp/stat)" > "$ORCHY_HOME/watch/merge-31.pid"
+printf '10:00Z MISSING REQUIRED CHECK (no run or status after 10 rounds): e2e\n10:02Z required ok=1/2\n' > "$ORCHY_HOME/watch/merge-31.out"
+sleep 60 & sq=$!; echo "$sq $(awk '{print $22}' /proc/$sq/stat)" > "$ORCHY_HOME/watch/merge-32.pid"; printf '10:00Z required ok=1/2\n' > "$ORCHY_HOME/watch/merge-32.out"
+o=$("$ORCHY" snapshot 2>&1); grep -qx "alive merge-31 pid $sp MISSING REQUIRED CHECK" <<<"$o" && grep -qx "alive merge-32 pid $sq" <<<"$o" || fail "live watcher lines: $(grep '^alive merge-' <<<"$o")"
+kill "$sp" "$sq"; wait "$sp" "$sq" 2>/dev/null || true; rm -f "$ORCHY_HOME"/watch/merge-3[12].*
 sleep 60 & hp=$!; echo "$hp $(awk '{print $22}' /proc/$hp/stat) 2026-01-01T00:00:00Z other" > "$ORCHY_HOME/orchestrator.lock"
 if "$ORCHY" lock >/dev/null 2>&1; then fail "lock did not refuse a live holder"; fi
 # a takeover file left by a killed contender never blocks the next one
@@ -228,6 +237,8 @@ ORCHY_HOME="$HR" "$ORCHY" state > "$T/s.json" || fail "state"
 diff <(jq -S . "$G/state.v1.json") <(jq -S 'del(.at, .load1, .nproc)' "$T/s.json") || fail "state JSON drifted from tests/mocks/orchy/state.v1.json"
 o=$(ORCHY_HOME="$HR" "$ORCHY" receipt --offline r); grep -qF 'issues closed ? (offline);' <<<"$o" || fail "offline receipt text: $o"
 grep -q 'owner took' <"$T/r.json" && fail "receipt JSON carries the owner record"
+HD="$T/cap/rcpt-d"; cp -r "$HR" "$HD"; echo "10:09Z DISARMED" >> "$HD/watch/merge-21.out"
+ORCHY_HOME="$HD" "$ORCHY" receipt --offline r | grep -qF '(merged #21)' || fail "a DISARMED line after a merge hid it from the receipt"
 # a fresh home stays empty under every reader, and a missing ledger is not created
 HF="$T/cap/fresh"; mkdir -m 700 "$HF"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HF/"
 ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" state | jq -e '.schema == "orchy.state/1" and .leads == [] and .asks == [] and .waiting == []' >/dev/null || fail "state on a fresh home"
@@ -286,6 +297,12 @@ printf '10:00Z MISSING REQUIRED CHECK (no run or status after 10 rounds): e2e\n1
 printf '#7 state unreadable after the merge call; check it by hand\n' > "$HL/watch/merge-7.out"; printf '10:00Z TRUNK RED at 1234abcd: ci; waiting\n#8 MERGED 0123abc\n--- teardown x\n' > "$HL/watch/merge-8.out"
 ORCHY_HOME="$HL" "$ORCHY" state | jq -e '[.watchers[] | {pr, marker}] == [{pr: 5, marker: "REQUIRED FAILED"}, {pr: 6, marker: "MISSING REQUIRED CHECK"}, {pr: 7, marker: "AMBIGUOUS"}, {pr: 8, marker: "MERGED"}]' >/dev/null \
   || fail "watcher markers: $(ORCHY_HOME="$HL" "$ORCHY" state | jq -c '[.watchers[] | {pr, marker, last}]')"
+# a PR merged or closed by hand, or a disarm, ends the hand-back before it
+HT="$T/cap/terminal"; mkdir -p "$HT/watch"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HT/"; m='10:00Z MISSING REQUIRED CHECK (no run or status after 10 rounds): e2e'
+printf '%s\n#2 is CLOSED; watcher stopped\n' "$m" > "$HT/watch/merge-2.out"; printf '%s\n10:05Z DISARMED\n' "$m" > "$HT/watch/merge-3.out"; printf '%s\n#9 is MERGED; watcher stopped\n' "$m" > "$HT/watch/merge-9.out"
+for n in 2 3 9; do echo "999999 1" > "$HT/watch/merge-$n.pid"; done
+ORCHY_HOME="$HT" "$ORCHY" state | jq -e '[.watchers[] | {pr, marker}] == [{pr: 2, marker: null}, {pr: 3, marker: null}, {pr: 9, marker: "MERGED"}]' >/dev/null \
+  || fail "terminal watcher lines: $(ORCHY_HOME="$HT" "$ORCHY" state | jq -c '[.watchers[] | {pr, marker, last}]')"
 # a killed resume stamped in the same second as the run it resumes still counts its tokens
 printf '%s\n' '{"type":"orchy_invocation","key":"t-a1","lane":"t","cmd":"launch","at":"2026-10-20T03:00:00Z"}' '{"type":"system","subtype":"init","session_id":"s-tie"}' \
   '{"type":"result","total_cost_usd":1.0}' '{"type":"orchy_invocation","key":"t-a1","lane":"t","cmd":"resume","at":"2026-10-20T03:00:00Z"}' \
@@ -440,6 +457,12 @@ w 2; rm "$MOCK_DIR/fail-issues"; grep -q 'TIMEOUT after 2s, no change; unreadabl
 # local events re-arm the wait long before poll_sec, so the first tick must read GitHub too
 jq '.wait.poll_sec=120' "$HW/orchy.json" > "$T/o.json" && mv "$T/o.json" "$HW/orchy.json"; jq -n '{sha:"4444444444444444444444444444444444444444"}' > "$MOCK_DIR/trunk.json"
 w 3; grep -q 'CHANGED (trunk)' "$T/w.out" || fail "the first tick of a wait did not read GitHub: $(cat "$T/w.out")"
+# a live watcher's new hand-back wakes the wait once
+mkdir -p "$HW/watch"; sleep 60 & sw=$!; echo "$sw $(awk '{print $22}' /proc/$sw/stat)" > "$HW/watch/merge-7.pid"; printf '10:00Z required ok=1/2\n' > "$HW/watch/merge-7.out"
+w 3; echo "10:01Z MISSING REQUIRED CHECK (no run or status after 10 rounds): e2e" >> "$HW/watch/merge-7.out"
+w 3; grep -q 'CHANGED (reports/leads/watchers)' "$T/w.out" || fail "a live watcher's new marker did not wake the wait: $(cat "$T/w.out")"
+w 2; [ "$(cat "$T/w.out")" = "TIMEOUT after 2s, no change" ] || fail "a standing marker woke the wait again: $(cat "$T/w.out")"
+kill "$sw"; wait "$sw" 2>/dev/null || true
 rm -f "$MOCK_DIR/issues.json" "$MOCK_DIR/trunk.json"
 # events: one orchy.event/1 line per hooked command, ids only; a relaunch keeps the failure it replaces; an unwritable log changes nothing
 E="$ORCHY_HOME/events.jsonl"; en() { grep -c '' "$E"; }
