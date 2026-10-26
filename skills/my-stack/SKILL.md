@@ -756,8 +756,7 @@ name: <Package>
 
 on:
   workflow_dispatch:
-  pull_request:
-    branches: [main]
+  pull_request: # no branches: filter: a stacked PR targets its parent branch, not main
 
 jobs:
   changes:
