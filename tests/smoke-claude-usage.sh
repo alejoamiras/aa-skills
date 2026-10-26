@@ -127,13 +127,25 @@ hour=$(( ( $(date +%s) / 3600 + 2 ) * 3600 ))
 { date -u -d "@$hour" '+%-I%p' 2>/dev/null || date -u -r "$hour" '+%-I%p'; } | tr '[:upper:]' '[:lower:]' > "$BR/bare/session"
 env CLAUDE_ACCOUNTS_ROOT="$BR" XDG_CACHE_HOME="$S/cache-bare" "$CU" --json > "$S/bare.json"
 t "epochs: a bare session hour is that hour on the observation's day" test "$(epochs "$S/bare.json" bare | cut -d' ' -f1)" = "$hour"
-# 1:30am on the US fall-back Sunday (the first in November) happens twice in New York, so it names no epoch.
-fallback() { local d; for d in 1 2 3 4 5 6 7; do [[ $(date -d "$1-11-0$d" +%u 2>/dev/null || date -j -f %Y-%m-%d "$1-11-0$d" +%u) == 7 ]] && { echo "$d"; return; }; done; }
-y=$(date +%Y); d=$(fallback "$y")   # the year to_epoch reads: this one, unless that day is over two days gone
-(( $(TZ=America/New_York date -d "$y-11-0$d 01:30" +%s 2>/dev/null || TZ=America/New_York date -j -f '%Y-%m-%d %H:%M' "$y-11-0$d 01:30" +%s) < $(date +%s) - 172800 )) && d=$(fallback $((y + 1)))
-DR="$S/dst-root"; mkdir -p "$DR/dst"; echo America/New_York > "$DR/dst/zone"; echo "Nov $d, 1:30am" > "$DR/dst/reset"
-env CLAUDE_ACCOUNTS_ROOT="$DR" XDG_CACHE_HOME="$S/cache-dst" "$CU" --json > "$S/dst.json"
-t "epochs: a reset in the hour a DST change repeats has none" test "$(epochs "$S/dst.json" dst)" = "null null null"
+# Pinned clocks: a wall time a DST fall-back repeats (an hour in New York, half an hour on Lord Howe) names
+# no epoch, and neither does a weekly reset more than a week ahead, which only a misread year produces.
+REAL_DATE=$(command -v date); mkdir -p "$S/pinned"
+cat > "$S/pinned/date" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do case \$a in -d|--date*|-r|-j|-f) exec "$REAL_DATE" "\$@";; esac; done
+if "$REAL_DATE" --version >/dev/null 2>&1; then exec "$REAL_DATE" -d "@\$PINNED_NOW" "\$@"; else exec "$REAL_DATE" -r "\$PINNED_NOW" "\$@"; fi
+STUB
+chmod +x "$S/pinned/date"
+pinned() { local root=$1 now=$2; env PATH="$S/pinned:$PATH" PINNED_NOW="$now" CLAUDE_ACCOUNTS_ROOT="$root" XDG_CACHE_HOME="$root.cache" "$CU" --json; }
+mkacct() { mkdir -p "$1"; echo "$2" > "$1/reset"; echo "$3" > "$1/zone"; }
+DR="$S/dst-root"; mkacct "$DR/ny" "Nov 1, 1:30am" America/New_York; mkacct "$DR/near" "Nov 5, 9am" UTC; mkacct "$DR/far" "Nov 9, 9am" UTC
+pinned "$DR" 1793361600 > "$S/dst.json"   # 2026-10-30 12:00 UTC; New York falls back on Nov 1
+LR="$S/lh-root"; mkacct "$LR/lh" "Apr 4, 1:45am" Australia/Lord_Howe
+pinned "$LR" 1806624000 > "$S/lh.json"    # 2027-04-02 00:00 UTC; Lord Howe falls back half an hour on Apr 4
+t "epochs: a reset in the hour a DST change repeats has none" test "$(epochs "$S/dst.json" ny)" = "null null null"
+t "epochs: nor in the half hour Lord Howe repeats" test "$(epochs "$S/lh.json" lh)" = "null null null"
+t "epochs: a weekly reset within a week reads; one beyond has none" sh -c 'test "$1" = "null 1793869200 1793869200" && test "$2" = "null null null"' \
+  _ "$(epochs "$S/dst.json" near)" "$(epochs "$S/dst.json" far)"
 t "table: the CLI's comma is dropped from week resets" sh -c '"$1" > "$2" && grep -q "aaa-late" "$2" && ! grep -qE "[A-Z][a-z]{2} [0-9]{1,2}, " "$2"' _ "$CU" "$S/table.out"
 
 "$CU" refresh

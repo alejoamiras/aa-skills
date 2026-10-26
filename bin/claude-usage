@@ -127,6 +127,7 @@ AUTH_ENV=(ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
   CLAUDE_CODE_USE_MANTLE CLAUDE_CODE_USE_GATEWAY)
 NEVER=999999999999   # sorts absent or unparseable resets to the bottom
 SESSION_WINDOW=18300 # 5h plus 5 min of clock skew: no real session reset lies further ahead
+WEEK_WINDOW=605100   # 7 days plus the same skew: a weekly reset beyond it is a misread year
 
 # Snapshot cache. A status line renders constantly and must never pay for a
 # 4-second probe, so it reads this file and refreshes in the background.
@@ -339,18 +340,21 @@ plain_epoch() {
 }
 
 # A reset line's epoch from a reader (to_epoch, session_epoch) run under the line's zone; "-" when
-# unreadable, or when that wall time occurs twice there (the hour a DST change repeats names two instants).
+# unreadable, or when that wall time occurs twice there: a DST fall-back repeats its shift, an hour or
+# (Lord Howe) half an hour, and the text then names two instants.
 clause_epoch() { # clause_epoch <line> <reader> <args…>
-  local z e t
+  local z e t d
   z=$(parse_zone "$1"); shift
   e=$(plain_epoch "$(in_zone "${z}" "$@")")
   [[ ${e} == "-" ]] && { printf -- '-'; return; }
   t=$(in_zone "${z}" fmt_epoch "${e}" '%H:%M')
-  if [[ $(in_zone "${z}" fmt_epoch "$((e - 3600))" '%H:%M') == "${t}" || $(in_zone "${z}" fmt_epoch "$((e + 3600))" '%H:%M') == "${t}" ]]; then
-    printf -- '-'
-  else
-    printf '%s' "${e}"
-  fi
+  for d in 1800 3600; do
+    if [[ $(in_zone "${z}" fmt_epoch "$((e - d))" '%H:%M') == "${t}" || $(in_zone "${z}" fmt_epoch "$((e + d))" '%H:%M') == "${t}" ]]; then
+      printf -- '-'
+      return
+    fi
+  done
+  printf '%s' "${e}"
 }
 
 # Headroom, not consumption: red is the "about to be cut off" band.
@@ -769,6 +773,7 @@ probe() {
   line=$(grep -m1 "Current week (all models)" <<< "${usage}")
   w_left=$(parse_left "${line}"); w_reset=$(parse_reset "${line}")
   w_at=$(clause_epoch "${line}" to_epoch "${w_reset}")
+  [[ ${w_at} != "-" ]] && ((w_at > obs && w_at <= obs + WEEK_WINDOW)) || w_at="-"
 
   # The second weekly bucket is named after whichever premium model the plan
   # meters separately (Opus, Fable, …), so read the label rather than assume it.
@@ -777,6 +782,7 @@ probe() {
     p_label=$(sed -E 's/.*Current week \(([^)]*)\).*/\1/' <<< "${line}")
     p_left=$(parse_left "${line}"); p_reset=$(parse_reset "${line}")
     p_at=$(clause_epoch "${line}" to_epoch "${p_reset}")
+    [[ ${p_at} != "-" ]] && ((p_at > obs && p_at <= obs + WEEK_WINDOW)) || p_at="-"
   else
     p_label="-"; p_left="-"; p_at="-"
   fi
