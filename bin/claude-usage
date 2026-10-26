@@ -138,12 +138,14 @@ CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/claude-usage"
 # v4 holds login rows only, with org id, observation time and the three reset epochs.
 SNAPSHOT="${CACHE_DIR}/snapshot.v4.tsv"
 # A v3 file from an older version is carried over once, epochs unknown and age kept, so no reader
-# meets an empty cache; a refresh or a roster change removes any v3 file an old process writes later.
+# meets an empty cache. It is linked into place, never moved, so it cannot replace a v4 another process
+# published meanwhile; a refresh or a roster change removes any v3 file an old process writes later.
 SNAPSHOT_V3="${CACHE_DIR}/snapshot.v3.tsv"
 if [[ -f ${SNAPSHOT_V3} && ! -f ${SNAPSHOT} ]]; then
   awk -F'\t' -v OFS='\t' 'NF == 14 { $14 = "-" OFS "-" OFS "-" OFS $14; print }' "${SNAPSHOT_V3}" > "${SNAPSHOT}.$$" 2> /dev/null &&
-    touch -r "${SNAPSHOT_V3}" "${SNAPSHOT}.$$" && mv -f "${SNAPSHOT}.$$" "${SNAPSHOT}" && rm -f "${SNAPSHOT_V3}"
+    touch -r "${SNAPSHOT_V3}" "${SNAPSHOT}.$$" && ln "${SNAPSHOT}.$$" "${SNAPSHOT}" 2> /dev/null
   rm -f "${SNAPSHOT}.$$"
+  [[ -f ${SNAPSHOT} ]] && rm -f "${SNAPSHOT_V3}"
 fi
 LOCK_DIR="${CACHE_DIR}/refresh.lock"
 TTL="${CLAUDE_USAGE_TTL:-600}"
@@ -317,8 +319,8 @@ to_epoch() {
   printf '%012d' "${out}"
 }
 
-# The zone a reset clause names, when `date` reads it the same way: UTC, GMT or an IANA name. An
-# abbreviation (PDT) is not a TZ value, so it leaves the process zone, which is the CLI's own.
+# The zone a reset clause names when it is unambiguous: UTC, GMT or an IANA name. An abbreviation
+# (PDT) is ambiguous, so it leaves the process zone, which is the CLI's own.
 parse_zone() {
   local z
   z=$(sed -nE 's/.*resets [^(]*\(([^)]*)\).*/\1/p' <<< "$1")
