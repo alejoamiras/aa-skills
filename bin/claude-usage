@@ -24,7 +24,8 @@
 # you `add` it.
 #
 #   claude-usage                 table for every account
-#   claude-usage --json          machine-readable (statusline, cron)
+#   claude-usage --json          machine-readable (statusline, cron); each
+#                                reset also as epoch seconds (*_resets_at, or null)
 #   claude-usage --json --cached the snapshot's rows only: never probes or
 #                                spawns a refresh (exit 1 with no snapshot)
 #   claude-usage run [name|best] [claude args…]
@@ -134,8 +135,16 @@ CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/claude-usage"
 # snapshot between roots would serve each the other's numbers.
 [[ ${ACCOUNTS_ROOT} != "${HOME}/.claude-accounts" ]] &&
   CACHE_DIR="${CACHE_DIR}/$(printf '%s' "${ACCOUNTS_ROOT}" | cksum | cut -d' ' -f1)"
-# v3 holds login rows only, with org id and observation time.
-SNAPSHOT="${CACHE_DIR}/snapshot.v3.tsv"
+# v4 holds login rows only, with org id, observation time and the three reset epochs.
+SNAPSHOT="${CACHE_DIR}/snapshot.v4.tsv"
+# A v3 file from an older version is carried over once, epochs unknown and age kept, so no reader
+# meets an empty cache; a refresh or a roster change removes any v3 file an old process writes later.
+SNAPSHOT_V3="${CACHE_DIR}/snapshot.v3.tsv"
+if [[ -f ${SNAPSHOT_V3} && ! -f ${SNAPSHOT} ]]; then
+  awk -F'\t' -v OFS='\t' 'NF == 14 { $14 = "-" OFS "-" OFS "-" OFS $14; print }' "${SNAPSHOT_V3}" > "${SNAPSHOT}.$$" 2> /dev/null &&
+    touch -r "${SNAPSHOT_V3}" "${SNAPSHOT}.$$" && mv -f "${SNAPSHOT}.$$" "${SNAPSHOT}" && rm -f "${SNAPSHOT_V3}"
+  rm -f "${SNAPSHOT}.$$"
+fi
 LOCK_DIR="${CACHE_DIR}/refresh.lock"
 TTL="${CLAUDE_USAGE_TTL:-600}"
 
@@ -306,6 +315,25 @@ to_epoch() {
     out=$(parse_when "${norm}" "$((year + 1))") || { printf '%s' "${NEVER}"; return; }
   fi
   printf '%012d' "${out}"
+}
+
+# The zone a reset clause names, when `date` reads it the same way: UTC, GMT or an IANA name. An
+# abbreviation (PDT) is not a TZ value, so it leaves the process zone, which is the CLI's own.
+parse_zone() {
+  local z
+  z=$(sed -nE 's/.*resets [^(]*\(([^)]*)\).*/\1/p' <<< "$1")
+  if [[ ${z} == UTC || ${z} == GMT || ${z} =~ ^[A-Za-z_]+(/[A-Za-z0-9_+-]+)+$ ]]; then printf '%s' "${z}"; fi
+}
+
+# Runs a reset reader under the zone its clause named, else under the process zone.
+in_zone() {
+  local z="$1"; shift
+  if [[ -n ${z} ]]; then TZ="${z}" "$@"; else "$@"; fi
+}
+
+# An epoch as a plain decimal ("-" for none): JSON refuses to_epoch's zero padding.
+plain_epoch() {
+  if [[ $1 =~ ^[0-9]+$ && $1 != "${NEVER}" ]]; then printf '%s' "$((10#$1))"; else printf -- '-'; fi
 }
 
 # Headroom, not consumption: red is the "about to be cut off" band.
@@ -627,8 +655,8 @@ TOKEN_MODE=live
 [[ ${_CLAUDE_USAGE_PASSIVE:-} == 1 ]] && TOKEN_MODE=cached
 
 # A row per account, led by a sort key: "key name email plan s_left s_reset
-# w_left w_reset p_label p_left active org observed note", note last because
-# only it may be empty.
+# w_left w_reset p_label p_left active org observed s_at w_at p_at note", the
+# three reset epochs "-" when unknown, note last because only it may be empty.
 # A reading's headroom LEFT as "session \t week \t premium", "-" unmeasured. A
 # refused bucket is spent whatever its utilization says, measured or not; a
 # refusal that names none is the whole account refusing. Args: result, then
@@ -650,43 +678,44 @@ pct_used() { if [[ $1 =~ ^[0-9]+$ ]]; then printf '%s%% used' "$((100 - $1))"; e
 # headers instead.
 token_row() {
   local name="$1" k="$2" mode="$3" obs result org key note
-  local s_left s_reset s_st w_left w_reset w_st p_label p_left p_st
+  local s_left s_reset s_st w_left w_reset w_st p_label p_left p_reset p_st
   if [[ $(token_days_left "${k}") == -* ]]; then
-    printf '%s\t%s\t-\ttoken\t-\t-\t-\t-\t-\t-\t0\t-\t0\ttoken expired — run: claude-usage add %s\n' \
+    printf '%s\t%s\t-\ttoken\t-\t-\t-\t-\t-\t-\t0\t-\t0\t-\t-\t-\ttoken expired — run: claude-usage add %s\n' \
       "${NEVER}" "${name}" "${name}"
     return
   fi
-  IFS=$'\t' read -r _ _ obs result _ s_left s_reset s_st w_left w_reset w_st p_left _ p_st note \
+  IFS=$'\t' read -r _ _ obs result _ s_left s_reset s_st w_left w_reset w_st p_left p_reset p_st note \
     < <(token_probe "${k}" "${mode}")
   org=$(token_org "${k}")
   case ${result} in
     dead)
-      printf '%s\t%s\t-\ttoken\t-\t-\t-\t-\t-\t-\t0\t%s\t%s\t%s\n' "${NEVER}" "${name}" "${org}" "${obs}" "${note}"
+      printf '%s\t%s\t-\ttoken\t-\t-\t-\t-\t-\t-\t0\t%s\t%s\t-\t-\t-\t%s\n' "${NEVER}" "${name}" "${org}" "${obs}" "${note}"
       ;;
     ok | rejected)
       IFS=$'\t' read -r s_left w_left p_left \
         < <(token_norm "${result}" "${s_left}" "${s_st}" "${w_left}" "${w_st}" "${p_left}" "${p_st}")
       p_label="-"; [[ ${p_left} != "-" ]] && p_label=${PREMIUM_LABEL}
       key=$(printf '%03d%012d' "$((100 - ${p_left//-/0}))" "${w_reset//-/${NEVER}}")
-      printf '%s\t%s\t-\ttoken\t%s\t%s\t%s\t%s\t%s\t%s\t0\t%s\t%s\t\n' "${key}" "${name}" \
+      printf '%s\t%s\t-\ttoken\t%s\t%s\t%s\t%s\t%s\t%s\t0\t%s\t%s\t%s\t%s\t%s\t\n' "${key}" "${name}" \
         "${s_left}" "$(fmt_reset "${s_reset}")" "${w_left}" "$(fmt_reset "${w_reset}")" \
-        "${p_label}" "${p_left}" "${org}" "${obs}"
+        "${p_label}" "${p_left}" "${org}" "${obs}" \
+        "$(plain_epoch "${s_reset}")" "$(plain_epoch "${w_reset}")" "$(plain_epoch "${p_reset}")"
       ;;
     *)
       # After every account with readable headroom, before the unusable ones.
-      printf '998%s\t%s\t-\ttoken\t-\t-\t-\t-\t-\t-\t0\t%s\t%s\t\n' "${NEVER}" "${name}" "${org}" "${obs}"
+      printf '998%s\t%s\t-\ttoken\t-\t-\t-\t-\t-\t-\t0\t%s\t%s\t-\t-\t-\t\n' "${NEVER}" "${name}" "${org}" "${obs}"
       ;;
   esac
 }
 
 probe() {
   local name="$1" dir="$2" auth email plan usage line org obs
-  local s_left s_reset w_left w_reset p_label p_left key
+  local s_left s_reset w_left w_reset p_label p_left p_reset key s_at w_at p_at
 
   obs=$(date +%s)
   auth=$(run_claude "${dir}" auth status --json 2> /dev/null)
   if [[ ${auth} != *'"loggedIn": true'* ]]; then
-    printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\t-\t0\t-\t%s\tlogged out — run: claude-usage add %s --login (or paste a setup-token)\n' \
+    printf '%s\t%s\t-\t-\t-\t-\t-\t-\t-\t-\t0\t-\t%s\t-\t-\t-\tlogged out — run: claude-usage add %s --login (or paste a setup-token)\n' \
       "${NEVER}" "${name}" "${obs}" "${name}"
     return
   fi
@@ -704,38 +733,43 @@ probe() {
   [[ ${usage} == *"using your subscription"* && ${usage} != *"Current "* ]] &&
     usage=$(usage_text "${dir}" 2> /dev/null)
   if [[ ${usage} == *"using your subscription"* && ${usage} != *"Current "* ]]; then
-    printf '000%s\t%s\t%s\t%s\t100\tidle\t100\tidle\t-\t100\t0\t%s\t%s\t\n' \
+    printf '000%s\t%s\t%s\t%s\t100\tidle\t100\tidle\t-\t100\t0\t%s\t%s\t-\t-\t-\t\n' \
       "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${org:--}" "${obs}"
     return
   fi
   if [[ -z ${usage} || ${usage} != *"Current session:"* ]]; then
-    printf '%s\t%s\t%s\t%s\t-\t-\t-\t-\t-\t-\t0\t%s\t%s\tno usage data (API-key auth or CLI error)\n' \
+    printf '%s\t%s\t%s\t%s\t-\t-\t-\t-\t-\t-\t0\t%s\t%s\t-\t-\t-\tno usage data (API-key auth or CLI error)\n' \
       "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${org:--}" "${obs}"
     return
   fi
 
   line=$(grep -m1 "Current session:" <<< "${usage}")
   s_left=$(parse_left "${line}"); s_reset=$(parse_reset "${line}")
+  # A bare hour is read on the day of the observation, never of a later reader.
+  s_at=$(in_zone "$(parse_zone "${line}")" session_epoch "${s_reset}" "${obs}")
+  [[ ${s_at} =~ ^[0-9]+$ ]] && ((s_at > obs && s_at <= obs + SESSION_WINDOW)) || s_at="-"
 
   line=$(grep -m1 "Current week (all models)" <<< "${usage}")
   w_left=$(parse_left "${line}"); w_reset=$(parse_reset "${line}")
+  w_at=$(plain_epoch "$(in_zone "$(parse_zone "${line}")" to_epoch "${w_reset}")")
 
   # The second weekly bucket is named after whichever premium model the plan
   # meters separately (Opus, Fable, …), so read the label rather than assume it.
   line=$(grep "Current week (" <<< "${usage}" | grep -v "all models" | head -1)
   if [[ -n ${line} ]]; then
     p_label=$(sed -E 's/.*Current week \(([^)]*)\).*/\1/' <<< "${line}")
-    p_left=$(parse_left "${line}")
+    p_left=$(parse_left "${line}"); p_reset=$(parse_reset "${line}")
+    p_at=$(plain_epoch "$(in_zone "$(parse_zone "${line}")" to_epoch "${p_reset}")")
   else
-    p_label="-"; p_left="-"
+    p_label="-"; p_left="-"; p_at="-"
   fi
 
   key=$(printf '%03d%s' "$((100 - ${p_left//-/0}))" "$(to_epoch "${w_reset}")")
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t%s\t%s\t\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t%s\t%s\t%s\t%s\t%s\t\n' \
     "${key}" "${name}" "${email:--}" "${plan:--}" \
     "${s_left:--}" "${s_reset:--}" "${w_left:--}" "${w_reset:--}" \
-    "${p_label:--}" "${p_left:--}" "${org:--}" "${obs}"
+    "${p_label:--}" "${p_left:--}" "${org:--}" "${obs}" "${s_at}" "${w_at}" "${p_at}"
 }
 
 # Resolve the slot against the roster. The "main" row and a roster row sharing
@@ -747,32 +781,32 @@ probe() {
 # share one, so it never does. No match → the slot stays as "main", active, so
 # the numbers are still shown.
 mark_active() {
-  local rows line key name email plan sl sr wl wr pl pv active org obs note o so
+  local rows line key name email plan sl sr wl wr pl pv active org obs sa wa pa note o so
   local main_email="-" main_org="-" main_plan="" matched="" hits=0 slot=""
   rows=$(cat)
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs sa wa pa note; do
     [[ ${name} == main ]] && { main_email="${email}"; main_org="${org}"; main_plan="${plan}"; break; }
   done <<< "${rows}"
   if [[ -n ${main_email} && ${main_email} != "-" ]]; then
-    while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
+    while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs sa wa pa note; do
       [[ ${name} != main && ${email} == "${main_email}" ]] && { matched="${name}"; break; }
     done <<< "${rows}"
   fi
   if [[ -z ${matched} && -n ${main_org} && ${main_org} != "-" ]] && [[ ${main_plan} == max || ${main_plan} == pro ]]; then
-    while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
+    while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs sa wa pa note; do
       [[ ${name} != main && ${org} == "${main_org}" ]] && { matched="${name}"; hits=$((hits + 1)); }
     done <<< "${rows}"
     ((hits == 1)) || matched=""
   fi
   # A revoked or expired roster credential must not hide the slot's working
   # login: the slot stays the launch target.
-  if [[ -n ${matched} ]] && awk -F'\t' -v m="${matched}" '$2 == m && $14 != ""' <<< "${rows}" | grep -q .; then
+  if [[ -n ${matched} ]] && awk -F'\t' -v m="${matched}" '$2 == m && $17 != ""' <<< "${rows}" | grep -q .; then
     matched=""
   fi
-  [[ -n ${matched} ]] && slot=$(awk -F'\t' '$2 == "main" && $14 == "" && $7 != "-"' <<< "${rows}" | head -1)
+  [[ -n ${matched} ]] && slot=$(awk -F'\t' '$2 == "main" && $17 == "" && $7 != "-"' <<< "${rows}" | head -1)
   while IFS= read -r line; do
     [[ -z ${line} ]] && continue
-    IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note <<< "${line}"
+    IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs sa wa pa note <<< "${line}"
     if [[ ${name} == main ]]; then
       [[ -n ${matched} ]] && continue
       active=1
@@ -784,14 +818,14 @@ mark_active() {
         IFS=$'\t' read -r _ _ _ _ _ _ _ _ _ _ _ o so _ <<< "${slot}"
         [[ ${org} == "-" ]] && org="${o}"
         if [[ ${so} =~ ^[0-9]+$ ]] && { [[ ! ${obs} =~ ^[0-9]+$ ]] || ((so > obs)); }; then
-          IFS=$'\t' read -r key _ email _ sl sr wl wr pl pv _ _ obs _ <<< "${slot}"
+          IFS=$'\t' read -r key _ email _ sl sr wl wr pl pv _ _ obs sa wa pa _ <<< "${slot}"
         fi
       fi
     else
       active=0
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${key}" "${name}" "${email}" "${plan}" \
-      "${sl}" "${sr}" "${wl}" "${wr}" "${pl}" "${pv}" "${active}" "${org}" "${obs}" "${note}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${key}" "${name}" "${email}" "${plan}" \
+      "${sl}" "${sr}" "${wl}" "${wr}" "${pl}" "${pv}" "${active}" "${org}" "${obs}" "${sa}" "${wa}" "${pa}" "${note}"
   done <<< "${rows}"
 }
 
@@ -813,7 +847,7 @@ rank_rows() {
       # An idle login has no window open anywhere: every bucket is full.
       have = (req != "" && num(pv) && (pl == req || $8 == "idle"))
       a = 0; b = 0; c = $1
-      if ($14 != "") tier = 3
+      if ($17 != "") tier = 3
       else if ((num(sl) && sl == 0) || (num(wl) && wl == 0) || (have && pv == 0)) { tier = 2; c = substr($1, 4) }
       else if (num(sl) && num(wl) && (req == "" || have)) {
         tier = 0; m = sl + 0; if (wl + 0 < m) m = wl + 0; if (have && pv + 0 < m) m = pv + 0
@@ -909,29 +943,39 @@ pct_paint() {
   if [[ $1 == "-" ]]; then printf '%s-%s' "${DIM}" "${RST}"; else paint_left "$1"; fi
 }
 
-# A 5h reset as its table cell shows it: the time alone when it falls today, with the day otherwise;
-# "reset" once it has passed (the reading predates it, so its percentage is stale); nothing when it is
-# unreadable or beyond one window ahead, which also rejects to_epoch's year rollover of an old reading.
-# The CLI may print a reset as a bare time ("1am"); one already behind us is tomorrow's if that falls
-# within the window, else an elapsed one. Assumes the CLI prints this machine's timezone, as WEEK does.
-session_when() {
-  local when="$1" e t now
+# A 5h reset as an epoch, read as of the anchor. The CLI may print a bare time ("1am"): it is the
+# anchor's date, or the next date when that has passed and the next falls within one window. Prints
+# nothing when the reset is unreadable.
+session_epoch() {
+  local when="$1" anchor="$2" day e t
   [[ -z ${when} || ${when} == "-" ]] && return 0
-  now=$(date +%s)
   if [[ ${when} =~ ^[0-9] ]]; then
-    e=$(to_epoch "$(date '+%b %-d') ${when}")
+    day=$(fmt_epoch "${anchor}" '%b %-d')
+    e=$(to_epoch "${day} ${when}")
     [[ ${e} == "${NEVER}" ]] && return 0
     e=$((10#${e}))
-    if ((e <= now)); then
-      # Tomorrow's date from today's noon: noon plus a day stays on the next date across a DST change.
-      t=$(to_epoch "$(fmt_epoch "$((10#$(to_epoch "$(date '+%b %-d') 12pm") + 86400))" '%b %-d') ${when}")
-      [[ ${t} != "${NEVER}" ]] && ((10#${t} <= now + SESSION_WINDOW)) && e=$((10#${t}))
+    if ((e <= anchor)); then
+      # The next date from the anchor's noon: noon plus a day stays on the next date across a DST change.
+      t=$(to_epoch "$(fmt_epoch "$((10#$(to_epoch "${day} 12pm") + 86400))" '%b %-d') ${when}")
+      [[ ${t} != "${NEVER}" ]] && ((10#${t} <= anchor + SESSION_WINDOW)) && e=$((10#${t}))
     fi
   else
     e=$(to_epoch "${when}")
     [[ ${e} == "${NEVER}" ]] && return 0
     e=$((10#${e}))
   fi
+  printf '%s' "${e}"
+}
+
+# A 5h reset as its table cell shows it: the time alone when it falls today, with the day otherwise;
+# "reset" once it has passed (the reading predates it, so its percentage is stale); nothing when it is
+# unreadable or beyond one window ahead, which also rejects to_epoch's year rollover of an old reading.
+# Assumes the CLI prints this machine's timezone, as WEEK does.
+session_when() {
+  local e now
+  now=$(date +%s)
+  e=$(session_epoch "$1" "${now}")
+  [[ -z ${e} ]] && return 0
   ((e <= now)) && { printf 'reset'; return 0; }
   ((e > now + SESSION_WINDOW)) && return 0
   if [[ $(fmt_epoch "${e}" '%F') == "$(date '+%F')" ]]; then
@@ -942,7 +986,7 @@ session_when() {
 }
 
 table() {
-  local rows key name email plan sl sr wl wr pl pv active org obs note swhen spct
+  local rows key name email plan sl sr wl wr pl pv active org obs sa wa pa note swhen spct
   rows=$(gather) || exit 1
 
   local -a n_c=() p_c=() s_pl=() s_pa=() w_pl=() w_pa=() x_pl=() x_pa=() notes=()
@@ -950,12 +994,12 @@ table() {
   # The roster row the slot would have been, had its credential worked.
   dead_alias=$(awk -F'\t' '
     $2 == "main" { me = $3; mo = $12; personal = ($4 == "max" || $4 == "pro") }
-    $2 != "main" && $14 != "" { n[++k] = $2; e[k] = $3; o[k] = $12 }
+    $2 != "main" && $17 != "" { n[++k] = $2; e[k] = $3; o[k] = $12 }
     END { for (i = 1; i <= k; i++) if ((me != "" && me != "-" && e[i] == me) || (personal && mo != "-" && o[i] == mo)) { print n[i]; exit } }' <<< "${rows}")
   local h0="ACCOUNT" h1="PLAN" h2="SESSION" h3="WEEK (all)"
   local w0=${#h0} w1=${#h1} w2=${#h2} w3=${#h3} w4
 
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs sa wa pa note; do
     [[ -z ${name} ]] && continue
     [[ -n ${note} ]] && notes+=("${name}: ${note}")
     if [[ ${pl} != "-" && -n ${pl} ]]; then
@@ -1057,19 +1101,22 @@ table() {
   return 0
 }
 
+# A positive integer as itself, anything else as null.
+json_num() { if [[ $1 =~ ^[1-9][0-9]*$ ]]; then printf '%s' "$1"; else printf null; fi; }
+
 jq_str() {
   printf '%s' "$1" | tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
 json() {
-  local rows first=1 key name email plan sl sr wl wr pl pv active org obs note days
+  local rows first=1 key name email plan sl sr wl wr pl pv active org obs sa wa pa note days
   if [[ ${1:-} == cached ]]; then
     rows=$(snapshot_rows) || die "no snapshot yet: run claude-usage refresh"
   else
     rows=$(gather) || exit 1
   fi
   printf '['
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs sa wa pa note; do
     [[ -z ${name} ]] && continue
     ((first)) || printf ','
     first=0
@@ -1078,10 +1125,11 @@ json() {
       days=$(token_days_left "$(key_for "${name}")")
       [[ ${days} =~ ^-?[0-9]+$ ]] || days=null
     fi
-    printf '\n  {"account":"%s","active":%s,"email":"%s","plan":"%s","session_left_pct":%s,"session_resets":"%s","week_left_pct":%s,"week_resets":"%s","premium_model":"%s","premium_left_pct":%s,"token_days_left":%s,"observed_at":%s,"note":"%s"}' \
+    printf '\n  {"account":"%s","active":%s,"email":"%s","plan":"%s","session_left_pct":%s,"session_resets":"%s","week_left_pct":%s,"week_resets":"%s","premium_model":"%s","premium_left_pct":%s,"token_days_left":%s,"observed_at":%s,"session_resets_at":%s,"week_resets_at":%s,"premium_resets_at":%s,"note":"%s"}' \
       "$(jq_str "${name}")" "$([[ ${active} == 1 ]] && printf true || printf false)" "$(jq_str "${email}")" "$(jq_str "${plan}")" \
       "${sl//-/null}" "$(jq_str "${sr}")" "${wl//-/null}" "$(jq_str "${wr}")" \
-      "$(jq_str "${pl}")" "${pv//-/null}" "${days}" "$([[ ${obs} =~ ^[1-9][0-9]*$ ]] && printf '%s' "${obs}" || printf null)" "$(jq_str "${note}")"
+      "$(jq_str "${pl}")" "${pv//-/null}" "${days}" "$(json_num "${obs}")" \
+      "$(json_num "${sa}")" "$(json_num "${wa}")" "$(json_num "${pa}")" "$(jq_str "${note}")"
   done <<< "${rows}"
   printf '\n]\n'
   return 0
@@ -1144,6 +1192,7 @@ cmd_refresh() {
   gather_logins > "${tmp}" 2> /dev/null &
   wait
   mv -f "${tmp}" "${SNAPSHOT}"   # atomic swap: readers never see a half-written file
+  rm -f "${SNAPSHOT_V3}"
   return 0
 }
 
@@ -1172,10 +1221,10 @@ snapshot_rows() {
 # variable means the slot, whose name is whatever the snapshot matched it to.
 # $1: finalized rows already read, else the snapshot's.
 current_account() {
-  local d="${CLAUDE_CONFIG_DIR:-}" rows="${1:-}" key name email plan sl sr wl wr pl pv active org obs note
+  local d="${CLAUDE_CONFIG_DIR:-}" rows="${1:-}" key name email plan sl sr wl wr pl pv active org obs sa wa pa note
   if [[ -z ${d} ]]; then
     [[ -n ${rows} ]] || rows=$(snapshot_rows 2> /dev/null)
-    while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
+    while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs sa wa pa note; do
       [[ ${active} == 1 ]] && { printf '%s' "${name}"; return; }
     done <<< "${rows}"
     printf 'main'; return
@@ -1198,9 +1247,9 @@ spent() { [[ $1 =~ ^[0-9]+$ ]] && (($1 == 0)); }
 # has missing measurements and no known spent bucket; p_label is "token" for
 # a token account) or fallback (everything is spent; this one frees up first).
 best_row() {
-  local tier key name email plan sl sr wl wr pl pv active org obs note rows
+  local tier key name email plan sl sr wl wr pl pv active org obs sa wa pa note rows
   rows=$(cat)
-  while IFS=$'\t' read -r tier key name email plan sl sr wl wr pl pv active org obs note; do
+  while IFS=$'\t' read -r tier key name email plan sl sr wl wr pl pv active org obs sa wa pa note; do
     [[ -z ${name} ]] && continue
     # Expiry is re-checked live: the snapshot can predate it.
     [[ ${plan} == token && $(token_days_left "$(key_for "${name}")") == -* ]] && continue
@@ -1262,7 +1311,7 @@ token_warnings() {
 # live for the current account, and the snapshot's copy would only be staler.
 cmd_statusline() {
   local rows cur best_name best_pv best_wr best_how cur_pv cur_pl found=0 age oldest
-  local key name email plan sl sr wl wr pl pv active org obs note out now
+  local key name email plan sl sr wl wr pl pv active org obs sa wa pa note out now
 
   rows=$(cached_rows) || return 0
   cur=$(current_account "${rows}")
@@ -1278,7 +1327,7 @@ cmd_statusline() {
   # Token readings are not refreshed by the status line's own trigger, so the
   # age that matters is the oldest reading shown, not the snapshot's.
   oldest=$(date +%s)
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs sa wa pa note; do
     [[ ${name} == "${cur}" || ${name} == "${best_name}" ]] || continue
     [[ ${obs} =~ ^[0-9]+$ ]] && ((obs < oldest)) && oldest=${obs}
     [[ ${name} == "${cur}" ]] || continue
@@ -1391,7 +1440,7 @@ cmd_add() {
     TOKEN=""
     xtrace_restore
     date +%s > "${dir}/${TOKEN_DATE}"
-    rm -f "${SNAPSHOT}" "$(token_cache "${key}")" "$(token_org_file "${key}")"
+    rm -f "${SNAPSHOT}" "${SNAPSHOT_V3}" "$(token_cache "${key}")" "$(token_org_file "${key}")"
     printf '✓ %s saved (token, expires ~%s)\n' "${name}" "$(token_expiry "${key}" '%Y-%m')"
     return 0
   fi
@@ -1410,7 +1459,7 @@ cmd_add() {
   fi
   # The token would outrank the login just made.
   rm -f "${dir}/${TOKEN_FILE}" "${dir}/${TOKEN_DATE}" "$(token_cache "${key}")" "$(token_org_file "${key}")"
-  rm -f "${SNAPSHOT}"   # the roster changed; the next render re-matches the slot
+  rm -f "${SNAPSHOT}" "${SNAPSHOT_V3}"   # the roster changed; the next render re-matches the slot
   local added main_email
   added=$(run_claude "${dir}" auth status --json 2> /dev/null | sed -n 's/.*"email": "\([^"]*\)".*/\1/p' | head -1)
   main_email=$(run_claude "${MAIN_DIR}" auth status --json 2> /dev/null | sed -n 's/.*"email": "\([^"]*\)".*/\1/p' | head -1)
@@ -1457,7 +1506,7 @@ cmd_rename() {
   [[ ${new} != "${key}" ]] && printf '%s=%s\n' "${key}" "${new}" >> "${tmp}"
   mv -f "${tmp}" "${LABELS_FILE}"
 
-  rm -f "${SNAPSHOT}"   # the cached rows carry the old name
+  rm -f "${SNAPSHOT}" "${SNAPSHOT_V3}"   # the cached rows carry the old name
   printf '%s → %s\n' "${old}" "${new}"
 }
 
@@ -1480,7 +1529,7 @@ cmd_remove() {
   fi
   rm -rf "${dir}"
   drop_label "${key}"
-  rm -f "${SNAPSHOT}" "$(token_cache "${key}")" "$(token_org_file "${key}")"
+  rm -f "${SNAPSHOT}" "${SNAPSHOT_V3}" "$(token_cache "${key}")" "$(token_org_file "${key}")"
   if [[ -n ${until} ]]; then
     printf 'removed %s (token file deleted; the token itself stays valid until ~%s)\n' "${name}" "${until}"
   else
@@ -1918,9 +1967,9 @@ cmd_reserve() {
 
 # One line on what the snapshot knows about an account's headroom.
 describe() {
-  local want="$1" key name email plan sl sr wl wr pl pv active org obs note out="" rows
+  local want="$1" key name email plan sl sr wl wr pl pv active org obs sa wa pa note out="" rows
   rows=$(snapshot_rows) || { printf 'headroom unknown (no snapshot yet)'; return; }
-  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs note; do
+  while IFS=$'\t' read -r key name email plan sl sr wl wr pl pv active org obs sa wa pa note; do
     [[ ${name} == "${want}" ]] || continue
     [[ -n ${note} ]] && { printf '%s' "${note}"; return; }
     [[ ${wr} == idle ]] && { printf 'idle, everything left'; return; }

@@ -2,7 +2,7 @@
 # Smoke test for bin/claude-usage, bin/clu and the claude skill's reviewer
 # scripts — a stub `claude` on PATH, a fake HOME and a throwaway accounts root.
 # No real login, keychain, token or ~/.claude is touched.
-# shellcheck disable=SC2016,SC2012 # literal $… in sh -c bodies; ls counts names we created
+# shellcheck disable=SC2016,SC2012,SC2329 # literal $… in sh -c bodies; ls counts names we created; helpers run through t
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,9 +22,9 @@ FAIL=0
 t() { local label="$1"; shift; if "$@" >/dev/null 2>&1; then echo "ok    $label"; else echo "FAIL  $label"; FAIL=1; fi; }
 tn() { local label="$1"; shift; if "$@" >/dev/null 2>&1; then echo "FAIL  $label (expected failure)"; FAIL=1; else echo "ok    $label"; fi; }
 
-# Current CLI format ("Sep 26, 5:59pm"), N days ahead, under GNU or BSD date.
+# Current CLI format ("Sep 26, 5:59pm"), N days ahead in UTC as the stub's clause says, under GNU or BSD date.
 ahead() {
-  { date -d "+$1 day" '+%b %-d, %-I:%M%p' 2>/dev/null || date -v+"$1"d '+%b %-d, %-I:%M%p'; } |
+  { date -u -d "+$1 day" '+%b %-d, %-I:%M%p' 2>/dev/null || date -u -v+"$1"d '+%b %-d, %-I:%M%p'; } |
     sed -e 's/AM$/am/' -e 's/PM$/pm/'
 }
 
@@ -43,8 +43,9 @@ if [[ " $* " == *" /usage "* ]]; then
   # flaky: the first reply of a busy account comes back windowless.
   [[ -f $CLAUDE_CONFIG_DIR/flaky ]] && { rm -f "$CLAUDE_CONFIG_DIR/flaky"; exit 0; }
   r=$(cat "$CLAUDE_CONFIG_DIR/reset")
+  s=$r; [[ -f $CLAUDE_CONFIG_DIR/session ]] && s=$(cat "$CLAUDE_CONFIG_DIR/session")
   w=50; [[ -f $CLAUDE_CONFIG_DIR/spent ]] && w=100
-  printf '\nCurrent session: 0%% used · resets %s (UTC)\n' "$r"
+  printf '\nCurrent session: 0%% used · resets %s (UTC)\n' "$s"
   printf 'Current week (all models): %s%% used · resets %s (UTC)\n' "$w" "$r"
   printf 'Current week (Fable): 100%% used · resets %s (UTC)\n' "$r"
   exit 0
@@ -59,6 +60,29 @@ if [[ " $* " == *" --output-format json "* ]]; then
 fi
 STUB
 chmod +x "$S/bin/claude"
+# Every --json reply must parse strictly: python3 refuses what grep and jq let through, such as an
+# epoch with a leading zero. Traced runs (bash -x) call the script itself.
+CU_BIN="$CU"
+CU="$S/claude-usage-json"
+cat > "$CU" <<STUB
+#!/usr/bin/env bash
+[[ " \$* " == *" --json "* ]] || exec "$CU_BIN" "\$@"
+out=\$("$CU_BIN" "\$@"); rc=\$?
+printf '%s\n' "\$out"
+((rc)) || python3 -c 'import json,sys; json.load(sys.stdin)' <<< "\$out" 2>/dev/null || echo "\$*" >> "$S/badjson"
+exit \$rc
+STUB
+chmod +x "$CU"
+# An account's session, week and premium reset epochs from a --json reply; "null" for none.
+epochs() {
+  python3 -c 'import json,sys
+r = next(x for x in json.load(open(sys.argv[1])) if x["account"] == sys.argv[2])
+print(*(json.dumps(r[k + "_resets_at"]) for k in ("session", "week", "premium")))' "$1" "$2"
+}
+same_epochs() { local a x; for a in "${@:3}"; do x=$(epochs "$1" "$a") && [[ $x == "$(epochs "$2" "$a")" ]] || return 1; done; }
+# A reset read from minute-precision text written at $2 lies within the minute before it.
+near() { [[ $1 =~ ^[0-9]+$ ]] && (( $1 >= $2 - 60 && $1 <= $2 + 1 )); }
+login_epochs() { local s w p; read -r s w p <<< "$(epochs "$1" "$2")"; [[ $s == null ]] && near "$w" "$3" && near "$p" "$3"; }
 last() { tail -1 "$CALLS"; }
 # The API: replies come from $NET/<cksum of the bearer token> ("<code>" then
 # header lines); no file means unreachable, as real curl reports it.
@@ -85,7 +109,7 @@ mkdir -p "$HOME/.claude/plugins/cache"
 # puts zzz-soon ahead of aaa-late.
 mkdir -p "$CLAUDE_ACCOUNTS_ROOT"/{aaa-late,zzz-soon,fresh,fresh.lock}
 ahead 3 > "$CLAUDE_ACCOUNTS_ROOT/aaa-late/reset"
-ahead 1 > "$CLAUDE_ACCOUNTS_ROOT/zzz-soon/reset"
+SOON=$(( $(date +%s) + 86400 )); ahead 1 > "$CLAUDE_ACCOUNTS_ROOT/zzz-soon/reset"
 touch "$CLAUDE_ACCOUNTS_ROOT/zzz-soon/flaky"
 
 "$CU" --json > "$S/out.json"
@@ -93,6 +117,15 @@ order=$(grep -o '"account":"[^"]*"' "$S/out.json" | cut -d'"' -f4 | tr '\n' ' ')
 t "roster: lockfile dir is not an account" test "$order" = "fresh zzz-soon aaa-late "
 t "idle: full headroom, marked idle" grep -q '"account":"fresh".*"week_left_pct":100,"week_resets":"idle".*"premium_left_pct":100' "$S/out.json"
 t "flaky: one windowless reply is re-probed, not read as idle" grep -q '"account":"zzz-soon".*"premium_left_pct":0' "$S/out.json"
+t "epochs: week and premium from the text; a session beyond one window has none" login_epochs "$S/out.json" zzz-soon "$SOON"
+t "epochs: idle has none" test "$(epochs "$S/out.json" fresh)" = "null null null"
+TZ=Asia/Tokyo XDG_CACHE_HOME="$S/cache-tokyo" "$CU" --json > "$S/tokyo.json"
+t "epochs: the (UTC) clause wins over the process zone" same_epochs "$S/out.json" "$S/tokyo.json" fresh zzz-soon aaa-late
+BR="$S/bare-root"; mkdir -p "$BR/bare"; ahead 2 > "$BR/bare/reset"
+hour=$(( ( $(date +%s) / 3600 + 2 ) * 3600 ))
+{ date -u -d "@$hour" '+%-I%p' 2>/dev/null || date -u -r "$hour" '+%-I%p'; } | tr '[:upper:]' '[:lower:]' > "$BR/bare/session"
+env CLAUDE_ACCOUNTS_ROOT="$BR" XDG_CACHE_HOME="$S/cache-bare" "$CU" --json > "$S/bare.json"
+t "epochs: a bare session hour is that hour on the observation's day" test "$(epochs "$S/bare.json" bare | cut -d' ' -f1)" = "$hour"
 t "table: the CLI's comma is dropped from week resets" sh -c '"$1" > "$2" && grep -q "aaa-late" "$2" && ! grep -qE "[A-Z][a-z]{2} [0-9]{1,2}, " "$2"' _ "$CU" "$S/table.out"
 
 "$CU" refresh
@@ -101,6 +134,18 @@ u=$(wc -l < "$CALLS.usage"); CLAUDE_USAGE_TTL=0 "$CU" --json --cached > "$S/cach
 t "cached json: snapshot rows, never a probe or a refresh" sh -c 'test "$(wc -l < "$1")" -eq "$2" && grep -q "\"account\":\"aaa-late\"" "$3"' _ "$CALLS.usage" "$u" "$S/cached.json"
 tn "cached json: no snapshot is an error" env XDG_CACHE_HOME="$S/cache-none" "$CU" --json --cached
 t "cached json: no snapshot probes nothing either" test "$(wc -l < "$CALLS.usage")" -eq "$u"
+TZ=Asia/Tokyo "$CU" --json --cached > "$S/cached-tokyo.json"
+t "cached json: the same epochs in any zone" same_epochs "$S/cached.json" "$S/cached-tokyo.json" fresh zzz-soon aaa-late
+# A v3 snapshot (14 columns) is carried into v4 once: no epochs, its note intact.
+V3R="$S/v3-root"; mkdir -p "$V3R/carried"; ahead 2 > "$V3R/carried/reset"
+v3() { env CLAUDE_ACCOUNTS_ROOT="$V3R" XDG_CACHE_HOME="$S/cache-v3" CLAUDE_USAGE_TTL=99999 "$CU" "$@"; }
+v3 refresh
+v4=$(ls "$S"/cache-v3/claude-usage/*/snapshot.v4.tsv); old="${v4%v4.tsv}v3.tsv"
+awk -F'\t' -v OFS='\t' '{ $17 = "carried note"; print $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$17 }' "$v4" > "$old" && rm "$v4"
+v3 --json --cached > "$S/v3.json"
+t "v3 snapshot: read with no epochs and its note" sh -c 'test "$1" = "null null null" && grep -q "\"account\":\"carried\".*\"note\":\"carried note\"" "$2"' _ "$(epochs "$S/v3.json" carried)" "$S/v3.json"
+t "v3 snapshot: gone once carried, v4 in its place" sh -c 'test ! -e "$1" && test -s "$2"' _ "$old" "$v4"
+t "describe: shows the note, not an epoch" grep -q "^claude-usage: carried — carried note$" <(v3 run carried -p x 2>&1 >/dev/null)
 t "best: idle account wins" grep -q '^fresh (idle' <("$CU" best)
 t "other: skips the caller's own account" test "$(CLAUDE_USAGE_MODEL=sonnet CLAUDE_CONFIG_DIR="$CLAUDE_ACCOUNTS_ROOT/fresh" "$CU" resolve other)" = zzz-soon
 tn "other: Fable work refuses accounts with no Fable left" env CLAUDE_CONFIG_DIR="$CLAUDE_ACCOUNTS_ROOT/fresh" "$CU" resolve other
@@ -217,8 +262,9 @@ mktok() { printf 'sk-ant-oat01-%s-%s' "$1" "$(printf 'q%.0s' $(seq 60))"; }
 reply() { local f; f="$NET/$(printf '%s' "$1" | cksum | cut -d' ' -f1)"; shift; printf '%s\n' "$@" > "$f"; }
 H=anthropic-ratelimit-unified
 TK_FREE=$(mktok free) TK_PAIR=$(mktok pair) TK_DEAD=$(mktok dead)
-reply "$TK_FREE" 200 "anthropic-organization-id: org-free" "$H-5h-utilization: 0.08" "$H-5h-reset: $(( $(date +%s) + 3600 ))" \
-  "$H-7d-utilization: 0.61" "$H-7d-reset: $(( $(date +%s) + 86400 ))" "$H-7d_oi-utilization: 0.34" "$H-7d_oi-reset: $(( $(date +%s) + 86400 ))"
+R5=$(( $(date +%s) + 3600 )) R7=$(( $(date +%s) + 86400 ))
+reply "$TK_FREE" 200 "anthropic-organization-id: org-free" "$H-5h-utilization: 0.08" "$H-5h-reset: $R5" \
+  "$H-7d-utilization: 0.61" "$H-7d-reset: $R7" "$H-7d_oi-utilization: 0.34" "$H-7d_oi-reset: $R7"
 reply "$TK_PAIR" 200 "anthropic-organization-id: org-main" "$H-5h-utilization: 0.5" "$H-7d-utilization: 0.5"
 reply "$TK_DEAD" 401 "request-id: req_x"
 NR="$S/net-root"
@@ -228,6 +274,7 @@ nr() { env -u CLAUDE_USAGE_SKIP_MAIN CLAUDE_ACCOUNTS_ROOT="$NR" XDG_CACHE_HOME="
 nr --json > "$S/net.json"
 t "probe: headers become session, week and premium headroom" grep -q '"account":"tk-free".*"plan":"token","session_left_pct":92,.*"week_left_pct":39,.*"premium_model":"Fable","premium_left_pct":66' "$S/net.json"
 t "probe: the token goes to curl on stdin, never in argv" sh -c 'test -s "$1" && ! grep -q sk-ant "$1"' _ "$NET/argv"
+t "epochs: a token reading's are its reply's headers" test "$(epochs "$S/net.json" tk-free)" = "$R5 $R7 $R7"
 t "probe: a rejected token is marked unusable" grep -q '"account":"tk-dead".*"note":"token rejected (HTTP 401)' "$S/net.json"
 t "pairing: a token sharing the slot's personal org is the active row" sh -c 'grep -q "\"account\":\"tk-pair\",\"active\":true" "$1" && ! grep -q "\"account\":\"main\"" "$1"' _ "$S/net.json"
 f=$(ls "$S"/cache-net/claude-usage/*/token-tk-pair.tsv); awk -F'\t' -v OFS='\t' -v o=$(( $(date +%s) - 3600 )) '{ $3 = o; print }' "$f" > "$f.n" && mv "$f.n" "$f"
@@ -246,8 +293,8 @@ echo team > "$HOME/.claude/plan"
 t "pairing: never by org on a team plan" grep -q '"account":"main","active":true' <(nr --json)
 rm -f "$HOME/.claude/plan"
 t "probe: no proxy, and no TLS key log reaches curl" sh -c 'grep -q -- "--noproxy \*" "$1" && ! grep -q "keylog=/" "$1"' _ "$NET/argv"
-{ SSLKEYLOGFILE=/k XDG_CACHE_HOME="$S/cache-x" bash -x "$CU" --json; printf '%s' "$TK_FREE" | XDG_CACHE_HOME="$S/cache-x" bash -x "$CU" add tk-free;
-  XDG_CACHE_HOME="$S/cache-x" bash -x "$CU" show tk-free; XDG_CACHE_HOME="$S/cache-x" bash -x "$CU" run tk-free -p x; } > "$S/xt.out" 2>&1 \
+{ SSLKEYLOGFILE=/k XDG_CACHE_HOME="$S/cache-x" bash -x "$CU_BIN" --json; printf '%s' "$TK_FREE" | XDG_CACHE_HOME="$S/cache-x" bash -x "$CU_BIN" add tk-free;
+  XDG_CACHE_HOME="$S/cache-x" bash -x "$CU_BIN" show tk-free; XDG_CACHE_HOME="$S/cache-x" bash -x "$CU_BIN" run tk-free -p x; } > "$S/xt.out" 2>&1 \
   < /dev/null
 t "xtrace: a traced probe, add, show and run never print the token" sh -c 'grep -q "token_fetch" "$1" && ! grep -q "oat01-free" "$1"' _ "$S/xt.out"
 calls=$(wc -l < "$NET/argv")
@@ -364,7 +411,7 @@ tokacct spare2 0.5 0.5 0.5 s2
 tk=$(mktok spentmine); reply "$tk" 200 "anthropic-organization-id: org-main" "$H-5h-utilization: 1.0" "$H-7d-utilization: 1.0" "$H-7d_oi-utilization: 1.0"
 printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add spentmine > /dev/null 2>&1
 rkm refresh
-f=$(ls "$S"/cache-r2/claude-usage/*/snapshot.v3.tsv)
+f=$(ls "$S"/cache-r2/claude-usage/*/snapshot.v4.tsv)
 awk -F'\t' -v OFS='\t' '$2 == "main" { $13 = 1 } { print }' "$f" > "$f.n" && mv "$f.n" "$f"
 t "pairing: an older slot reading never revives a newer spent token" test "$(rkm resolve best 2>/dev/null)" = spare2
 tk=$(mktok bareshow); reply "$tk" 429 "request-id: r"
@@ -474,6 +521,7 @@ mkdir -p "$S/cx-accounts/cx-a"; tn "codex cached json: no snapshot is an error" 
 d="$S/cache-cx/codex-usage/$(printf '%s' "$(cd "$S/cx-accounts" && pwd -P)" | cksum | cut -d' ' -f1)"; mkdir -p "$d"
 printf 'k\tcx-a\ta@x\tplus\t40\t%s\t90\t%s\t-\tfalse\t%s\t0\t-\n' "$(( $(date +%s) + 86400 ))" "$(( $(date +%s) + 3600 ))" "$(date +%s)" > "$d/snapshot.tsv"
 cx --json --cached > "$S/cx.json"; sleep 1
+t "json: every --json reply parses strictly" test ! -s "$S/badjson"
 t "codex cached json: snapshot rows, never a probe or a refresh" sh -c 'grep -q "\"account\":\"cx-a\".*\"week_left_pct\":40" "$1" && ! test -s "$2"' _ "$S/cx.json" "$S/cx.calls"
 
 exit "$FAIL"
