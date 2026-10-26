@@ -340,15 +340,15 @@ plain_epoch() {
 }
 
 # A reset line's epoch from a reader (to_epoch, session_epoch) run under the line's zone; "-" when
-# unreadable, or when that wall time occurs twice there: a DST fall-back repeats its shift, an hour or
-# (Lord Howe) half an hour, and the text then names two instants.
+# unreadable, or when that wall time occurs twice there: a DST fall-back repeats its shift (an hour, half
+# an hour on Lord Howe, two hours at Troll), and the text then names two instants.
 clause_epoch() { # clause_epoch <line> <reader> <args…>
   local z e t d
   z=$(parse_zone "$1"); shift
   e=$(plain_epoch "$(in_zone "${z}" "$@")")
   [[ ${e} == "-" ]] && { printf -- '-'; return; }
   t=$(in_zone "${z}" fmt_epoch "${e}" '%H:%M')
-  for d in 1800 3600; do
+  for d in 1800 3600 7200; do
     if [[ $(in_zone "${z}" fmt_epoch "$((e - d))" '%H:%M') == "${t}" || $(in_zone "${z}" fmt_epoch "$((e + d))" '%H:%M') == "${t}" ]]; then
       printf -- '-'
       return

@@ -127,7 +127,7 @@ hour=$(( ( $(date +%s) / 3600 + 2 ) * 3600 ))
 { date -u -d "@$hour" '+%-I%p' 2>/dev/null || date -u -r "$hour" '+%-I%p'; } | tr '[:upper:]' '[:lower:]' > "$BR/bare/session"
 env CLAUDE_ACCOUNTS_ROOT="$BR" XDG_CACHE_HOME="$S/cache-bare" "$CU" --json > "$S/bare.json"
 t "epochs: a bare session hour is that hour on the observation's day" test "$(epochs "$S/bare.json" bare | cut -d' ' -f1)" = "$hour"
-# Pinned clocks: a wall time a DST fall-back repeats (an hour in New York, half an hour on Lord Howe) names
+# Pinned clocks: a wall time a DST fall-back repeats (an hour in New York, half on Lord Howe, two at Troll) names
 # no epoch, and neither does a weekly reset more than a week ahead, which only a misread year produces.
 REAL_DATE=$(command -v date); mkdir -p "$S/pinned"
 cat > "$S/pinned/date" <<STUB
@@ -142,8 +142,11 @@ DR="$S/dst-root"; mkacct "$DR/ny" "Nov 1, 1:30am" America/New_York; mkacct "$DR/
 pinned "$DR" 1793361600 > "$S/dst.json"   # 2026-10-30 12:00 UTC; New York falls back on Nov 1
 LR="$S/lh-root"; mkacct "$LR/lh" "Apr 4, 1:45am" Australia/Lord_Howe
 pinned "$LR" 1806624000 > "$S/lh.json"    # 2027-04-02 00:00 UTC; Lord Howe falls back half an hour on Apr 4
+TR="$S/troll-root"; mkacct "$TR/troll" "Oct 25, 1:30am" Antarctica/Troll
+pinned "$TR" 1792800000 > "$S/troll.json" # 2026-10-24 00:00 UTC; Troll falls back two hours on Oct 25
 t "epochs: a reset in the hour a DST change repeats has none" test "$(epochs "$S/dst.json" ny)" = "null null null"
 t "epochs: nor in the half hour Lord Howe repeats" test "$(epochs "$S/lh.json" lh)" = "null null null"
+t "epochs: nor in the two hours Troll repeats" test "$(epochs "$S/troll.json" troll)" = "null null null"
 t "epochs: a weekly reset within a week reads; one beyond has none" sh -c 'test "$1" = "null 1793869200 1793869200" && test "$2" = "null null null"' \
   _ "$(epochs "$S/dst.json" near)" "$(epochs "$S/dst.json" far)"
 t "table: the CLI's comma is dropped from week resets" sh -c '"$1" > "$2" && grep -q "aaa-late" "$2" && ! grep -qE "[A-Z][a-z]{2} [0-9]{1,2}, " "$2"' _ "$CU" "$S/table.out"
