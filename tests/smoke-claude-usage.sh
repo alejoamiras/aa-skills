@@ -44,10 +44,11 @@ if [[ " $* " == *" /usage "* ]]; then
   [[ -f $CLAUDE_CONFIG_DIR/flaky ]] && { rm -f "$CLAUDE_CONFIG_DIR/flaky"; exit 0; }
   r=$(cat "$CLAUDE_CONFIG_DIR/reset")
   s=$r; [[ -f $CLAUDE_CONFIG_DIR/session ]] && s=$(cat "$CLAUDE_CONFIG_DIR/session")
+  z=UTC; [[ -f $CLAUDE_CONFIG_DIR/zone ]] && z=$(cat "$CLAUDE_CONFIG_DIR/zone")
   w=50; [[ -f $CLAUDE_CONFIG_DIR/spent ]] && w=100
-  printf '\nCurrent session: 0%% used · resets %s (UTC)\n' "$s"
-  printf 'Current week (all models): %s%% used · resets %s (UTC)\n' "$w" "$r"
-  printf 'Current week (Fable): 100%% used · resets %s (UTC)\n' "$r"
+  printf '\nCurrent session: 0%% used · resets %s (%s)\n' "$s" "$z"
+  printf 'Current week (all models): %s%% used · resets %s (%s)\n' "$w" "$r" "$z"
+  printf 'Current week (Fable): 100%% used · resets %s (%s)\n' "$r" "$z"
   exit 0
 fi
 # A session: record what it ran with, one line per call.
@@ -126,6 +127,13 @@ hour=$(( ( $(date +%s) / 3600 + 2 ) * 3600 ))
 { date -u -d "@$hour" '+%-I%p' 2>/dev/null || date -u -r "$hour" '+%-I%p'; } | tr '[:upper:]' '[:lower:]' > "$BR/bare/session"
 env CLAUDE_ACCOUNTS_ROOT="$BR" XDG_CACHE_HOME="$S/cache-bare" "$CU" --json > "$S/bare.json"
 t "epochs: a bare session hour is that hour on the observation's day" test "$(epochs "$S/bare.json" bare | cut -d' ' -f1)" = "$hour"
+# 1:30am on the US fall-back Sunday (the first in November) happens twice in New York, so it names no epoch.
+fallback() { local d; for d in 1 2 3 4 5 6 7; do [[ $(date -d "$1-11-0$d" +%u 2>/dev/null || date -j -f %Y-%m-%d "$1-11-0$d" +%u) == 7 ]] && { echo "$d"; return; }; done; }
+y=$(date +%Y); d=$(fallback "$y")   # the year to_epoch reads: this one, unless that day is over two days gone
+(( $(TZ=America/New_York date -d "$y-11-0$d 01:30" +%s 2>/dev/null || TZ=America/New_York date -j -f '%Y-%m-%d %H:%M' "$y-11-0$d 01:30" +%s) < $(date +%s) - 172800 )) && d=$(fallback $((y + 1)))
+DR="$S/dst-root"; mkdir -p "$DR/dst"; echo America/New_York > "$DR/dst/zone"; echo "Nov $d, 1:30am" > "$DR/dst/reset"
+env CLAUDE_ACCOUNTS_ROOT="$DR" XDG_CACHE_HOME="$S/cache-dst" "$CU" --json > "$S/dst.json"
+t "epochs: a reset in the hour a DST change repeats has none" test "$(epochs "$S/dst.json" dst)" = "null null null"
 t "table: the CLI's comma is dropped from week resets" sh -c '"$1" > "$2" && grep -q "aaa-late" "$2" && ! grep -qE "[A-Z][a-z]{2} [0-9]{1,2}, " "$2"' _ "$CU" "$S/table.out"
 
 "$CU" refresh

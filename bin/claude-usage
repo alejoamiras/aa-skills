@@ -338,6 +338,21 @@ plain_epoch() {
   if [[ $1 =~ ^[0-9]+$ && $1 != "${NEVER}" ]]; then printf '%s' "$((10#$1))"; else printf -- '-'; fi
 }
 
+# A reset line's epoch from a reader (to_epoch, session_epoch) run under the line's zone; "-" when
+# unreadable, or when that wall time occurs twice there (the hour a DST change repeats names two instants).
+clause_epoch() { # clause_epoch <line> <reader> <args…>
+  local z e t
+  z=$(parse_zone "$1"); shift
+  e=$(plain_epoch "$(in_zone "${z}" "$@")")
+  [[ ${e} == "-" ]] && { printf -- '-'; return; }
+  t=$(in_zone "${z}" fmt_epoch "${e}" '%H:%M')
+  if [[ $(in_zone "${z}" fmt_epoch "$((e - 3600))" '%H:%M') == "${t}" || $(in_zone "${z}" fmt_epoch "$((e + 3600))" '%H:%M') == "${t}" ]]; then
+    printf -- '-'
+  else
+    printf '%s' "${e}"
+  fi
+}
+
 # Headroom, not consumption: red is the "about to be cut off" band.
 paint_left() {
   local left="$1" colour
@@ -748,12 +763,12 @@ probe() {
   line=$(grep -m1 "Current session:" <<< "${usage}")
   s_left=$(parse_left "${line}"); s_reset=$(parse_reset "${line}")
   # A bare hour is read on the day of the observation, never of a later reader.
-  s_at=$(in_zone "$(parse_zone "${line}")" session_epoch "${s_reset}" "${obs}")
-  [[ ${s_at} =~ ^[0-9]+$ ]] && ((s_at > obs && s_at <= obs + SESSION_WINDOW)) || s_at="-"
+  s_at=$(clause_epoch "${line}" session_epoch "${s_reset}" "${obs}")
+  [[ ${s_at} != "-" ]] && ((s_at > obs && s_at <= obs + SESSION_WINDOW)) || s_at="-"
 
   line=$(grep -m1 "Current week (all models)" <<< "${usage}")
   w_left=$(parse_left "${line}"); w_reset=$(parse_reset "${line}")
-  w_at=$(plain_epoch "$(in_zone "$(parse_zone "${line}")" to_epoch "${w_reset}")")
+  w_at=$(clause_epoch "${line}" to_epoch "${w_reset}")
 
   # The second weekly bucket is named after whichever premium model the plan
   # meters separately (Opus, Fable, …), so read the label rather than assume it.
@@ -761,7 +776,7 @@ probe() {
   if [[ -n ${line} ]]; then
     p_label=$(sed -E 's/.*Current week \(([^)]*)\).*/\1/' <<< "${line}")
     p_left=$(parse_left "${line}"); p_reset=$(parse_reset "${line}")
-    p_at=$(plain_epoch "$(in_zone "$(parse_zone "${line}")" to_epoch "${p_reset}")")
+    p_at=$(clause_epoch "${line}" to_epoch "${p_reset}")
   else
     p_label="-"; p_left="-"; p_at="-"
   fi
