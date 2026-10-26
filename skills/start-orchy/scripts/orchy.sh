@@ -95,7 +95,8 @@ watcher_alive() { local f=$1; [ -f "$f" ] || return 1; read -r p s < "$f"; [ -n 
 # A watcher log's newest marker line, not its last line (a runs table or status lines often follow), as the
 # state reports it: a merge reads MERGED, an unreadable post-merge state AMBIGUOUS, a closed PR or a disarm nothing.
 watch_marker() {
-  local mk; mk=$(grep -oE '#[0-9]+ MERGED|#[0-9]+ is (MERGED|CLOSED); watcher stopped|[0-9]{2}:[0-9]{2}Z DISARMED|HEAD MOVED|DIRTY|TRUNK RED|TRUNK UNREADABLE|REQUIRED FAILED|MISSING REQUIRED CHECK|NOT MERGED|TIMEOUT|REFUSED|state unreadable after the merge call' "$1" 2>/dev/null | tail -n 1)
+  # terminal lines match whole lines only: a check name echoed into a MISSING line must not end the hand-back
+  local mk; mk=$(grep -oE '^#[0-9]+ MERGED|^#[0-9]+ is (MERGED|CLOSED); watcher stopped$|^[0-9]{2}:[0-9]{2}Z DISARMED$|HEAD MOVED|DIRTY|TRUNK RED|TRUNK UNREADABLE|REQUIRED FAILED|MISSING REQUIRED CHECK|NOT MERGED|TIMEOUT|REFUSED|state unreadable after the merge call' "$1" 2>/dev/null | tail -n 1)
   case $mk in
     "#"*" MERGED" | "#"*" is MERGED; watcher stopped") echo MERGED;;
     "#"*" is CLOSED; watcher stopped" | *" DISARMED" | "") ;;
@@ -833,6 +834,8 @@ arm-merge)
   p=$!; echo "$p $(pstart "$p")" > "$H/watch/merge-$N.pid"; sleep 1   # the watcher overwrites this with its own identity once it runs
   echo "armed merge-$N pid $(cut -d' ' -f1 "$H/watch/merge-$N.pid") (delay ${delay}s) -> $H/watch/merge-$N.out";;
 disarm)
+  # through a symlinked watch dir, a pid file and a log would be another home's
+  [ -L "$H/watch" ] && { echo "refused: $H/watch must not be a symlink" >&2; exit 1; }
   for f in "$H"/watch/merge-${1:-*}.pid; do [ -f "$f" ] || continue; n=$(basename "$f" .pid); num=${n#merge-}; stopped=0
     if watcher_alive "$f"; then p=$(cut -d' ' -f1 "$f"); kill -- "-$p" 2>/dev/null; kill "$p" 2>/dev/null; sleep 1; echo "stopped $n"; stopped=1
       if [[ "$num" =~ ^[0-9]+$ ]]; then ev merge.disarmed pr:="$num"; fi
