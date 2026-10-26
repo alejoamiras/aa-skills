@@ -47,39 +47,39 @@ const leaks = (t: string) => {
   if (rc !== 0 && rc !== 1) { console.error("refused: scan.leak or prompt_ban is not a valid grep -E pattern"); process.exit(2); }
   return rc === 0;
 };
-// Every string the orchestrator wrote that an issue body can carry verbatim, keyed for the refusal: lane titles, arc
-// names and pickup reasons from lanes.json; page names, record titles, option texts, writes_back templates and the
-// no_ask texts from decisions.json.
+// Every string the orchestrator wrote that an issue body can carry verbatim, keyed for the refusal.
 const authored: [string, unknown][] = [
   ...L.lanes.flatMap((l: any) => [
-    [`lanes.${l.slug}.title`, l.title],
-    ...(l.arcs ?? []).flatMap((a: any) => [[`lanes.${l.slug}.${a.id}.name`, a.name], ...(a.depends_on ?? []).map((d: any, i: number) => [`lanes.${l.slug}.${a.id}.depends_on.${i}.reason`, d.reason])]),
+    [`lanes.${l.slug}.slug`, l.slug], [`lanes.${l.slug}.title`, l.title],
+    ...(l.arcs ?? []).flatMap((a: any) => [
+      [`lanes.${l.slug}.${a.id}.id`, a.id], [`lanes.${l.slug}.${a.id}.name`, a.name],
+      ...(a.e2e ?? []).map((g: unknown, i: number) => [`lanes.${l.slug}.${a.id}.e2e.${i}`, g]),
+      ...(a.depends_on ?? []).flatMap((d: any, i: number) => ["reason", "gate", "decision", "lane"].map(k => [`lanes.${l.slug}.${a.id}.depends_on.${i}.${k}`, d[k]])),
+    ]),
     ...(l.no_arc ?? []).map((x: any) => [`lanes.${l.slug}.no_arc.${x.issue}.reason`, x.reason]),
   ]),
   ...(L.unassigned ?? []).map((x: any) => [`unassigned.${x.issue}.reason`, x.reason]),
   ...D.pages.map((q: any) => [`pages.${q.no}.name`, q.name]),
   ...(D.charter ?? []).flatMap((c: any) => [...(c.options ?? []).map((o: any) => [`charter.${c.id}.options.${o.id}`, o.text]), ...Object.entries(c.writes_back ?? {}).map(([k, t]) => [`charter.${c.id}.writes_back.${k}`, t])]),
-  ...D.records.flatMap((r: any) => [[`records.${r.id}.title`, r.title], ...Object.entries(r.writes_back ?? {}).map(([k, t]) => [`records.${r.id}.writes_back.${k}`, t]), ...Object.entries(r.writes_back?.options ?? {}).map(([k, t]) => [`records.${r.id}.writes_back.options.${k}`, t])]),
+  ...D.records.flatMap((r: any) => [[`records.${r.id}.title`, r.title], [`records.${r.id}.hold`, r.hold], ...Object.entries(r.writes_back ?? {}).filter(([k]) => k !== "options").map(([k, t]) => [`records.${r.id}.writes_back.${k}`, t]), ...Object.entries(r.writes_back?.options ?? {}).map(([k, t]) => [`records.${r.id}.writes_back.options.${k}`, t])]),
+  ...D.holds.merge_holds.map((h: any, i: number) => [`holds.merge_holds.${i}.id`, h.id]),
   ...(D.no_ask ?? []).flatMap((x: any) => [[`no_ask.${x.issue}.decision`, x.decision], [`no_ask.${x.issue}.rule`, x.rule]]),
 ];
-// What goes out verbatim (public wordings, the orchestrator's `recorded`, the strings above) must not copy the owner's
-// words, carry a secret or match the leak patterns; each refusal names its keys, a check that cannot run refuses, and
-// nothing is written either way.
-{
-  const mine = authored.filter((e): e is [string, string] => typeof e[1] === "string" && e[1] !== "");
-  const leaky = mine.filter(([, t]) => leaks(t)).map(([k]) => k);
-  if (leaky.length) { console.error(`refused: these carry a local path, an account name or a page link (scan.leak or prompt_ban): ${leaky.join(", ")}`); process.exit(4); }
-  const outbound: [string, string][] = [...Object.entries(publicNotes), ...docs.filter(d => typeof d.recorded === "string" && d.recorded).map((d): [string, string] => [`${String(d.__id ?? d.id)}.recorded`, d.recorded]), ...mine];
+const notText = authored.filter(([, v]) => v != null && typeof v !== "string").map(([k]) => k);
+if (notText.length) { console.error(`refused: these must be strings: ${notText.join(", ")}`); process.exit(2); }
+// the owner's raw page text, kept before any public wording replaces it in the docs below
+const raw = docs.flatMap(d => [...["note", "result", "next_step", "except"].map(k => d[k]), ...Object.values(d.notes && typeof d.notes === "object" ? d.notes : {})]).filter((t): t is string => typeof t === "string" && t !== "");
+// What goes out verbatim must not copy the owner's words or carry a secret; each refusal names its keys, a check that
+// cannot run refuses, and nothing is written either way.
+function vet(outbound: [string, string][]) {
   if (outbound.length) {
     // the scratch copy holds the owner's words, so it lives beside the ledger, where leads never look, even if a kill skips rmSync
     const asksDir = process.env.ORCHY_ASKS_DIR ?? join(homedir(), ".agents/orchy/asks");
     mkdirSync(asksDir, { recursive: true, mode: 0o700 });
     const dir = mkdtempSync(join(asksDir, ".outbound-")), files = outbound.map(([, t], i) => { const f = join(dir, `${i}.txt`); writeFileSync(f, t + "\n"); return f; });
-    // the owner's words: the ask ledger plus the raw page text, read before any wording replaces it
     const asks = join(asksDir, `${REPO.replace("/", "-")}.jsonl`);
     // existsSync reads an unsearchable directory as absence; only ENOENT is
     try { statSync(asks, { throwIfNoEntry: false }); } catch { console.error("refused: the ask ledger cannot be read, so the copy check cannot run"); process.exit(2); }
-    const raw = docs.flatMap(d => [...["note", "result", "next_step", "except"].map(k => d[k]), ...Object.values(d.notes && typeof d.notes === "object" ? d.notes : {})]).filter((t): t is string => typeof t === "string" && t !== "");
     const ledger = join(dir, "owner.jsonl");
     writeFileSync(ledger, (existsSync(asks) ? readFileSync(asks, "utf8").replace(/\n?$/, "\n") : "") + raw.map(t => JSON.stringify({ id: "page", text: t })).join("\n") + "\n");
     const ov = Bun.spawnSync(["bash", join(import.meta.dir, "../scripts/overlap.sh"), ledger, ...files]);
@@ -89,10 +89,16 @@ const authored: [string, unknown][] = [
     rmSync(dir, { recursive: true, force: true });
     if (ov.exitCode !== 0 && ov.exitCode !== 1) { console.error("refused: the copy check could not run"); process.exit(2); }
     if (copied.length) { console.error(`refused: these copy six consecutive words of the owner's own: ${copied.join(", ")}`); process.exit(4); }
-    // one joined run finds a secret; only then does each string get its own, to name it
+    // a gitleaks spawn per string is slow on a large page, so only a hit in the joined run pays for naming its keys
     if (gl === 3) { const keys = outbound.filter(([, t]) => secret(t) === 3).map(([k]) => k); console.error(`refused: these carry a secret (gitleaks): ${keys.join(", ") || "only the joined text"}`); process.exit(4); }
     if (gl !== 0) { console.error("refused: gitleaks could not run, so the secret check cannot"); process.exit(2); }
   }
+}
+{
+  const mine = authored.filter((e): e is [string, string] => typeof e[1] === "string" && e[1] !== "");
+  const leaky = mine.filter(([, t]) => leaks(t)).map(([k]) => k);
+  if (leaky.length) { console.error(`refused: these carry a local path, an account name or a page link (scan.leak or prompt_ban): ${leaky.join(", ")}`); process.exit(4); }
+  vet([...Object.entries(publicNotes), ...docs.filter(d => typeof d.recorded === "string" && d.recorded).map((d): [string, string] => [`${String(d.__id ?? d.id)}.recorded`, d.recorded]), ...mine]);
 }
 const held: string[] = [], leaked: string[] = [];
 // every free-text field that can reach an issue body goes through the leak filter; the orchestrator's own `recorded`
@@ -236,6 +242,13 @@ function pickup(n: number): string {
 const sectionsFor = (n: number, withPickup = true) => { const segs = out[n].sort((x, y) => x.page - y.page || x.order - y.order); const [first, ...rest] = segs; return `${MARK}\n${first.text.trimEnd()}\n${rest.map(s => "\n" + s.text.replace(/^## Decision\n+/, "").trimEnd() + "\n").join("")}${withPickup ? "\n" + pickup(n) : ""}`; };
 
 const issues = Object.keys(out).map(Number).sort((a, b) => a - b);
+{
+  // each string passed alone above; a filled template can still join two into a path or six of the owner's words
+  const blocks = issues.filter(n => !heldIssues.has(n)).map((n): [string, string] => [`#${n}`, sectionsFor(n)]);
+  const leaky = blocks.filter(([, b]) => leaks(b)).map(([k]) => k);
+  if (leaky.length) { console.error(`refused: these issues' blocks carry a local path, an account name or a page link once filled in: ${leaky.join(", ")}`); process.exit(4); }
+  vet(blocks);
+}
 for (const n of [...heldIssues].sort((a, b) => a - b)) manual.push(`#${n} NOT WRITTEN: a held page or record contributes to it; its current decisions stay`);
 const prevDir = join(O, "apply-preview"); mkdirSync(prevDir, { recursive: true });
 const receiptsPath = join(O, "apply-receipts.json");

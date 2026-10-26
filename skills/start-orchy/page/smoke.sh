@@ -124,17 +124,33 @@ rm "$ORCHY_HOME/local.json"
 ok "free text matching scan.leak or prompt_ban is refused before anything is written"
 # the orchestrator's own strings reach an issue verbatim, so they pass the leak, copy and secret checks, each refusal naming its keys
 cp "$P/lanes.json" "$T/lanes.bak"; cp "$P/decisions.json" "$T/decisions.bak0"
-jq --arg t "Paths under /m""nt/x" '.lanes[0].title=$t' "$T/lanes.bak" > "$P/lanes.json"
+jq --arg t "Paths under /m""nt/x" --arg g "/m""nt/x/private.spec.ts" '.lanes[0].title=$t | .lanes[0].arcs[0].e2e=[$g]' "$T/lanes.bak" > "$P/lanes.json"
 jq --arg r "see /m""nt/y" '.no_ask=[{"issue":2,"decision":"Settled.","rule":$r}]' "$T/decisions.bak0" > "$P/decisions.json"
 rm -rf "$P/apply-preview"
-if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$P/answers" > "$T/apply17.out" 2>&1; then fail "a lane title or a no_ask rule with a local path passed"; fi
-grep 'carry a local path' "$T/apply17.out" | grep -q 'lanes.home-1.title, no_ask.2.rule$' || fail "leaky authored strings not named: $(cat "$T/apply17.out")"
+rc=0; PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$P/answers" > "$T/apply17.out" 2>&1 || rc=$?
+[ "$rc" = 4 ] || fail "a lane title, a gate path or a no_ask rule with a local path did not exit 4 (rc $rc): $(cat "$T/apply17.out")"
+grep 'carry a local path' "$T/apply17.out" | grep -q 'lanes.home-1.title, lanes.home-1.arc-1.e2e.0, no_ask.2.rule$' || fail "leaky authored strings not named: $(cat "$T/apply17.out")"
 [ ! -e "$P/apply-preview" ] || fail "a refused apply wrote previews"
+cp "$T/decisions.bak0" "$P/decisions.json"
+jq '.lanes[0].title=["x"]' "$T/lanes.bak" > "$P/lanes.json"
+rc=0; PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$P/answers" > "$T/apply20.out" 2>&1 || rc=$?
+if ! { [ "$rc" = 2 ] && grep -q 'must be strings: lanes.home-1.title$' "$T/apply20.out"; }; then fail "a title that is not a string was not refused (rc $rc): $(cat "$T/apply20.out")"; fi
+cp "$T/lanes.bak" "$P/lanes.json"
+# a template and its value pass alone, so the filled block is checked too, before any preview
+jq '(.records[] | select(.id == "P1-01") | .writes_back) |= (.on_choice = "## Decision\n\nSee /m{option_text}\n" | .options.B = "nt/x")' "$T/decisions.bak0" > "$P/decisions.json"
+rc=0; PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$P/answers" > "$T/apply21.out" 2>&1 || rc=$?
+if ! { [ "$rc" = 4 ] && grep -q "blocks carry a local path.*: #1$" "$T/apply21.out"; }; then fail "a path joined by a filled template passed (rc $rc): $(cat "$T/apply21.out")"; fi
+[ ! -e "$P/apply-preview" ] || fail "a refused block wrote previews"
+jq '(.records[] | select(.id == "P1-01") | .writes_back) |= (.on_choice = "## Decision\n\nKeep the title {option_text}\n" | .options.B = "and date together please now")' "$T/decisions.bak0" > "$P/decisions.json"
+cp -r "$P/answers" "$T/ans15"; jq '.note="keep the title and date together please now"' "$T/ans15/decisions/choice-P1-01.json" > "$T/c.json" && mv "$T/c.json" "$T/ans15/decisions/choice-P1-01.json"
+rc=0; PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans15" > "$T/apply22.out" 2>&1 || rc=$?
+if ! { [ "$rc" = 4 ] && grep -q "copy six consecutive words.*: #1$" "$T/apply22.out"; }; then fail "six owner words joined by a filled template passed (rc $rc): $(cat "$T/apply22.out")"; fi
 cp "$T/decisions.bak0" "$P/decisions.json"
 # a page note is the owner's even when no ledger row holds it
 cp -r "$P/answers" "$T/ans14"; jq '.note="I want the title and the date sharing one row"' "$T/ans14/decisions/choice-P1-01.json" > "$T/c.json" && mv "$T/c.json" "$T/ans14/decisions/choice-P1-01.json"
 jq '.lanes[0].arcs[0].name="the title and the date sharing one row"' "$T/lanes.bak" > "$P/lanes.json"
-if PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans14" > "$T/apply18.out" 2>&1; then fail "an arc name copying the owner's page note passed"; fi
+rc=0; PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$T/ans14" > "$T/apply18.out" 2>&1 || rc=$?
+[ "$rc" = 4 ] || fail "an arc name copying the owner's page note did not exit 4 (rc $rc): $(cat "$T/apply18.out")"
 grep 'copy six consecutive words' "$T/apply18.out" | grep -q 'lanes.home-1.arc-1.name' || fail "copying arc name not named: $(cat "$T/apply18.out")"
 cp "$T/lanes.bak" "$P/lanes.json"
 rc=0; ORCHY_GITLEAKS="$T/no-gitleaks" PATH="$T/bin:$PATH" bun "$HERE/apply-decisions.ts" --answers "$P/answers" > "$T/apply19.out" 2>&1 || rc=$?
