@@ -92,6 +92,18 @@ alive() { # alive <pid> [<start>]: the process exists, is a claude or claude-usa
   [ -z "$s" ] || [ "$(pstart "$p")" = "$s" ]
 }
 watcher_alive() { local f=$1; [ -f "$f" ] || return 1; read -r p s < "$f"; [ -n "$p" ] && [ -d "/proc/$p" ] && { [ -z "${s:-}" ] || [ "$(pstart "$p")" = "$s" ]; }; }
+# A watcher log's newest marker line, not its last line (a runs table or status lines often follow), as the
+# state reports it: a merge reads MERGED, an unreadable post-merge state AMBIGUOUS, a closed PR or a disarm nothing.
+watch_marker() {
+  # terminal lines match whole lines only: a check name echoed into a MISSING line must not end the hand-back
+  local mk; mk=$(grep -oE '^#[0-9]+ MERGED|^#[0-9]+ is (MERGED|CLOSED); watcher stopped$|^[0-9]{2}:[0-9]{2}Z DISARMED$|HEAD MOVED|DIRTY|TRUNK RED|TRUNK UNREADABLE|REQUIRED FAILED|MISSING REQUIRED CHECK|NOT MERGED|TIMEOUT|REFUSED|state unreadable after the merge call' "$1" 2>/dev/null | tail -n 1)
+  case $mk in
+    "#"*" MERGED" | "#"*" is MERGED; watcher stopped") echo MERGED;;
+    "#"*" is CLOSED; watcher stopped" | *" DISARMED" | "") ;;
+    "state unreadable"*) echo AMBIGUOUS;;
+    *) echo "$mk";;
+  esac
+}
 lead_rows() { for f in "$H"/leads/*.started; do [ -f "$f" ] || continue; read -r pid st acct t weight _ < "$f"; alive "$pid" "$st" && echo "$(basename "$f" .started) $acct ${weight:-heavy} $pid"; done; }
 newest_proc() { # newest_proc <pid> <ps -eo pid=,ppid=,etimes=,args= rows>: "<age_s><TAB><cmd ≤80>" of the youngest process below pid, or nothing
   awk -v r="$1" '
@@ -587,7 +599,7 @@ snapshot)
     if [ "$st" = lane ] && [ ! -d "$WT_ROOT/$l" ] && ! grep -qE "^$l-(plan|a[0-9]+|arc[0-9]+|closeout)$" <<<"$live"; then rest="$rest lane closed: run ask close-lane $l"; fi
     echo "$i $st $l $rest"
   done
-  echo "-- watchers"; for f in "$H"/watch/*.pid; do [ -f "$f" ] || continue; n=$(basename "$f" .pid); if watcher_alive "$f"; then echo "alive $n pid $(cut -d' ' -f1 "$f")"; else echo "ended $n: $(tail -n 1 "$H/watch/$n.out" 2>/dev/null | cut -c1-120)"; fi; done
+  echo "-- watchers"; for f in "$H"/watch/*.pid; do [ -f "$f" ] || continue; n=$(basename "$f" .pid); if watcher_alive "$f"; then mk=$(watch_marker "$H/watch/$n.out"); echo "alive $n pid $(cut -d' ' -f1 "$f")${mk:+ $mk}"; else echo "ended $n: $(tail -n 1 "$H/watch/$n.out" 2>/dev/null | cut -c1-120)"; fi; done
   echo "-- trunk"; if t=$(trunk_state); then f=$(tail -n +2 <<<"$t" | paste -sd, -); echo "$TRUNK ${t:0:8}: ${f:+RED }${f:-no failed trunk check}"; else echo "(trunk checks unreadable)"; fi
   echo "-- open PRs"; gh pr list --repo "$REPO" --state open --json number,title,headRefOid,mergeable,mergeStateStatus,isDraft,baseRefName --jq '.[]|"#\(.number) \(.headRefOid[0:8]) \(.mergeable) \(.mergeStateStatus) draft=\(.isDraft) -> \(.baseRefName) \(.title)"' 2>/dev/null || echo "(gh pr list failed)"
   echo "-- worktrees"; git -C "$ROOT" worktree list | tail -n +2
@@ -652,11 +664,10 @@ print(json.dumps(out))
 PY
   ) || { rep='{"reports": null, "progress": null}'; errs+=(reports); }
   watchers=$(for f in "$H"/watch/*.pid; do [ -f "$f" ] || continue; n=$(basename "$f" .pid); a=false; watcher_alive "$f" && a=true
-      # the last line is often a runs table or a status line, so the newest watcher marker is read separately
-      mk=$(grep -oE '#[0-9]+ MERGED|HEAD MOVED|DIRTY|TRUNK RED|TRUNK UNREADABLE|REQUIRED FAILED|MISSING REQUIRED CHECK|NOT MERGED|TIMEOUT|REFUSED|state unreadable after the merge call' "$H/watch/$n.out" 2>/dev/null | tail -n 1)
+      mk=$(watch_marker "$H/watch/$n.out")
       jq -nc --arg n "$n" --argjson a "$a" --arg last "$(tail -n 1 "$H/watch/$n.out" 2>/dev/null | cut -c1-120)" --arg mk "$mk" \
         '{name: $n, alive: $a, pr: (($n | capture("^merge-(?<n>[0-9]+)$").n | tonumber) // null), last: (if $last == "" then null else $last end),
-          marker: (if $mk == "" then null elif ($mk | test("^#[0-9]+ MERGED$")) then "MERGED" elif ($mk | startswith("state unreadable")) then "AMBIGUOUS" else $mk end)}'
+          marker: (if $mk == "" then null else $mk end)}'
     done | jq -sc .) || { watchers=null; errs+=(watchers); }
   inbox=$(for f in "$H"/inbox/*.jsonl; do [ -f "$f" ] || continue
       c=$(cat "${f%.jsonl}.cursor" 2>/dev/null); [[ "$c" =~ ^[0-9]{1,15}$ ]] && c=$((10#$c)) || c=0
@@ -695,7 +706,8 @@ wait)
   snap() {
     ls -l --time-style=+%s "$H"/reports/*.md 2>/dev/null | awk '{print $6, $7}'
     lead_rows | awk '{print "alive", $1}'
-    for f in "$H"/watch/*.pid; do watcher_alive "$f" && echo "watcher $(basename "$f" .pid)"; done
+    # with its marker, so a new hand-back wakes the Monitor once
+    local f mk; for f in "$H"/watch/*.pid; do watcher_alive "$f" || continue; mk=$(watch_marker "${f%.pid}.out"); echo "watcher $(basename "$f" .pid)${mk:+ $mk}"; done
   }
   # GitHub every poll_sec, in three independent reads: one that fails keeps its baseline and never hides another's change.
   read_src() { local o; case $1 in
@@ -785,7 +797,8 @@ watch-merge)
       line=$(awk -F'\t' -v n="$name" '$1==n' <<<"$runs" | tail -1)
       case "$line" in "") absent="$absent $name";; *$'\t'completed$'\t'success) ok=$((ok+1));; *$'\t'completed$'\t'failure|*$'\t'completed$'\t'cancelled|*$'\t'completed$'\t'timed_out) bad="$bad $name";; esac
     done
-    [ -n "$bad" ] && { echo "$(date -u +%H:%MZ) REQUIRED FAILED:$bad"; echo "$runs"; exit 1; }
+    # the table is indented: a check name is untrusted and may carry a newline, and no line of it may start a marker
+    [ -n "$bad" ] && { echo "$(date -u +%H:%MZ) REQUIRED FAILED:$bad"; printf '  %s\n' "${runs//$'\n'/$'\n  '}"; exit 1; }
     if [ -n "$absent" ]; then missing_rounds=$((missing_rounds+1)); [ "$missing_rounds" = 10 ] && echo "$(date -u +%H:%MZ) MISSING REQUIRED CHECK (no run or status after 10 rounds):$absent; a renamed check waits here until the timeout"; else missing_rounds=0; fi
     if [ "$ok" = "${#REQ[@]}" ] && report_done && trunk_ok; then
       read -r state draft base head mergeable mstate <<<"$(pr_state)"; m="$mergeable $mstate"
@@ -822,12 +835,16 @@ arm-merge)
   p=$!; echo "$p $(pstart "$p")" > "$H/watch/merge-$N.pid"; sleep 1   # the watcher overwrites this with its own identity once it runs
   echo "armed merge-$N pid $(cut -d' ' -f1 "$H/watch/merge-$N.pid") (delay ${delay}s) -> $H/watch/merge-$N.out";;
 disarm)
-  for f in "$H"/watch/merge-${1:-*}.pid; do [ -f "$f" ] || continue; n=$(basename "$f" .pid); num=${n#merge-}
-    if watcher_alive "$f"; then p=$(cut -d' ' -f1 "$f"); kill -- "-$p" 2>/dev/null; kill "$p" 2>/dev/null; sleep 1; echo "stopped $n"
+  # through a symlinked watch dir, a pid file and a log would be another home's
+  [ -L "$H/watch" ] && { echo "refused: $H/watch must not be a symlink" >&2; exit 1; }
+  for f in "$H"/watch/merge-${1:-*}.pid; do [ -f "$f" ] || continue; n=$(basename "$f" .pid); num=${n#merge-}; stopped=0
+    if watcher_alive "$f"; then p=$(cut -d' ' -f1 "$f"); kill -- "-$p" 2>/dev/null; kill "$p" 2>/dev/null; sleep 1; echo "stopped $n"; stopped=1
       if [[ "$num" =~ ^[0-9]+$ ]]; then ev merge.disarmed pr:="$num"; fi
     else echo "$n not running"; fi
     # a wrapper that had not exec'd yet, or a child gh call, may outlive the group kill: finish by command line, never by a bare name
     for q in $(pgrep -f "orchy.sh watch-merge $num " 2>/dev/null); do tr '\0' '\n' < "/proc/$q/environ" 2>/dev/null | grep -qxF "ORCHY_HOME=$H" || continue; kill "$q" 2>/dev/null && echo "stopped stray $q of $n"; done
+    # after every stray, so nothing writes below it: the stopped watcher's hand-back no longer stands
+    o="$H/watch/$n.out"; if [ "$stopped" = 1 ] && [ -f "$o" ] && [ ! -L "$o" ]; then echo "$(date -u +%H:%MZ) DISARMED" >> "$o"; fi
   done;;
 teardown)
   need gh; need agent-worktree; s=$1; W="$WT_ROOT/$s"; q="$(basename "$ROOT")/$s"
