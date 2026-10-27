@@ -159,6 +159,25 @@ tn "cached json: no snapshot is an error" env XDG_CACHE_HOME="$S/cache-none" "$C
 t "cached json: no snapshot probes nothing either" test "$(wc -l < "$CALLS.usage")" -eq "$u"
 TZ=Asia/Tokyo "$CU" --json --cached > "$S/cached-tokyo.json"
 t "cached json: the same epochs in any zone" same_epochs "$S/cached.json" "$S/cached-tokyo.json" fresh zzz-soon aaa-late
+# A PATH that finds every command $PATH finds but $1, as a user service sees it: dropping whole dirs
+# would also drop the bash, jq or python3 a dir shares with the CLI.
+without() {
+  local d f dir="$S/without-$1" found entries="$PATH:"
+  mkdir -p "$dir"
+  local IFS=:
+  # The extra ':' keeps a trailing empty entry; an empty or relative entry means the cwd, as in lookup.
+  for d in $entries; do
+    [[ $d == /* ]] || d=$PWD/$d
+    found=()
+    for f in "$d"/*; do [[ -f $f && -x $f && ! -e $dir/${f##*/} ]] && found+=("$f"); done
+    ((${#found[@]})) && ln -s "${found[@]}" "$dir/"
+  done
+  rm -f "$dir/$1"
+  printf '%s' "$dir"
+}
+NO_CLAUDE=$(without claude)
+t "cached json: read with no claude CLI on PATH" sh -c 'env PATH="$1" "$2" --json --cached | grep -q "\"account\":\"aaa-late\""' _ "$NO_CLAUDE" "$CU"
+t "json: a probe with no claude CLI on PATH dies naming it" sh -c '! env PATH="$1" "$2" --json > /dev/null 2> "$3" && grep -qx "claude CLI not on PATH" "$3"' _ "$NO_CLAUDE" "$CU" "$S/nocli.err"
 # A v3 snapshot (14 columns) is carried into v4 once: no epochs, its note intact.
 V3R="$S/v3-root"; mkdir -p "$V3R/carried"; ahead 2 > "$V3R/carried/reset"
 v3() { env CLAUDE_ACCOUNTS_ROOT="$V3R" XDG_CACHE_HOME="$S/cache-v3" CLAUDE_USAGE_TTL=99999 "$CU" "$@"; }
@@ -546,5 +565,6 @@ printf 'k\tcx-a\ta@x\tplus\t40\t%s\t90\t%s\t-\tfalse\t%s\t0\t-\n' "$(( $(date +%
 cx --json --cached > "$S/cx.json"; sleep 1
 t "json: every --json reply parses strictly" test ! -s "$S/badjson"
 t "codex cached json: snapshot rows, never a probe or a refresh" sh -c 'grep -q "\"account\":\"cx-a\".*\"week_left_pct\":40" "$1" && ! test -s "$2"' _ "$S/cx.json" "$S/cx.calls"
+t "codex cached json: read with no codex CLI on PATH" sh -c 'env PATH="$1" CODEX_ACCOUNTS_ROOT="$2" XDG_CACHE_HOME="$3" "$4" --json --cached | grep -q "\"account\":\"cx-a\""' _ "$(without codex)" "$S/cx-accounts" "$S/cache-cx" "$ROOT/bin/codex-usage"
 
 exit "$FAIL"
