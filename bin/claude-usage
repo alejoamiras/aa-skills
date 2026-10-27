@@ -167,7 +167,7 @@ UNKNOWN='?'   # rejected by valid_name, so no real account can collide with it
 # Code keeps beside a config dir; one can outlive the session that took it.
 valid_name() { [[ $1 =~ ^[A-Za-z0-9._-]+$ && $1 != .* && $1 != *.lock ]]; }
 
-# A cached read touches only the snapshot, so it also serves a caller whose PATH lacks the CLI (a user service).
+# Cached JSON never invokes the CLI; user services may lack it on PATH.
 [[ ${1:-} == --json && ${2:-} == --cached ]] || command -v claude > /dev/null || die "claude CLI not on PATH"
 
 # Directory key -> display label. The slot is always "main": its display name
