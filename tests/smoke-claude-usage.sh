@@ -162,10 +162,12 @@ t "cached json: the same epochs in any zone" same_epochs "$S/cached.json" "$S/ca
 # A PATH that finds every command $PATH finds but $1, as a user service sees it: dropping whole dirs
 # would also drop the bash, jq or python3 a dir shares with the CLI.
 without() {
-  local d f dir="$S/without-$1" found
+  local d f dir="$S/without-$1" found entries="$PATH:"
   mkdir -p "$dir"
   local IFS=:
-  for d in $PATH; do
+  # The extra ':' keeps a trailing empty entry; an empty or relative entry means the cwd, as in lookup.
+  for d in $entries; do
+    [[ $d == /* ]] || d=$PWD/$d
     found=()
     for f in "$d"/*; do [[ -f $f && -x $f && ! -e $dir/${f##*/} ]] && found+=("$f"); done
     ((${#found[@]})) && ln -s "${found[@]}" "$dir/"
