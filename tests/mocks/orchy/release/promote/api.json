@@ -9,7 +9,7 @@
   ],
   "repos/example/app/branches/dev": {"name": "dev", "commit": {"sha": "1111111111111111111111111111111111111111"}, "protected": true},
   "repos/example/app/branches/main": {"name": "main", "commit": {"sha": "2222222222222222222222222222222222222222"}, "protected": true},
-  "repos/example/app/rules/branches/dev": [],
+  "repos/example/app/rules/branches/dev?per_page=100": [],
   "repos/example/app/branches/dev/protection": {
     "required_status_checks": {
       "strict": false,
@@ -25,7 +25,7 @@
     "allow_force_pushes": {"enabled": false},
     "allow_deletions": {"enabled": false}
   },
-  "repos/example/app/rules/branches/main": [
+  "repos/example/app/rules/branches/main?per_page=100": [
     {"type": "deletion", "ruleset_source_type": "Repository", "ruleset_source": "example/app", "ruleset_id": 3},
     {"type": "non_fast_forward", "ruleset_source_type": "Repository", "ruleset_source": "example/app", "ruleset_id": 3},
     {"type": "pull_request", "ruleset_source_type": "Repository", "ruleset_source": "example/app", "ruleset_id": 3,

@@ -7,7 +7,7 @@
     {"name": "main", "commit": {"sha": "5555555555555555555555555555555555555555"}, "protected": true}
   ],
   "repos/example/lib/branches/main": {"name": "main", "commit": {"sha": "5555555555555555555555555555555555555555"}, "protected": true},
-  "repos/example/lib/rules/branches/main": [],
+  "repos/example/lib/rules/branches/main?per_page=100": [],
   "repos/example/lib/branches/main/protection": {
     "required_status_checks": {"strict": true, "contexts": ["test"], "checks": [{"context": "test", "app_id": 15368}]},
     "required_pull_request_reviews": {"dismiss_stale_reviews": false, "require_code_owner_reviews": false, "required_approving_review_count": 1},

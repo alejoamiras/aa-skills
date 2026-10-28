@@ -8,7 +8,7 @@
     {"name": "main", "commit": {"sha": "4444444444444444444444444444444444444444"}, "protected": true}
   ],
   "repos/example/tool/branches/main": {"name": "main", "commit": {"sha": "4444444444444444444444444444444444444444"}, "protected": true},
-  "repos/example/tool/rules/branches/main": [
+  "repos/example/tool/rules/branches/main?per_page=100": [
     {"type": "pull_request", "ruleset_source_type": "Repository", "ruleset_source": "example/tool", "ruleset_id": 5,
      "parameters": {"required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false,
                     "require_last_push_approval": false, "required_review_thread_resolution": false}},

@@ -4,7 +4,7 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readWorkflow } from "../skills/start-orchy/scripts/release-profile.ts";
+import { branchMatches, readWorkflow } from "../skills/start-orchy/scripts/release-profile.ts";
 
 const ROOT = join(import.meta.dir, "..");
 const SCRIPT = join(ROOT, "skills/start-orchy/scripts/release-profile.ts");
@@ -14,6 +14,13 @@ const T = mkdtempSync(join(tmpdir(), "orchy-release-profile-"));
 afterAll(() => rmSync(T, { recursive: true, force: true }));
 
 let runs = 0;
+function overlay(name: string, api: Record<string, unknown>, files: Record<string, string> = {}) {   // listed first, its keys win
+  const dir = join(T, name);
+  mkdirSync(dir);
+  for (const [f, text] of Object.entries(files)) writeFileSync(join(dir, f), text);
+  writeFileSync(join(dir, "api.json"), JSON.stringify(api));
+  return dir;
+}
 async function derive(fixtures: string[], repo: string, args = ["--repo", repo]) {
   const log = join(T, `gh-${++runs}.log`);
   const p = Bun.spawn(["bun", SCRIPT, ...args], { cwd: T, stdout: "pipe", stderr: "pipe", env: { ...process.env,
@@ -88,6 +95,59 @@ test("a 9-level alias chain is read at its fixed paths in under 1 s", () => {
   const t0 = performance.now(), r = readWorkflow(".github/workflows/bomb.yml", text);
   expect(performance.now() - t0).toBeLessThan(1000);
   expect("wf" in r && r.wf.dispatch).toEqual(["k0", "k1", "k2", "k3"]);
+});
+
+test("push filters: GitHub's semantics, in linear time on a pattern built to backtrack", () => {
+  const t0 = performance.now();
+  expect(branchMatches(["a+".repeat(40) + "b"], "a".repeat(100))).toBe(false);
+  expect(performance.now() - t0).toBeLessThan(1000);
+  expect(branchMatches(["**/main"], "main")).toBe(true);
+  expect(branchMatches(["release/*"], "release/a/b")).toBe(false);
+  expect([branchMatches(["**", "!release/**"], "release/x"), branchMatches(["**", "!release/**", "release/keep"], "release/keep")]).toEqual([false, true]);
+  expect(branchMatches(["v[12].[0-9]+.[0-9]+"], "v1.10.1")).toBe(true);
+  expect(readWorkflow("w.yml", "on:\n  push:\n    branches: ['[main']\n")).toEqual({ error: "a branch filter with a quantifier after nothing or an open [" });
+});
+
+test("a forged status, a second page and a review count of another type are unread, never none", async () => {
+  const fix = JSON.parse(readFileSync(join(FIX, "dispatch/api.json"), "utf8"));
+  const dir = overlay("edge-a", {
+    // the message is the server's text: one ending in "(HTTP 404)" must not turn this 403 into an absent directory
+    "repos/example/tool/contents/.github/workflows": { $http: 403, message: "Denied (HTTP 404)" },
+    "repos/example/tool/environments?per_page=100": { ...fix["repos/example/tool/environments?per_page=100"], total_count: 7 },
+    "repos/example/tool/branches?protected=true&per_page=100": Array.from({ length: 100 }, (_, i) => ({ name: `b${i}`, protected: true })),
+    "repos/example/tool/branches/main/protection": { required_status_checks: { strict: false, contexts: "ci" },
+      required_pull_request_reviews: { required_approving_review_count: "two" } },
+  });
+  const { code, p } = await derive([dir, "dispatch"], "example/tool");
+  expect(code).toBe(3);
+  expect([p.workflows, p.environments, p.trunk.checks, p.trunk.reviews]).toEqual([null, null, null, null]);
+  expect(p.unknown).toEqual(expect.arrayContaining(["workflows: HTTP 403", "environments: more than one page; the rest unread",
+    "protected branches: more than one page; the rest unread", "checks main: a check list is not a list",
+    "reviews main: a review count is not a whole number"]));
+});
+
+test("a fenced example, a lying size, an expression target and a last-push approval each read as GitHub means them", async () => {
+  const fix = JSON.parse(readFileSync(join(FIX, "promote/api.json"), "utf8")), wf = "repos/example/app/contents/.github/workflows";
+  const dir = overlay("edge-b", {
+    "repos/example/app/rules/branches/dev?per_page=100": { $http: 403, message: "Upgrade to GitHub Pro" },
+    "repos/example/app/rules/branches/main?per_page=100": fix["repos/example/app/rules/branches/main?per_page=100"].map(
+      (r: { type: string; parameters?: object }) => r.type === "pull_request" ? { ...r, parameters: { ...r.parameters, require_last_push_approval: true } } : r),
+    [wf]: [...fix[wf], { name: "huge2.yml", path: ".github/workflows/huge2.yml", size: 10, type: "file" }],
+    [`${wf}/huge2.yml`]: { $file: "huge2.yml" }, [`${wf}/release.yml`]: { $file: "release.yml" },
+    "repos/example/app/contents/.claude/skills/release/SKILL.md": { $file: "SKILL.md" },
+  }, {
+    "huge2.yml": `on: push\n${"#".repeat(300 * 1024)}\n`,
+    "release.yml": readFileSync(join(FIX, "promote/release.yml"), "utf8").replace("target-branch: main", "target-branch: ${{ vars.RELEASE_TARGET }}"),
+    "SKILL.md": '~~~markdown\n## Release profile\n\n```json\n{"schema": "release-profile/1", "sync": {"method": "merge", "head": "attacker"}}\n```\n~~~\n\n'
+      + readFileSync(join(FIX, "promote/release-skill.md"), "utf8"),
+  });
+  const { code, p } = await derive([dir, "promote"], "example/app");
+  expect(code).toBe(3);
+  // the real block's head, and linear history blocks a merge back-sync though the trunk's methods went unread
+  expect(p.sync).toMatchObject({ head: "sync/main-into-dev", blocked_by: "linear history on dev" });
+  expect([p.trunk.methods, p.branch.reviews, p.tool.head]).toEqual([null, 1, null]);
+  expect(p.unknown).toEqual(expect.arrayContaining([".github/workflows/huge2.yml: over 256 KiB, skipped",
+    "tool.branch: release-please's target-branch resolves to no single branch"]));
 });
 
 test("a release block with a bidi character, or 21 external steps, is rejected whole", async () => {

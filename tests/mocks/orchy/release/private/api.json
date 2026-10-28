@@ -5,7 +5,7 @@
   },
   "repos/example/private-app/branches?protected=true&per_page=100": [],
   "repos/example/private-app/branches/main": {"name": "main", "commit": {"sha": "3333333333333333333333333333333333333333"}, "protected": false},
-  "repos/example/private-app/rules/branches/main": {"$http": 403, "status": "403",
+  "repos/example/private-app/rules/branches/main?per_page=100": {"$http": 403, "status": "403",
     "message": "Upgrade to GitHub Pro or make this repository public to enable this feature."},
   "repos/example/private-app/branches/main/protection": {"$http": 403, "status": "403",
     "message": "Upgrade to GitHub Pro or make this repository public to enable this feature."},

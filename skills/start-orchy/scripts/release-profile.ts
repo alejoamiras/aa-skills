@@ -42,8 +42,10 @@ async function gh(args: string[], cap: number): Promise<Got> {
     if (size > cap) return { status: -1, text: "" };
     if (p.signalCode === "SIGKILL") return { status: -2, text: "" };
     const text = Buffer.concat(chunks).toString("utf8");
-    // gh prints an error's body on stdout and "gh: <message> (HTTP <code>)" on stderr
-    return { status: code === 0 ? 200 : Number(/HTTP (\d{3})/.exec(e)?.[1] ?? 0), text };
+    // gh prints an error's body on stdout and "gh: <message> (HTTP <code>)" on stderr; the code ends the last line, since the
+    // message before it is the server's text
+    const st = /\(HTTP (\d{3})\)$/.exec(e.trimEnd().split("\n").at(-1) ?? "");
+    return { status: code === 0 ? 200 : Number(st?.[1] ?? 0), text };
   } finally { active--; waiting.shift()?.(); }
 }
 const get = (path: string) => gh(["api", path], JSON_CAP);
@@ -52,28 +54,59 @@ const body = (g: Got): unknown => { try { return JSON.parse(g.text); } catch { r
 const json = (g: Got): unknown => g.status === 200 ? body(g) : undefined;
 const why = (g: Got) => g.status > 0 ? `HTTP ${g.status}` : ["gh failed with no HTTP status", "answer over its size cap", "no answer in 30 s"][-g.status];
 
-// GitHub's filter patterns: * stays within a path segment, ** crosses them, ? and + quantify the character before
-function globRe(p: string): RegExp | null {
-  let s = "";
+// GitHub's filter patterns: * stays within a path segment, ** crosses them (and **/ may match no segment), ? and + quantify
+// the character or set before, [] is a set with a-z ranges. null: a pattern this reader cannot place
+type Tok = { t: "c" | "set" | "*" | "**"; v: string; q: "" | "?" | "+" };
+function globToks(p: string): Tok[] | null {
+  const out: Tok[] = [];
   for (let i = 0; i < p.length; i++) {
-    const c = p[i], j = c === "[" ? p.indexOf("]", i + 1) : -1;
-    if (c === "*") { if (p[i + 1] === "*") { s += ".*"; i++; } else s += "[^/]*"; }
-    else if (c === "?" || c === "+") s += c;
-    else if (j > i) { s += `[${p.slice(i + 1, j).replace(/\\/g, "\\\\")}]`; i = j; }
-    else s += c.replace(/[.^$|(){}[\]\\/]/g, "\\$&");
+    const c = p[i], last = out.at(-1);
+    if (c === "?" || c === "+") { if (!last || last.q || last.t === "*" || last.t === "**") return null; last.q = c; }
+    else if (c === "*") { const two = p[i + 1] === "*"; out.push({ t: two ? "**" : "*", v: "", q: "" }); if (two) i++; }
+    else if (c === "[") { const j = p.indexOf("]", i + 1); if (j < 0) return null; out.push({ t: "set", v: p.slice(i + 1, j), q: "" }); i = j; }
+    else out.push({ t: "c", v: c, q: "" });
   }
-  try { return new RegExp(`^${s}$`); } catch { return null; }
+  return out;
 }
-// a later pattern overrides an earlier one, so a ! after a match excludes the branch and a match after a ! includes it again
-const pushesTo = (w: Workflow, b: string) => w.push_branches.reduce((hit, p) =>
-  p.startsWith("!") ? (globRe(p.slice(1))?.test(b) ? false : hit) : (globRe(p)?.test(b) ? true : hit), false);
+const inSet = (set: string, ch: string) => {
+  for (let k = 0; k < set.length; k++) {
+    if (set[k + 1] === "-" && k + 2 < set.length) { if (set[k] <= ch && ch <= set[k + 2]) return true; k += 2; }
+    else if (set[k] === ch) return true;
+  }
+  return false;
+};
+/** Whether a branch matches GitHub's push filter list: a later pattern overrides an earlier one, so a ! after a match excludes
+ *  the branch and a match after a ! includes it again. Memoized over (token, offset), never a regex: the patterns are a
+ *  workflow's, and a backtracking engine takes seconds on one like a+a+…a+b. */
+export function branchMatches(patterns: string[], b: string): boolean {
+  return patterns.reduce((hit, p) => {
+    const neg = p.startsWith("!"), toks = globToks(neg ? p.slice(1) : p);
+    if (!toks) return hit;
+    const n = toks.length, m = b.length, memo = new Uint8Array((n + 1) * (m + 1));   // 0 unknown, 1 yes, 2 no
+    const one = (k: Tok, j: number) => j < m && (k.t === "c" ? b[j] === k.v : inSet(k.v, b[j]));
+    const go = (i: number, j: number): boolean => {
+      if (i === n) return j === m;
+      const key = i * (m + 1) + j;
+      if (memo[key]) return memo[key] === 1;
+      const k = toks[i], nx = toks[i + 1];
+      const r = k.t === "**" ? go(i + 1, j) || (j < m && go(i, j + 1)) || (nx?.t === "c" && nx.v === "/" && !nx.q && go(i + 2, j))
+        : k.t === "*" ? go(i + 1, j) || (j < m && b[j] !== "/" && go(i, j + 1))
+        : k.q === "?" ? go(i + 1, j) || (one(k, j) && go(i + 1, j + 1))
+        : k.q === "+" ? one(k, j) && (go(i + 1, j + 1) || go(i, j + 1))
+        : one(k, j) && go(i + 1, j + 1);
+      memo[key] = r ? 1 : 2;
+      return r;
+    };
+    return go(0, 0) ? !neg : hit;
+  }, false);
+}
+const pushesTo = (w: Workflow, b: string) => branchMatches(w.push_branches, b);
 const publishes = (w: Workflow) => w.environments.length > 0 || w.signals.some(s => PUBLISH.includes(s));
 
 type Read = { wf: Workflow; tagged: boolean; rp: (string | null)[]; notes: string[] };
 /** Reads one workflow at fixed paths with capped counts. Bun.YAML shares aliased nodes, so walking or stringifying a parsed
  *  document can visit millions of nodes; nothing here does either. `tagged`: its push trigger names tags. `rp`: each
- *  release-please step's target branch, "" when it names none (the trunk), null for an expression no single push branch
- *  resolves. */
+ *  release-please step's target branch, "" when it names none (the trunk), null for an expression. */
 export function readWorkflow(path: string, text: string): Read | { error: string } {
   let doc: unknown;
   try { doc = Bun.YAML.parse(text); } catch { return { error: "YAML does not parse" }; }
@@ -100,6 +133,7 @@ export function readWorkflow(path: string, text: string): Read | { error: string
     };
     const pb = side(b, bi, hasB, tagged, "branch patterns"), pt = side(t, ti, tagged, hasB, "tag patterns");
     if (!pb || !pt) return { error: "a push filter is not a list of short strings" };
+    if (!pb.every(p => globToks(p.replace(/^!/, "")))) return { error: "a branch filter with a quantifier after nothing or an open [" };
     push_branches = pb; push_tags = pt;
   }
   if (events.includes("workflow_dispatch")) {
@@ -121,8 +155,9 @@ export function readWorkflow(path: string, text: string): Read | { error: string
       if (typeof uses === "string" && uses.length <= 200) {
         if (/^(googleapis|google-github-actions)\/release-please-action@/.test(uses)) {
           signals.add("release-please");
-          const tb = own(own(step, "with"), "target-branch"), only = push_branches.length === 1 ? push_branches[0] : undefined;
-          rp.push(tb === undefined ? "" : refOk(tb) ? tb : refOk(only) ? only : null);   // refOk admits no glob character
+          // an expression is unresolved: a variable or input can name any branch
+          const tb = own(own(step, "with"), "target-branch");
+          rp.push(tb === undefined ? "" : refOk(tb) ? tb : null);
         }
         if (/^JS-DevTools\/npm-publish@/i.test(uses)) signals.add("npm publish");
         if (/^softprops\/action-gh-release@/i.test(uses)) signals.add("gh release");
@@ -141,17 +176,22 @@ export function readWorkflow(path: string, text: string): Read | { error: string
 /** The first fenced json block under `## Release profile`, as release-profile/1. Unknown keys are ignored and listed; any
  *  other fault rejects the whole block, so a half-valid block never fills a fact. */
 function parseBlock(md: string): { block?: Block; ignored: string[]; error?: string } {
-  let fence = false, section = false, lines: string[] | null = null;
+  let fence = "", section = false, closed = false, lines: string[] | null = null;
   for (const line of md.split(/\r?\n/)) {
-    if (lines) { if (/^```\s*$/.test(line)) break; lines.push(line); continue; }
-    if (fence) { if (/^```\s*$/.test(line)) fence = false; continue; }
-    const f = /^```\s*(\S*)/.exec(line);   // the info string's first word is its language
-    if (f) { if (section && f[1] === "json") lines = []; else fence = true; continue; }
-    if (/^#{1,2}\s/.test(line)) { if (section) break; section = /^## Release profile\s*$/.test(line); }
+    if (fence) {   // CommonMark: a line of the fence's character, at least as long, and nothing else closes it
+      const c = /^ {0,3}(`+|~+)\s*$/.exec(line);
+      if (c && c[1][0] === fence[0] && c[1].length >= fence.length) { if (lines) { closed = true; break; } fence = ""; }
+      else lines?.push(line);
+      continue;
+    }
+    const f = /^ {0,3}(`{3,}|~{3,})\s*(\S*)/.exec(line);   // the info string's first word is its language
+    if (f && !(f[1][0] === "`" && f[2].includes("`"))) { fence = f[1]; if (section && f[2] === "json") lines = []; continue; }
+    if (/^ {0,3}#{1,2}\s/.test(line)) { if (section) break; section = /^ {0,3}## Release profile\s*$/.test(line); }
   }
   if (!lines) return { ignored: [] };
+  if (!closed) return { ignored: [], error: "its json fence never closes" };
   let v: unknown;
-  try { v = JSON.parse(lines.join("\n")); } catch { return { ignored: [], error: "not valid JSON, or its fence never closes" }; }
+  try { v = JSON.parse(lines.join("\n")); } catch { return { ignored: [], error: "not valid JSON" }; }
   if (!isObj(v) || v.schema !== "release-profile/1") return { ignored: [], error: "not a release-profile/1 object" };
   const sync = own(v, "sync"), external = own(v, "external"), freeze = own(v, "freeze");
   const ignored = [...Object.keys(v).filter(k => !["schema", "shape", "release_branch", "tool", "sync", "freeze", "external"].includes(k)),
@@ -180,6 +220,9 @@ class Failure extends Error {}
 async function derive(repo: string): Promise<{ profile: Obj & { unknown: string[] }; ignored: string[] }> {
   const R = `repos/${repo}`, owner = repo.split("/")[0], U: string[] = [];
   const unread = (what: string, g: Got) => { U.push(`${what}: ${why(g)}`); return null; };
+  // a page that came back full, or a total above what came back, is unread: the rest could change the answer
+  const page = (xs: unknown[], what: string, total?: unknown) =>
+    xs.length >= 100 || (typeof total === "number" && total > xs.length) ? (U.push(`${what}: more than one page; the rest unread`), null) : xs;
   const firstOf = async (paths: string[]) => {
     for (const p of paths) { const g = await raw(`${R}/contents/${p}`); if (g.status !== 404) return g; }
     return { status: 404, text: "" };
@@ -243,7 +286,8 @@ async function derive(repo: string): Promise<{ profile: Obj & { unknown: string[
 
   // the release branch: the block's, else release-please's, else the only protected branch besides the trunk
   const protJ = json(protG);
-  const prot = Array.isArray(protJ) ? protJ.map(b => own(b, "name")).filter(refOk).filter(n => n !== trunk) : unread("protected branches", protG);
+  const prot = (Array.isArray(protJ) ? page(protJ, "protected branches") : unread("protected branches", protG))
+    ?.map(b => own(b, "name")).filter(refOk).filter(n => n !== trunk) ?? null;
   const UNKNOWN = Symbol("unknown");
   let rel: string | null | typeof UNKNOWN;
   if (block?.release_branch !== undefined) {
@@ -259,14 +303,14 @@ async function derive(repo: string): Promise<{ profile: Obj & { unknown: string[
 
   let rules403 = false;
   const facts = async (b: string): Promise<Branch | null> => {
-    const [hd, rl, pr] = await Promise.all([get(`${R}/branches/${b}`), get(`${R}/rules/branches/${b}`), get(`${R}/branches/${b}/protection`)]);
+    const [hd, rl, pr] = await Promise.all([get(`${R}/branches/${b}`), get(`${R}/rules/branches/${b}?per_page=100`), get(`${R}/branches/${b}/protection`)]);
     if (hd.status === 404) { U.push(`branch ${b}: not found`); return null; }
     const sha = own(own(json(hd), "commit"), "sha");
     const runs = typeof sha === "string" && /^[0-9a-f]{40}$/.test(sha) ? await get(`${R}/commits/${sha}/check-runs?per_page=100`) : null;
     if (!runs) hd.status === 200 ? U.push(`branch ${b}: no head sha`) : unread(`branch ${b}`, hd);
     if (rl.status === 403) rules403 = true;
     const rj = json(rl), pj = json(pr);
-    const rules = Array.isArray(rj) ? rj : unread(`rules ${b}`, rl);
+    const rules = Array.isArray(rj) ? page(rj, `rules ${b}`) : unread(`rules ${b}`, rl);
     const classic = pr.status === 404 && own(body(pr), "message") === "Branch not protected" ? {} : isObj(pj) ? pj : unread(`protection ${b}`, pr);
     const both = !!rules && !!classic;
     const of = (t: string) => (rules ?? []).filter(r => own(r, "type") === t).map(r => own(r, "parameters"));
@@ -277,18 +321,25 @@ async function derive(repo: string): Promise<{ profile: Obj & { unknown: string[
     const linear = either(of("required_linear_history").length > 0, enabled("required_linear_history"));
     const signed = either(of("required_signatures").length > 0, enabled("required_signatures"));
     const strict = either(of("required_status_checks").some(p => own(p, "strict_required_status_checks_policy") === true), own(rsc, "strict") === true);
-    let checks = both ? [...of("required_status_checks").flatMap(p => list(own(p, "required_status_checks")).map(c => own(c, "context"))),
-      ...list(own(rsc, "contexts")), ...list(own(rsc, "checks")).map(c => own(c, "context"))] : null;
+    // a list or count of another type is unread, never empty or zero: either would let a merge.branches entry be written
+    const ctx = (cs: unknown) => Array.isArray(cs) ? cs.map(c => own(c, "context")) : null;
+    const lists = [...of("required_status_checks").map(p => ctx(own(p, "required_status_checks"))),
+      rsc === undefined ? [] : Array.isArray(own(rsc, "contexts")) ? [...(own(rsc, "contexts") as unknown[]), ...(ctx(own(rsc, "checks")) ?? [])] : null];
+    let checks = both ? (lists.includes(null) ? (U.push(`checks ${b}: a check list is not a list`), null) : lists.flat()) : null;
     if (checks && !checks.every(textOk)) { checks = null; U.push(`checks ${b}: a name is not a short string`); }
-    // a required code-owner review blocks a merge as a count of one does
-    const count = (p: unknown, owners: string) => Math.max(Number(own(p, "required_approving_review_count")) || 0, own(p, owners) === true ? 1 : 0);
-    const reviews = both ? Math.max(...of("pull_request").map(p => count(p, "require_code_owner_review")), rv === undefined ? 0 : count(rv, "require_code_owner_reviews")) : null;
+    // a required code-owner review or approval of the last push blocks a merge as a count of one does
+    const count = (p: unknown, owners: string) => { const n = own(p, "required_approving_review_count");
+      return Number.isSafeInteger(n) && (n as number) >= 0
+        ? Math.max(n as number, own(p, owners) === true || own(p, "require_last_push_approval") === true ? 1 : 0) : null; };
+    const counts = [...of("pull_request").map(p => count(p, "require_code_owner_review")), rv === undefined ? 0 : count(rv, "require_code_owner_reviews")];
+    const reviews = !both ? null : counts.includes(null) ? (U.push(`reviews ${b}: a review count is not a whole number`), null) : Math.max(...(counts as number[]));
     // what both the rulesets and the repository allow; linear history removes merge, whichever source requires it
     let methods = allowed && both ? of("pull_request").map(p => own(p, "allowed_merge_methods"))
       .reduce<string[]>((m, a) => Array.isArray(a) ? m.filter(x => a.includes(x)) : m, allowed) : null;
     if (methods && linear) methods = methods.filter(m => m !== "merge");
-    const cr = runs && own(json(runs), "check_runs");
-    let apps = Array.isArray(cr) ? cr.map(r => own(own(r, "app"), "slug")).filter(s => s !== "github-actions") : runs ? unread(`check-runs ${b}`, runs) : null;
+    const crJ = runs && json(runs), crL = own(crJ, "check_runs");
+    const cr = Array.isArray(crL) ? page(crL, `check-runs ${b}`, own(crJ, "total_count")) : runs ? unread(`check-runs ${b}`, runs) : null;
+    let apps = cr && cr.map(r => own(own(r, "app"), "slug")).filter(s => s !== "github-actions");
     if (apps && !apps.every(textOk)) { apps = null; U.push(`check-runs ${b}: an app slug is not a short string`); }
     const pushers = gap ? undefined : workflows?.filter(w => pushesTo(w, b) && publishes(w)).map(w => w.path);   // whole or null
     return { name: b, methods, linear, signed, strict, checks: checks && uniq(checks as string[]), reviews,
@@ -300,17 +351,17 @@ async function derive(repo: string): Promise<{ profile: Obj & { unknown: string[
 
   // a free private repository answers 403 on rules and lists no protected branch, environment or ruleset, whatever it holds
   if (noneProtected && rules403) { rel = UNKNOWN; U.push("release branch: none protected while rules answer HTTP 403"); }
-  const envJ = own(json(envG), "environments");
-  let environments: Obj[] | null = Array.isArray(envJ) ? envJ.slice(0, MAX_LIST).map(e => {
+  const envR = json(envG), envJ = own(envR, "environments");
+  let environments: Obj[] | null = (Array.isArray(envJ) ? page(envJ, "environments", own(envR, "total_count")) : unread("environments", envG))?.map(e => {
     const rr = list(own(e, "protection_rules")).find(r => own(r, "type") === "required_reviewers");
     return { name: own(e, "name"), reviewers: list(own(rr, "reviewers")).length, self_review_blocked: own(rr, "prevent_self_review") === true };
-  }) : unread("environments", envG);
+  }) ?? null;
   if (environments && !environments.every(e => textOk(e.name))) { environments = null; U.push("environments: a name is not a short string"); }
   if (environments?.length === 0 && rules403) { environments = null; U.push("environments: none listed while rules answer HTTP 403"); }
   const rsJ = json(rsG);
   let tags: { pattern: string; creation: string }[] | null = null;
   if (!Array.isArray(rsJ)) unread("tag rulesets", rsG);
-  else {
+  else if (page(rsJ, "tag rulesets")) {
     const ids = rsJ.filter(r => own(r, "target") === "tag" && own(r, "enforcement") === "active").map(r => own(r, "id")).filter(Number.isSafeInteger);
     const got = await Promise.all(ids.slice(0, MAX_LIST).map(id => get(`${R}/rulesets/${id}`)));
     const bad = got.find(g => !isObj(json(g)));
@@ -330,7 +381,7 @@ async function derive(repo: string): Promise<{ profile: Obj & { unknown: string[
   // release-please opens its PR from release-please--branches--<branch>; its bot is whoever opened the last one
   const tool: { kind: string; branch: string | null; bot: string | null; head: string | null } = { kind, branch: null, bot: null, head: null };
   if (kind === "release-please") {
-    tool.branch = rpBranch ?? (typeof rel === "string" ? rel : null);
+    tool.branch = targets.includes("?") ? null : rpBranch ?? (typeof rel === "string" ? rel : null);
     const head = tool.branch && `release-please--branches--${tool.branch}`;
     if (!head) U.push("tool.branch: release-please's target-branch resolves to no single branch");
     else if (own(json(rpConfG), "separate-pull-requests") === true) U.push("tool.head: release-please opens one PR per package");
@@ -354,7 +405,8 @@ async function derive(repo: string): Promise<{ profile: Obj & { unknown: string[
     const method = block?.sync?.method ?? null, m = trunkF.methods;
     if (!method) U.push("sync.method: no valid release skill block names it");
     sync = { from: rel, to: trunk, method, head: block?.sync?.head ?? rel,
-      blocked_by: !method || !m || m.includes(method) ? null : method === "merge" && trunkF.linear ? `linear history on ${trunk}` : `${trunk} does not allow ${method}` };
+      // linear history forbids a merge commit even where the methods went unread
+      blocked_by: method === "merge" && trunkF.linear ? `linear history on ${trunk}` : !method || !m || m.includes(method) ? null : `${trunk} does not allow ${method}` };
   }
   return { ignored, profile: { schema: "orchy.release/1", repo, at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"), shape,
     trunk: trunkF, branch: typeof rel === "string" ? bf : null, tool, sync, tags, environments, workflows, skill,
