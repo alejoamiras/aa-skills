@@ -20,6 +20,14 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   ask lane <id> <slug> <route> | done|drop|reopen <id> <note> | note <id> <text>   route or move an ask
 #   ask list [--all] [--json] | show <id>   one line per open or laned ask (every ask with --all; orchy.asks/1 with --json); one ask's fold and history
 #   ask file <id> <title> <body-file>   file an ask as a GitHub issue: check, dedupe, create and record under one lock
+#   ask go <id> -- <words>       the owner's go for the release or hotfix the ask is laned to: each act of that lane, once
+#   ask ok <id> <act> -- <words> | grant <id> <scope> -- <words>   the owner's OK for one act; a standing grant (one scope in v1:
+#                                merge dependabot <trunk> <method>); the words are the owner's, verbatim, and stay in the ledger
+#   ask revoke <id> [<act>|<scope>]   end a go (bare), an OK or a grant
+#   grants [--json]              the live standing grants (orchy.grants/1 with --json)
+#   act <act> --lane <slug> | --ok <id> | --grant | --check   an irreversible act on an authority (or only its checks); acts are
+#                                merge <pr> <sha> <base> <method>, approve <run> <attempt> <env>, dispatch <workflow> <ref> <sha>
+#                                [<input>=<value>...], tag <name> <sha>; a merge arms watch-merge --act, the others call at once
 #   ask close-lane <slug>        after teardown: each ask laned there is done (delivered, with its PR) or reopened, from the reports' ASKS: lines
 #   waiting add <ref> <text> | done <ref> | list [--json]   what waits on the owner, one item per ref (pr:N issue:N page:N
 #                                ask:askN lane:<slug> other:<slug>); add replaces the text and keeps since; orchy.waiting/1 with --json
@@ -40,7 +48,7 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #                                local ban), the content read at that sha (default: the head now); SCAN FAILED unless it is the head
 #                                before and after; --quick exits 3 past a quick lane's bounds
 #   watch-merge <pr> <full-sha> <lane> <report> [archive-name|-]   merge a lane PR on the standing policy, then tear the lane
-#                                down (archive -: no plan to wait for and no teardown)
+#                                down (archive -: no plan to wait for and no teardown); act merge arms it with --act instead
 #   arm-merge  <pr> <full-sha> <lane> <report-name> [archive-name|-] [delay-s]   watch-merge detached (nohup, .out + .pid)
 #   disarm [<pr>]                stop one merge watcher, or every one
 #   receipt [--json] [--offline] [<lane>]   per lane: API-equivalent dollars, tokens, wall-clock, PRs merged, issues closed, failed arcs,
@@ -70,7 +78,7 @@ case "$cmd" in help|-h|--help) usage 0;; home) echo "$H"; exit 0;; esac
 cfg() { jq -r "$1" "$CFG"; }
 lcl() { [ -f "$LOCAL" ] && jq -r "$1" "$LOCAL" || echo ""; }
 TRUNK=$(cfg '.trunk // "main"')
-case "$cmd" in wt-new|launch|resume|arm-merge|watch-merge)
+case "$cmd" in wt-new|launch|resume|arm-merge|watch-merge|act)
   [ "$(cfg '.mode // empty')" = triage ] && { echo "refused: orchy.json mode is triage (labels, comments and pages only; no worktree, lead or merge)" >&2; exit 1; };; esac
 # A lead runs the hook its settings file names, so nobody but the owner may write here. chmod tightens a fresh or loose
 # home (a umask would also reach wt-new's product checkout), but cannot undo what another user planted while it was loose.
@@ -79,7 +87,7 @@ for d in "${ds[@]}"; do [ ! -L "$d" ] && [ -O "$d" ] || { echo "orchy: $d must b
 f=$({ find "$H" -maxdepth 2 ! -user "$EUID"; [ $under = 0 ] || find "$CAP" -maxdepth 1 ! -user "$EUID"; } 2>/dev/null | head -1)
 [ -z "$f" ] || { echo "orchy: $f belongs to another user; refusing a home someone else could write" >&2; exit 1; }
 # Readers keep the ownership checks but create nothing, so a poller never changes the home it reads.
-ro=0; case "$cmd" in state|config|local|session-id|receipt|accounts) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting) case "${1:-}" in list) ro=1;; esac;; esac
+ro=0; case "$cmd" in state|config|local|session-id|receipt|accounts|grants) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting) case "${1:-}" in list) ro=1;; esac;; esac
 if [ $ro = 0 ]; then
   mkdir -p "$H"/{briefs,prompts,reports,leads,watch,wt,scratch,inbox,page/shots,page/build}
   chmod 700 "$H"; [ $under = 1 ] && chmod 700 "$CAP"
@@ -221,6 +229,91 @@ merge_arg_err() { # <pr> <pin> <lane> <report> <archive|->: why a watcher must n
   name_ok "$4" || { echo "the report must be a file name under reports/"; return; }
   [ "$5" = - ] || name_ok "$5" || echo "the archive must be a plan name, or - for none"
 }
+ref_ok() { [[ "$1" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$1" != *..* && "$1" != [-/]* ]]; }   # branch, ref and tag names, safe in an API path as written
+act_norm() { # act_norm <kind> <field>...: the act's one text, which OK, used and revoke rows name; a refusal on stderr
+  local k=${1:-} i names=(); shift || true
+  case "$k" in
+  merge) [ $# = 4 ] && [[ "$1" =~ ^[1-9][0-9]{0,8}$ ]] && sha_ok "$2" && ref_ok "$3" && [[ "$4" =~ ^(merge|squash|rebase)$ ]] \
+    || { echo "refused: merge <pr> <sha40> <base> <merge|squash|rebase>" >&2; return 1; };;
+  approve) [ $# = 3 ] && [[ "$1" =~ ^[1-9][0-9]{0,19}$ && "$2" =~ ^[1-9][0-9]{0,3}$ && "$3" =~ ^[A-Za-z0-9._-]{1,100}$ ]] \
+    || { echo "refused: approve <run-id> <attempt> <environment>" >&2; return 1; };;
+  dispatch) [ $# -ge 3 ] && [[ "$1" =~ ^\.github/workflows/[A-Za-z0-9._-]+\.ya?ml$ ]] && ref_ok "$2" && sha_ok "$3" \
+    || { echo "refused: dispatch <.github/workflows/name.yml> <ref> <sha40> [<input>=<value>...]" >&2; return 1; }
+    for i in "${@:4}"; do [[ "$i" =~ ^[A-Za-z_][A-Za-z0-9_-]{0,63}=[A-Za-z0-9._+:/-]{0,128}$ ]] || { echo "refused: an input is <name>=<value>" >&2; return 1; }; names+=("${i%%=*}"); done
+    [ ${#names[@]} = 0 ] || printf '%s\n' "${names[@]}" | LC_ALL=C sort -cu 2>/dev/null || { echo "refused: inputs are sorted by name, each named once" >&2; return 1; };;
+  tag) [ $# = 2 ] && ref_ok "$1" && sha_ok "$2" || { echo "refused: tag <name> <sha40>" >&2; return 1; };;
+  *) echo "refused: an act is merge, approve, dispatch or tag" >&2; return 1;;
+  esac; echo "$k $*"
+}
+scope_norm() { [ $# = 4 ] && [ "$1 $2" = "merge dependabot" ] && ref_ok "$3" && [[ "$4" =~ ^(merge|squash|rebase)$ ]] \
+  || { echo "refused: the one scope is merge dependabot <trunk> <method>" >&2; return 1; }; echo "$*"; }
+act_scope() { local a; read -ra a <<<"$1"; [ "${a[0]}" = merge ] && echo "merge dependabot ${a[3]} ${a[4]}"; }   # the grant a merge act falls under
+# Authority is read from raw rows in ledger order, never from the fold, which keeps `said` and `note` apart: a row counts
+# only when it carries the owner's words itself. An approval is keyed by run and environment, so a re-run is a new act.
+LIVE_JQ='
+def mine($id): map(select(.id == $id));
+def state_of: [.[] | select((.state | type) == "string")] | last;
+def akey: if startswith("approve ") then (split(" ") | del(.[2]) | join(" ")) else . end;
+def go_live($lane): to_entries as $e
+  | ([$e[] | select(.value.note == "go" or .value.note == "revoke:")] | last) as $g
+  | $g != null and $g.value.note == "go" and ($g.value.said | type) == "string"
+    and ([$e[] | select(.key > $g.key and (.value.state | type) == "string")] | length == 0 or (length == 1 and .[0].value.state == "lane"))
+    and (state_of | . != null and .state == "lane" and .lane == $lane);
+def go_covers($x): ($x | akey) as $k | all(.[]; (.note // "") | (startswith("used: ") and (ltrimstr("used: ") | akey) == $k) | not);
+def ok_live($x): (state_of | . != null and (.state == "open" or .state == "lane"))
+  and ([.[] | select(.note == "ok: \($x)" or .note == "revoke: \($x)" or .note == "used: \($x)")] | last | . != null and .note == "ok: \($x)" and (.said | type) == "string");
+def grant_live($s): [.[] | select(.note == "grant: \($s)" or .note == "revoke: \($s)")] | last | . != null and .note == "grant: \($s)" and (.said | type) == "string";
+def unused($x): all(.[]; (.note // "") as $n | ($n == "used: \($x)" or ($n | startswith("used: \($x) under "))) | not);
+def live_grants: . as $all | [.[] | select((.note // "") | startswith("grant: ")) | {scope: (.note | ltrimstr("grant: ")), ask: .id, since: .at}]
+  | group_by([.ask, .scope]) | map(last) | map(select(. as $g | $all | mine($g.ask) | grant_live($g.scope)));
+'
+ledger_rows() { if [ -f "$LEDGER" ]; then jq -Rsc '[split("\n")[] | fromjson? | select(type == "object" and (.id | type) == "string")]' "$LEDGER"; else echo '[]'; fi; }
+lane_go() { # lane_go <slug>: the one ask laned there with a live go
+  local ids; ids=$(ledger_rows | jq -r --arg l "$1" "$LIVE_JQ"'. as $all | [.[].id] | unique[] | . as $id | select($all | mine($id) | go_live($l))') || return 1
+  case $(grep -c . <<<"$ids") in
+    1) echo "$ids";; 0) echo "refused: no ask laned to $1 has a live go" >&2; return 1;;
+    *) echo "refused: $(paste -sd' ' <<<"$ids") each have a live go on $1; revoke all but one" >&2; return 1;; esac; }
+grant_ask() { ledger_rows | jq -er --arg s "$1" "$LIVE_JQ"'live_grants | map(select(.scope == $s)) | first | .ask' 2>/dev/null \
+  || { echo "refused: no live grant for $1" >&2; return 1; }; }
+authorized() { # authorized go|ok|grant <ask> <act> [<lane>]: the authority is live now and covers the act
+  local r; r=$(ledger_rows) || return 1
+  case $1 in
+  go) jq -e --arg id "$2" --arg x "$3" --arg l "${4:-}" "$LIVE_JQ"'mine($id) | go_live($l) and go_covers($x)' <<<"$r" >/dev/null;;
+  ok) jq -e --arg id "$2" --arg x "$3" "$LIVE_JQ"'mine($id) | ok_live($x)' <<<"$r" >/dev/null;;
+  grant) jq -e --arg id "$2" --arg x "$3" --arg s "$(act_scope "$3")" "$LIVE_JQ"'unused($x) and (mine($id) | grant_live($s))' <<<"$r" >/dev/null;;
+  *) return 1;; esac; }
+claim() { # claim go|ok|grant <ask> <act> [<lane>]: the authority read again and its used: row written under one ledger lock, so racing claims leave one
+  local k=$1 id=$2 x=$3 l=${4:-} n="used: $3"; [ "$k" = grant ] && n="used: $3 under $(act_scope "$3")"
+  need flock; ledger_ok || return 1
+  claim_in() { authorized "$k" "$id" "$x" "$l" || { echo "refused: $x is not authorized by $k $id" >&2; return 1; }
+    append_row "$(jq -nc --arg id "$id" --arg at "$(now)" --arg n "$n" '{id: $id, at: $at, note: $n}')"; }
+  with_ledger claim_in; }
+base_req() { # base_req <base> [<method>]: {methods, req, base} for the trunk or a merge.branches base; else the reason, exit 1
+  local j; j=$(jq -c --arg b "$1" --arg t "$TRUNK" 'if $b == $t then {methods: (.merge.trunk_methods // [.merge.method // "squash"]),
+      req: (.merge.required_checks // []), base: (.merge.trunk_checks // .merge.required_checks // [])}
+    elif (.merge.branches[$b] | type) == "object" then .merge.branches[$b] | {methods: [.method], req: (.required_checks // []), base: (.base_checks // .required_checks // [])}
+    else null end' "$CFG") || { echo "orchy.json cannot be read"; return 1; }
+  [ "$j" != null ] || { echo "$1 is neither the trunk nor a merge.branches base"; return 1; }
+  [ -z "${2:-}" ] || jq -e --arg m "$2" '.methods | index($m)' <<<"$j" >/dev/null || { echo "$1 takes $(jq -r '.methods | join(" or ")' <<<"$j"), not $2"; return 1; }
+  jq -e '.req | length > 0' <<<"$j" >/dev/null || { echo "$1 has no required check"; return 1; }
+  echo "$j"; }
+grant_pr_ok() { # grant_pr_ok <pr>: Dependabot's own PR, on its own branch in this repository, every commit Dependabot's
+  local j; j=$(gh pr view "$1" --repo "$REPO" --json author,headRefName,isCrossRepository,commits 2>/dev/null) || return 1
+  jq -e '.author.login == "app/dependabot" and .author.is_bot == true and .isCrossRepository == false and (.headRefName | startswith("dependabot/"))
+    and (.commits | length > 0) and all(.commits[]; (.authors | length > 0) and all(.authors[]; .login == "dependabot[bot]"))' <<<"$j" >/dev/null; }
+reach() { # reach <sha>: the commit is on the trunk or a merge.branches base
+  local b bases; mapfile -t bases < <(cfg '(.merge.branches // {}) | keys[]')
+  for b in "$TRUNK" "${bases[@]}"; do case $(gh api "repos/$REPO/compare/$1...$b" --jq .status 2>/dev/null) in ahead|identical) return 0;; esac; done; return 1; }
+tag_state() { # yes, no, or nothing when unreadable
+  local e; e=$(mktemp "$H/scratch/tag.XXXXXX") || return 0
+  if gh api "repos/$REPO/git/ref/tags/$1" >/dev/null 2>"$e"; then echo yes; elif grep -q 'HTTP 404' "$e"; then echo no; fi; rm -f "$e"; }
+arm_watch() { # arm_watch <delay-s> <pr> <watch-merge args>...: the watcher detached in its own session, its .pid and .out under watch/
+  local d=$1 n=$2 p; shift
+  watcher_alive "$H/watch/merge-$n.pid" && { echo "refused: merge-$n is already armed (pid $(cut -d' ' -f1 "$H/watch/merge-$n.pid"))"; return 1; }
+  # every value is an argument, never part of the script bash -c reads
+  ( cd "$ROOT" && exec env ORCHY_ROOT="$ROOT" ORCHY_HOME="$H" setsid nohup bash -c 'sleep "$1"; shift; exec bash "$@"' _ "$d" "$(realpath "$0")" watch-merge "$@" ) > "$H/watch/merge-$n.out" 2>&1 &
+  p=$!; echo "$p $(pstart "$p")" > "$H/watch/merge-$n.pid"; sleep 1; }   # the watcher overwrites this with its own identity once it runs
+note_ok() { case "$1" in go | ok:* | grant:* | revoke:* | used:* | goal:*) echo "refused: a note \"${1%%:*}\" is written only by ask go, ok, grant, revoke, goal and act" >&2; return 1;; esac; }
 checks() { # name<TAB>status<TAB>conclusion: the newest check-run per name, then a commit status only for a name no check-run carries; exit 1 on an API failure
   local cr st
   cr=$(gh api "repos/$REPO/commits/$1/check-runs" --paginate --jq '.check_runs[] | {id, name, status, conclusion}' 2>/dev/null) || return 1
@@ -229,12 +322,13 @@ checks() { # name<TAB>status<TAB>conclusion: the newest check-run per name, then
   printf '%s\n' "$cr"
   [ -z "$st" ] || awk -F'\t' 'NR==FNR{seen[$1]=1; next} !($1 in seen)' <(printf '%s\n' "$cr") <(printf '%s\n' "$st" | sed 's/\terror$/\tfailure/')
 }
-trunk_state() { # the trunk head's sha, then one line per trunk check that concluded failure or timed_out there; exit 1 when unreadable
-  local sha runs n; sha=$(gh api "repos/$REPO/commits/$TRUNK" --jq .sha 2>/dev/null) && sha_ok "$sha" || return 1
+base_state() { # base_state <branch> <check>...: the branch head's sha, then one line per check that concluded failure or timed_out there; exit 1 when unreadable
+  local b=$1 sha runs n; shift; sha=$(gh api "repos/$REPO/commits/$b" --jq .sha 2>/dev/null) && sha_ok "$sha" || return 1
   runs=$(checks "$sha") || return 1; echo "$sha"
-  while IFS= read -r n; do awk -F'\t' -v n="$n" '$1==n' <<<"$runs" | tail -1 | grep -qE $'\tcompleted\t(failure|timed_out)$' && echo "$n"; done < <(cfg '(.merge.trunk_checks // .merge.required_checks)[]')
+  for n in "$@"; do awk -F'\t' -v n="$n" '$1==n' <<<"$runs" | tail -1 | grep -qE $'\tcompleted\t(failure|timed_out)$' && echo "$n"; done
   return 0
 }
+trunk_state() { local c; mapfile -t c < <(cfg '(.merge.trunk_checks // .merge.required_checks)[]'); base_state "$TRUNK" "${c[@]}"; }
 session_pid() { # the orchestrator session: $CLAUDE_PID while it is a live claude, else the nearest `claude` ancestor, else (a test, a plain shell) the caller's parent
   local p=${CLAUDE_PID:-} c
   if [[ "$p" =~ ^[0-9]+$ ]] && [ "$(ps -o comm= -p "$p" 2>/dev/null)" = claude ]; then echo "$p"; return; fi
@@ -394,9 +488,9 @@ check-public)
 ask)
   sub=${1:-}; shift || true
   case "$sub" in list|show) ledger_ro || exit 1;; *) need flock; ledger_ok || exit 1;; esac
-  case "$sub" in add|list|close-lane) ;; public|said|note|done|drop|reopen|show|lane|file)
+  case "$sub" in add|list|close-lane) ;; public|said|note|done|drop|reopen|show|lane|file|go|ok|grant|revoke)
     [[ "${1:-}" =~ ^ask[0-9]+$ ]] || { echo "usage: ask $sub <askN> ..." >&2; exit 1; }; id=$1; shift;;
-    *) echo "usage: ask add|public|said|note|lane|done|drop|reopen|list|show|file ... (orchy.sh help)" >&2; exit 1;; esac
+    *) echo "usage: ask add|public|said|note|lane|done|drop|reopen|list|show|file|go|ok|grant|revoke ... (orchy.sh help)" >&2; exit 1;; esac
   row() { jq -nc --arg id "$id" --arg at "$(now)" "$@"; }
   case "$sub" in
   add)
@@ -416,11 +510,13 @@ ask)
     with_ledger ask_public;;
   said|note)
     t="$*"; [ -n "$t" ] || { echo "usage: ask $sub <askN> <text>" >&2; exit 1; }
+    [ "$sub" = said ] || note_ok "$t" || exit 1
     ask_text() { [ -n "$(ask_get "$id")" ] || { echo "refused: no $id" >&2; return 1; }
       append_row "$(row --arg k "$sub" --arg t "$t" '{id: $id, at: $at} + {($k): $t}')" && echo "$id $sub recorded"; }
     with_ledger ask_text;;
   done|drop|reopen)
     t="$*"; [ -n "$t" ] || { echo "usage: ask $sub <askN> <note>" >&2; exit 1; }
+    note_ok "$t" || exit 1
     to=$sub; [ "$sub" = drop ] && to=dropped; [ "$sub" = reopen ] && to=open
     ask_move() { local a st; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
       st=$(jq -r .state <<<"$a"); ask_moves "$st" "$to" || { echo "refused: $id is $st; $sub does not apply" >&2; return 1; }
@@ -429,6 +525,7 @@ ask)
   lane)
     s=${1:-}; shift || true; t="$*"
     [[ "$s" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] && [ -n "$t" ] || { echo "usage: ask lane <askN> <slug> <route>" >&2; exit 1; }
+    note_ok "$t" || exit 1
     ask_lane() { local a st; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
       st=$(jq -r .state <<<"$a"); ask_moves "$st" lane || { echo "refused: $id is $st; lane does not apply" >&2; return 1; }
       ask_ready "$a" "$id" || return 1
@@ -477,6 +574,33 @@ ask)
       [ -n "$n" ] || { echo "AMBIGUOUS: gh issue create printed no issue number ($url). Reconcile $id by hand; never retry" >&2; return 1; }
       append_row "$(row --argjson n "$n" '{id: $id, at: $at, state: "filed", issue: $n}')" && echo "$id filed as #$n"; }
     with_ledger ask_file;;
+  go|ok|grant)
+    x=(); w=(); seen=0; for t in "$@"; do if [ $seen = 1 ]; then w+=("$t"); elif [ "$t" = -- ]; then seen=1; else x+=("$t"); fi; done
+    words="${w[*]}"; [ $seen = 1 ] && [ -n "$words" ] || { echo "refused: the owner's words follow -- (ask $sub <askN>$([ "$sub" = go ] || echo " <$([ "$sub" = ok ] && echo act || echo scope)>") -- <words>)" >&2; exit 1; }
+    case $sub in
+      go) [ ${#x[@]} = 0 ] || { echo "usage: ask go <askN> -- <words>" >&2; exit 1; }; n=go;;
+      ok) xt=$(act_norm "${x[@]}") || exit 1; n="ok: $xt";;
+      grant) xt=$(scope_norm "${x[@]}") || exit 1
+        [ "${x[2]}" = "$TRUNK" ] || { echo "refused: a grant covers Dependabot's PRs into the trunk, $TRUNK" >&2; exit 1; }; n="grant: $xt";;
+    esac
+    ask_auth() { local a st w; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
+      st=$(jq -r .state <<<"$a")
+      case "$sub/$st" in go/lane | ok/open | ok/lane | grant/open | grant/lane) ;;
+        go/open) jq -e 'any(.notes[]; startswith("goal:"))' <<<"$a" >/dev/null || { echo "refused: a go needs a laned ask or a goal; $id is open" >&2; return 1; };;
+        *) echo "refused: $id is $st; $sub does not apply" >&2; return 1;; esac
+      w=$(jq -r "$ASK_HOLD" <<<"$a")
+      case "$w" in "waiting: wording"*) echo "refused: $id is $w; settle its wording first" >&2; return 1;; esac
+      append_row "$(row --arg s "$words" --arg n "$n" '{id: $id, at: $at, said: $s, note: $n}')" || return 1
+      # the go or OK answers the question the ask waited on; a goal waits for its work, and a grant answers nothing
+      case "$sub/$w" in */ | grant/* | */"waiting: goal"*) ;; *) append_row "$(row --arg t "answered: $sub" '{id: $id, at: $at, note: $t}')" || return 1;; esac
+      echo "$id $n recorded"; }
+    with_ledger ask_auth;;
+  revoke)
+    # only removes authority, so it checks the grammar and that the ask exists, whatever its state
+    n="revoke:"; if [ $# -gt 0 ]; then xt=$(act_norm "$@" 2>/dev/null || scope_norm "$@" 2>/dev/null) || { echo "refused: revoke takes nothing (a go), an act or a scope" >&2; exit 1; }; n="revoke: $xt"; fi
+    ask_rev() { [ -n "$(ask_get "$id")" ] || { echo "refused: no $id" >&2; return 1; }
+      append_row "$(row --arg n "$n" '{id: $id, at: $at, note: $n}')" && echo "$id $n recorded"; }
+    with_ledger ask_rev;;
   close-lane)
     s=${1:-}; [[ "$s" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || { echo "usage: ask close-lane <slug>" >&2; exit 1; }
     [ ! -d "$WT_ROOT/$s" ] || { echo "refused: lane $s still has its worktree; close-lane runs after teardown" >&2; exit 1; }
@@ -515,6 +639,10 @@ ask)
       done; }
     with_ledger ask_close;;
   esac;;
+grants)
+  ledger_ro || exit 1
+  g=$(ledger_rows | jq -c "$LIVE_JQ"'{schema: "orchy.grants/1", grants: live_grants}') || exit 1
+  if [ "${1:-}" = --json ]; then echo "$g"; else jq -r 'if .grants == [] then "no standing grants" else .grants[] | "\(.scope)  \(.ask)  since \(.since)" end' <<<"$g"; fi;;
 waiting)
   sub=${1:-}; shift || true
   case "$sub" in
@@ -721,6 +849,7 @@ snapshot)
   echo "-- unsigned pages"; [ -f "$H/page/unsigned.json" ] && jq -r --argjson now "$(date +%s)" --slurpfile u "$H/page/unsigned.json" '.pages[] | select(.no as $n | $u[0] | index($n)) |
     "page \(.no) \(.name): " + (if .added_at then (($now - (.added_at | fromdateiso8601)) | "waiting \(. / 86400 | floor)d\(. % 86400 / 3600 | floor)h") else "age unknown" end)' "$H/page/decisions.json" 2>/dev/null
   echo "-- waiting"; "$0" waiting list 2>&1
+  echo "-- grants"; "$0" grants 2>&1
   # launch reads only the cached snapshot, so the tick refreshes it: a reading over 2 h old allows light leads only
   echo "-- headroom"; claude-usage refresh >/dev/null 2>&1; "$0" accounts 2>&1 | head -20;;
 accounts)
@@ -907,15 +1036,26 @@ scan)
   [ -z "$why" ] && { echo "QUICK: within bounds"; exit 0; }
   echo "QUICK: past the bounds: $why"; exit 3;;
 watch-merge)
-  need gh; N=${1:-}; PIN=${2:-}; LANE=${3:-}; REPORT=${4:-}; ARCH=${5:-${3:-}}
-  e=$(merge_arg_err "$N" "$PIN" "$LANE" "$REPORT" "$ARCH"); [ -z "$e" ] || { echo "REFUSED: $e"; exit 4; }
-  mapfile -t REQ < <(cfg '.merge.required_checks[]'); [ "${#REQ[@]}" -gt 0 ] || { echo "REFUSED: merge.required_checks is empty"; exit 4; }
-  # spliced into `--$method`, so any other value could be --admin
-  method=$(cfg '.merge.method // "squash"'); case $method in squash|merge|rebase) ;; *) echo "REFUSED: merge.method must be squash, merge or rebase"; exit 4;; esac
+  need gh; N=${1:-}; PIN=${2:-}; ACT=""; BASE=$TRUNK
+  if [ "${3:-}" = --act ]; then   # armed by act merge: its base's checks and method, no report, no teardown, the authority re-read before the call
+    method=${5:-}; AUTH=${6:-}; AASK=${7:-}; LANE=${8:--}
+    ACT=$(act_norm merge "$N" "$PIN" "${4:-}" "$method" 2>/dev/null) && [[ "$AUTH" =~ ^(go|ok|grant)$ && "$AASK" =~ ^ask[0-9]+$ ]] \
+      && { [ "$LANE" = - ] || name_ok "$LANE"; } || { echo "REFUSED: the act's arguments"; exit 4; }
+    BASE=$4; rj=$(base_req "$BASE" "$method") || { echo "REFUSED: $rj"; exit 4; }
+    mapfile -t REQ < <(jq -r '.req[]' <<<"$rj"); mapfile -t BCHK < <(jq -r '.base[]' <<<"$rj")
+  else
+    LANE=${3:-}; REPORT=${4:-}; ARCH=${5:-${3:-}}
+    e=$(merge_arg_err "$N" "$PIN" "$LANE" "$REPORT" "$ARCH"); [ -z "$e" ] || { echo "REFUSED: $e"; exit 4; }
+    mapfile -t REQ < <(cfg '.merge.required_checks[]'); [ "${#REQ[@]}" -gt 0 ] || { echo "REFUSED: merge.required_checks is empty"; exit 4; }
+    mapfile -t BCHK < <(cfg '(.merge.trunk_checks // .merge.required_checks)[]')
+    # spliced into `--$method`, so any other value could be --admin
+    method=$(cfg '.merge.method // "squash"'); case $method in squash|merge|rebase) ;; *) echo "REFUSED: merge.method must be squash, merge or rebase"; exit 4;; esac
+  fi
   rounds=$(cfg '.merge.watch_rounds // 300'); WS=${ORCHY_WATCH_SLEEP:-60}
   echo "$$ $(pstart $$)" > "$H/watch/merge-$N.pid"   # the watcher's own identity, whatever wrapper started it
   pr_state() { gh pr view "$N" --repo "$REPO" --json state,isDraft,baseRefName,headRefOid,mergeable,mergeStateStatus --jq '"\(.state) \(.isDraft) \(.baseRefName) \(.headRefOid) \(.mergeable) \(.mergeStateStatus)"' 2>/dev/null; }
   report_done() { # the LAST marker line of the report decides; it must be exactly LEAD_DONE, with a PR line for this PR and a full-sha HEAD line equal to the pin
+    [ -z "$ACT" ] || return 0
     local r="$H/reports/$REPORT"; [ -f "$r" ] || return 1
     [ "$(grep -xE 'LEAD_DONE|LEAD_BLOCKED:.*|ARC_FAILED:.*' "$r" | tail -1)" = "LEAD_DONE" ] || return 1
     grep -qE "^PR #$N( |$)" "$r" || return 1
@@ -926,7 +1066,7 @@ watch-merge)
   trunk_said=""
   trunk_ok() {
     local out tsha failed n all=1
-    out=$(trunk_state) || { [ "$trunk_said" = unreadable ] || echo "$(date -u +%H:%MZ) TRUNK UNREADABLE; waiting"; trunk_said=unreadable; return 1; }
+    out=$(base_state "$BASE" "${BCHK[@]}") || { [ "$trunk_said" = unreadable ] || echo "$(date -u +%H:%MZ) TRUNK UNREADABLE; waiting"; trunk_said=unreadable; return 1; }
     tsha=${out%%$'\n'*}; failed=$(tail -n +2 <<<"$out"); [ -n "$failed" ] || { trunk_said=""; return 0; }
     if [ "$(gh api "repos/$REPO/compare/$tsha...$PIN" --jq .behind_by 2>/dev/null)" = 0 ]; then
       while IFS= read -r n; do awk -F'\t' -v n="$n" '$1==n' <<<"$runs" | tail -1 | grep -qE $'\tcompleted\tsuccess$' || all=0; done <<<"$failed"
@@ -936,17 +1076,22 @@ watch-merge)
   }
   st=$(pr_state) || { echo "REFUSED: cannot read #$N"; exit 4; }
   read -r state draft base head _ <<<"$st"
-  [ "$base" = "$TRUNK" ] || { echo "REFUSED: #$N targets $base, not $TRUNK"; exit 4; }
+  [ "$base" = "$BASE" ] || { echo "REFUSED: #$N targets $base, not $BASE"; exit 4; }
   [ "$state" = OPEN ] || { echo "REFUSED: #$N is $state"; exit 4; }
   # lane PRs share the owner's login, so the branch, not the author, is the provenance; a fork or an app's PR is never a lane's
   pv=$(gh pr view "$N" --repo "$REPO" --json isCrossRepository,author,headRefName --jq '[.isCrossRepository, .author.is_bot, .author.login, .headRefName] | @tsv' 2>/dev/null) \
     || { echo "REFUSED: cannot read #$N"; exit 4; }
   IFS=$'\t' read -r fork bot who ref <<<"$pv"
-  [ "$fork" = false ] || { echo "REFUSED: #$N comes from a fork"; exit 4; }
-  [ "$bot" = false ] || { echo "REFUSED: #$N was opened by $who, not a lead"; exit 4; }
-  [ "$ref" = "worktree-$LANE" ] || [[ "$ref" == "$LANE"-* ]] || { echo "REFUSED: #$N head $ref is not lane $LANE's branch"; exit 4; }
+  if [ -n "$ACT" ]; then   # act checked the shape when it armed; a fork reaches only the trunk, and only on an OK
+    [ "$fork" = false ] || { [ "$BASE" = "$TRUNK" ] && [ "$AUTH" = ok ]; } || { echo "REFUSED: #$N comes from a fork"; exit 4; }
+    authorized "$AUTH" "$AASK" "$ACT" "$LANE" || { echo "REFUSED: no live $AUTH on $AASK for $ACT"; exit 4; }
+  else
+    [ "$fork" = false ] || { echo "REFUSED: #$N comes from a fork"; exit 4; }
+    [ "$bot" = false ] || { echo "REFUSED: #$N was opened by $who, not a lead"; exit 4; }
+    [ "$ref" = "worktree-$LANE" ] || [[ "$ref" == "$LANE"-* ]] || { echo "REFUSED: #$N head $ref is not lane $LANE's branch"; exit 4; }
+  fi
   # the pin binds the head, not the base: the merge must land on this base or a descendant of it
-  B0=$(gh api "repos/$REPO/commits/$TRUNK" --jq .sha 2>/dev/null) && sha_ok "$B0" || { echo "REFUSED: cannot read $TRUNK's head"; exit 4; }
+  B0=$(gh api "repos/$REPO/commits/$BASE" --jq .sha 2>/dev/null) && sha_ok "$B0" || { echo "REFUSED: cannot read $BASE's head"; exit 4; }
   m=""; ok=0; missing_rounds=0; api_fail=0
   for i in $(seq 1 "$rounds"); do
     st=$(pr_state) || { api_fail=$((api_fail+1)); [ "$api_fail" = 10 ] && echo "$(date -u +%H:%MZ) API FAILURE: gh pr view failed 10 rounds running"; sleep "$WS"; continue; }; read -r state draft base head _ <<<"$st"
@@ -974,14 +1119,20 @@ watch-merge)
     [ "$(cfg '.mode // empty')" = triage ] && { echo "REFUSED: orchy.json mode is triage; not merged"; exit 4; }
     # every try: gh merges into whatever base the PR names then, and a PR can be retargeted during a retry's wait
     read -r state draft base head _ <<<"$(pr_state)"
-    [ "$state" = OPEN ] && [ "$draft" = false ] && [ "$base" = "$TRUNK" ] && [ "$head" = "$PIN" ] || { echo "REFUSED at merge time: state=$state draft=$draft base=$base head=$head"; exit 4; }
+    [ "$state" = OPEN ] && [ "$draft" = false ] && [ "$base" = "$BASE" ] && [ "$head" = "$PIN" ] || { echo "REFUSED at merge time: state=$state draft=$draft base=$base head=$head"; exit 4; }
     [ "$try" = 1 ] || trunk_ok || { echo "TRUNK RED at merge time; not merged"; exit 7; }
-    case $(gh api "repos/$REPO/compare/$B0...$TRUNK" --jq .status 2>/dev/null) in
+    case $(gh api "repos/$REPO/compare/$B0...$BASE" --jq .status 2>/dev/null) in
       ahead|identical) ;;
-      "") echo "REFUSED at merge time: cannot read $TRUNK's history"; exit 4;;
-      *) echo "HEAD MOVED: $TRUNK history was rewritten since arming"; exit 2;;
+      "") echo "REFUSED at merge time: cannot read $BASE's history"; exit 4;;
+      *) echo "HEAD MOVED: $BASE history was rewritten since arming"; exit 2;;
     esac
-    out=$(gh pr merge "$N" --repo "$REPO" "--$method" --delete-branch --match-head-commit "$PIN" 2>&1 | tail -1); echo "$out"
+    # an act spends its authority once, before its first call: a retry on a moved base is the same attempt
+    if [ -n "$ACT" ] && [ "$try" = 1 ]; then
+      [ "$AUTH" != grant ] || grant_pr_ok "$N" || { echo "REFUSED at merge time: #$N is no longer Dependabot's own"; exit 4; }
+      claim "$AUTH" "$AASK" "$ACT" "$LANE" 2>/dev/null || { echo "REFUSED at merge time: $ACT is no longer authorized"; exit 4; }
+    fi
+    margs=("--$method"); [ -n "$ACT" ] || margs+=(--delete-branch)   # an act's head may be the trunk itself
+    out=$(gh pr merge "$N" --repo "$REPO" "${margs[@]}" --match-head-commit "$PIN" 2>&1 | tail -1); echo "$out"
     for _ in 1 2 3; do sleep $((WS/10)); s=$(gh pr view "$N" --repo "$REPO" --json state --jq .state 2>/dev/null) && break; done
     [ -n "$s" ] || { echo "#$N state unreadable after the merge call; check it by hand"; exit 6; }
     [ "$s" = MERGED ] && { merged=1; break; }
@@ -989,6 +1140,7 @@ watch-merge)
   done
   [ "$merged" = 1 ] || { echo "NOT MERGED; check #$N by hand"; exit 6; }
   gh pr view "$N" --repo "$REPO" --json state,mergeCommit --jq '"#'"$N"' \(.state) \(.mergeCommit.oid)"'
+  [ -z "$ACT" ] || exit 0
   [ "$ARCH" = - ] && { echo "--- no plan to archive: the orchestrator tears $LANE down"; exit 0; }
   echo "--- teardown $LANE once the archived plan is on $TRUNK"
   on_trunk=0; for t in 1 2 3 4 5 6; do git -C "$ROOT" fetch -q origin "$TRUNK"; git -C "$ROOT" cat-file -e "FETCH_HEAD:$ARCHIVE/$ARCH/plan.md" 2>/dev/null && { on_trunk=1; break; }; sleep $((WS/4)); done
@@ -1000,11 +1152,103 @@ arm-merge)
   # the watcher reads reports/<name> and waits silently for its LEAD_DONE, so a report it cannot find would idle for hours
   [ -f "$H/reports/$4" ] || { echo "refused: no report $H/reports/$4; pass its file name under reports/"; exit 4; }
   args=("$1" "$2" "$3" "$4"); [ -n "${5:-}" ] && args+=("$5")
-  watcher_alive "$H/watch/merge-$N.pid" && { echo "refused: merge-$N is already armed (pid $(cut -d' ' -f1 "$H/watch/merge-$N.pid"))"; exit 1; }
-  # every value is an argument, never part of the script bash -c reads
-  ( cd "$ROOT" && exec env ORCHY_ROOT="$ROOT" ORCHY_HOME="$H" setsid nohup bash -c 'sleep "$1"; shift; exec bash "$@"' _ "$delay" "$(realpath "$0")" watch-merge "${args[@]}" ) > "$H/watch/merge-$N.out" 2>&1 &
-  p=$!; echo "$p $(pstart "$p")" > "$H/watch/merge-$N.pid"; sleep 1   # the watcher overwrites this with its own identity once it runs
+  arm_watch "$delay" "${args[@]}" || exit 1
   echo "armed merge-$N pid $(cut -d' ' -f1 "$H/watch/merge-$N.pid") (delay ${delay}s) -> $H/watch/merge-$N.out";;
+act)
+  need gh; need timeout; how=""; who=""; aw=()
+  use() { echo "usage: act <merge|approve|dispatch|tag> <field>... (--lane <slug> | --ok <askN> | --grant | --check)" >&2; exit 1; }
+  while [ $# -gt 0 ]; do case "$1" in
+    --lane|--ok) [ -z "$how" ] && [ $# -ge 2 ] || use; how=${1#--}; who=$2; shift 2;;
+    --grant|--check) [ -z "$how" ] || use; how=${1#--}; shift;;
+    *) aw+=("$1"); shift;; esac; done
+  [ -n "$how" ] || use
+  X=$(act_norm "${aw[@]}") || exit 1; read -ra af <<<"$X"; kind=${af[0]}; ask=""; auth=""; lbl=""; lane=-
+  no() { echo "refused: $*" >&2; exit 1; }
+  case $how in
+    lane) name_ok "$who" || no "the lane must be a slug"; lane=$who; ask=$(lane_go "$who") || exit 1; auth=go; lbl=go
+      authorized go "$ask" "$X" "$who" || no "the go on $ask has run $X once; a retry needs a per-act OK";;
+    ok) [[ "$who" =~ ^ask[0-9]+$ ]] || use; ask=$who; auth=ok; lbl=OK; authorized ok "$ask" "$X" || no "no live OK on $ask for $X";;
+    grant) [ "$kind" = merge ] || no "the one standing grant covers Dependabot merges"
+      ask=$(grant_ask "$(act_scope "$X")") || exit 1; auth=grant; lbl=grant
+      authorized grant "$ask" "$X" || no "$X was spent once, and a grant never covers it again";;
+  esac
+  call() { # call <api-path> <json-body>: the claim, then one POST; a timeout is AMBIGUOUS and never retried
+    claim "$auth" "$ask" "$X" "$lane" || exit 1
+    local ef rc; ef=$(mktemp "$H/scratch/act.XXXXXX"); CALL_OUT=$(timeout 120 gh api "$1" -X POST --input - <<<"$2" 2>"$ef"); rc=$?
+    [ "$rc" != 124 ] || { rm -f "$ef"; echo "AMBIGUOUS: $X may have happened; it is spent; check by hand, never retry"; exit 6; }
+    [ "$rc" = 0 ] || { echo "refused: GitHub refused $X ($(tail -n 1 "$ef" | cut -c1-160)); it is spent" >&2; rm -f "$ef"; exit 1; }
+    rm -f "$ef"; }
+  case $kind in
+  merge)
+    N=${af[1]}; sha=${af[2]}; base=${af[3]}; m=${af[4]}
+    rj=$(base_req "$base" "$m") || no "$rj"
+    pj=$(gh pr view "$N" --repo "$REPO" --json state,isDraft,baseRefName,headRefOid,headRefName,isCrossRepository,author) || no "cannot read #$N"
+    IFS=$'\t' read -r st dr pb ph hr fk bt al <<<"$(jq -r '[.state, .isDraft, .baseRefName, .headRefOid, .headRefName, .isCrossRepository, .author.is_bot, .author.login] | @tsv' <<<"$pj")"
+    [ "$st" = OPEN ] && [ "$dr" = false ] || no "#$N is $st$([ "$dr" = true ] && echo ", a draft")"
+    [ "$pb" = "$base" ] || no "#$N targets $pb, not $base"
+    [ "$ph" = "$sha" ] || no "#$N's head is $ph, not $sha"
+    if [ "$fk" = true ]; then [ "$base" = "$TRUNK" ] || no "#$N comes from a fork, and a fork never merges into $base"
+      [ "$how" = ok ] || [ "$how" = check ] || no "#$N comes from a fork; it merges only on a per-act OK"; fi
+    case $how in
+    lane) rel=$(cfg '.release.branch.name // empty'); th=$(cfg '.release.tool.head // empty'); tb=$(cfg '.release.tool.bot // empty'); sh=$(cfg '.release.sync.head // empty')
+      # the four shapes a go merges; any other PR is one no lead opened, which needs a per-act OK
+      if [ "$hr" = "$TRUNK" ] && [ -n "$rel" ] && [ "$base" = "$rel" ]; then :
+      elif [ -n "$th" ] && [ -n "$tb" ] && [ "$hr" = "$th" ] && [ "$al" = "$tb" ]; then :
+      elif [ -n "$sh" ] && [ "$base" = "$TRUNK" ] && [ "$hr" = "$sh" ]; then :
+      elif [ "$bt" = false ] && { [ "$hr" = "worktree-$who" ] || [[ "$hr" == "$who"-* ]]; }; then :
+      else no "#$N is none of the shapes a go merges (the promote, the release tool's PR, the lane's own PR, the back-sync); it needs a per-act OK"; fi;;
+    grant) [ "$base" = "$TRUNK" ] && grant_pr_ok "$N" || no "#$N is not Dependabot's own PR into $TRUNK with every commit Dependabot's";;
+    esac
+    [ "$how" != check ] || { echo "checked: $X"; exit 0; }
+    arm_watch 0 "$N" "$sha" --act "$base" "$m" "$auth" "$ask" "$lane" || exit 1
+    echo "armed merge-$N ($lbl $ask)";;
+  approve)
+    run=${af[1]}; att=${af[2]}; env=${af[3]}
+    rj=$(gh api "repos/$REPO/actions/runs/$run") || no "cannot read run $run"
+    IFS=$'\t' read -r rst ratt rev rhead rbr rwf <<<"$(jq -r '[.status, .run_attempt, .event, .head_sha, .head_branch, .path] | @tsv' <<<"$rj")"
+    [ "$rst" = waiting ] || no "run $run is $rst, not waiting"
+    [ "$ratt" = "$att" ] || no "run $run is at attempt $ratt, not $att"
+    case $rev in push|workflow_dispatch|release|schedule) ;; *) no "run $run came from $rev, which carries other code's context";; esac
+    pd=$(gh api "repos/$REPO/actions/runs/$run/pending_deployments") || no "cannot read run $run's pending deployments"
+    eid=$(jq -r --arg e "$env" '[.[] | select(.environment.name == $e and .current_user_can_approve == true) | .environment.id] | first // empty' <<<"$pd")
+    [[ "$eid" =~ ^[1-9][0-9]*$ ]] || no "$env is not waiting on this login's approval in run $run"
+    reach "$rhead" || no "run $run's head ${rhead:0:8} is on neither the trunk nor a merge.branches base"
+    if [ "$how" = lane ]; then # a go approves only a run of a commit this release produced: a PR it merged, or a dispatch it made
+      p=no; while read -r -a u; do case ${u[0]:-} in
+        merge) [ "$(gh pr view "${u[1]}" --repo "$REPO" --json mergeCommit --jq '.mergeCommit.oid // empty' 2>/dev/null)" = "$rhead" ] && p=yes;;
+        dispatch) [ "${u[3]}" = "$rhead" ] && p=yes;; esac
+      done < <(ledger_rows | jq -r --arg id "$ask" '.[] | select(.id == $id) | .note // empty | select(test("^used: (merge|dispatch) ")) | ltrimstr("used: ")')
+      [ "$p" = yes ] || no "run $run's head ${rhead:0:8} is no commit this release produced; it needs a per-act OK"; fi
+    [ "$how" != check ] || { echo "checked: $X ($rwf, $rev on $rbr)"; exit 0; }
+    call "repos/$REPO/actions/runs/$run/pending_deployments" "$(jq -nc --argjson id "$eid" '{environment_ids: [$id], state: "approved", comment: "Approved on the repository owner'"'"'s word."}')"
+    echo "approved run $run attempt $att for $env: $rwf, $rev on $rbr ($lbl $ask)";;
+  dispatch)
+    wf=${af[1]}; r=${af[2]}; sha=${af[3]}
+    if [ "$r" != "$TRUNK" ] && ! jq -e --arg r "$r" '(.merge.branches // {}) | has($r)' "$CFG" >/dev/null; then
+      case $(tag_state "$r") in yes) ;; no) no "$r is neither the trunk, a merge.branches base nor a tag";; *) no "cannot read tag $r";; esac; fi
+    h=$(gh api "repos/$REPO/commits/$r" --jq .sha 2>/dev/null) || no "cannot read $r's head"
+    [ "$h" = "$sha" ] || no "$r's head is ${h:0:8}, not ${sha:0:8}"
+    [ "$how" != lane ] || jq -e --arg p "$wf" '(.release.workflows // []) | any(.[]; .path == $p
+        and (((.environments // []) | length > 0) or any((.signals // [])[]; IN("id-token", "npm publish", "gh release"))))' "$CFG" >/dev/null \
+      || no "the profile does not mark $wf as publishing; it needs a per-act OK"
+    [ "$how" != check ] || { echo "checked: $X"; exit 0; }
+    call "repos/$REPO/actions/workflows/$(basename "$wf")/dispatches" \
+      "$(jq -nc --arg r "$r" '{ref: $r, inputs: ($ARGS.positional | map(split("=") | {(.[0]): .[1]}) | add // {}), return_run_details: true}' --args "${af[@]:4}")"
+    rid=$(jq -r '.workflow_run_id // empty' <<<"$CALL_OUT" 2>/dev/null); [[ "$rid" =~ ^[0-9]+$ ]] || rid=unknown
+    echo "dispatched $wf at $r (${sha:0:8}): run $rid ($lbl $ask)";;
+  tag)
+    t=${af[1]}; sha=${af[2]}
+    tags=$(jq -c '.release.tags // null' "$CFG"); [ "$tags" != null ] || no "release.tags is unknown, so creating $t is the owner's step"
+    while IFS= read -r pat; do
+      # shellcheck disable=SC2053  # a ruleset pattern is a glob
+      [ -n "$pat" ] && [[ "$t" == $pat ]] && no "$t matches $pat, whose tags only the release tool creates; the step is the owner's"
+    done < <(jq -r '.[] | select(.creation == "restricted") | .pattern' <<<"$tags")
+    case $(tag_state "$t") in no) ;; yes) no "tag $t exists";; *) no "cannot read tag $t";; esac
+    reach "$sha" || no "${sha:0:8} is on neither the trunk nor a merge.branches base"
+    [ "$how" != check ] || { echo "checked: $X"; exit 0; }
+    call "repos/$REPO/git/refs" "$(jq -nc --arg r "refs/tags/$t" --arg s "$sha" '{ref: $r, sha: $s}')"
+    echo "tagged $t at ${sha:0:8} ($lbl $ask)";;
+  esac;;
 disarm)
   # through a symlinked watch dir, a pid file and a log would be another home's
   [ -L "$H/watch" ] && { echo "refused: $H/watch must not be a symlink" >&2; exit 1; }
