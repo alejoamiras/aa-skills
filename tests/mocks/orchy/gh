@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gh mock for smoke-orchy: fixtures in $MOCK_DIR (pr-<n>.json, issue-<n>.json, checks[-<sha>].json, status[-<sha>].json, trunk.json, compare.json, open.json, issues.json, merged.json, diff-<n>.txt, files-<n>.txt); every call logged to $MOCK_DIR/gh.log
+# gh mock for smoke-orchy: fixtures in $MOCK_DIR (pr-<n>.json, issue-<n>.json, checks[-<sha>].json, status[-<sha>].json, trunk.json, compare.json (a sha...sha compare), compare-<branch>.json (a sha...branch one), open.json, issues.json, merged.json, diff-<n>.txt, files-<n>.txt); every call logged to $MOCK_DIR/gh.log
 set -u; echo "$*" >> "$MOCK_DIR/gh.log"
 jqexpr=""; args=("$@"); for ((i=0;i<${#args[@]};i++)); do [ "${args[i]}" = --jq ] && jqexpr=${args[i+1]}; done
 case "$1 $2" in
@@ -21,7 +21,8 @@ case "$1 $2" in
   case "$2" in
   *check-runs) f="$MOCK_DIR/checks-$s.json"; [ -f "$f" ] || f="$MOCK_DIR/checks.json"; jq -r "$jqexpr" "$f";;
   *status) f="$MOCK_DIR/status-$s.json"; [ -f "$f" ] || f="$MOCK_DIR/status.json"; jq -r "$jqexpr" "$f";;
-  */compare/*) [ -f "$MOCK_DIR/compare.json" ] || exit 1; jq -r "$jqexpr" "$MOCK_DIR/compare.json";;
+  */compare/*) r=${2##*...}; f="$MOCK_DIR/compare.json"; [[ "$r" =~ ^[0-9a-f]{40}$ ]] || f="$MOCK_DIR/compare-$r.json"
+    [ -f "$f" ] || exit 1; jq -r "$jqexpr" "$f";;
   */commits/*) [ -f "$MOCK_DIR/trunk.json" ] || exit 1; jq -r "$jqexpr" "$MOCK_DIR/trunk.json";;
   *) exit 1;; esac;;
 *) echo "MOCK gh: unhandled $*" >&2; exit 1;;

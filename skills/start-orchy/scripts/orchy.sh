@@ -36,9 +36,11 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   snapshot                     the tick's facts: reports, leads, watchers, PRs, worktrees, load, headroom
 #   state [--json]               a poller's view as orchy.state/1 JSON: local facts only, no gh, usage or network call, nothing written
 #   wait [seconds]               block until a report, lead or watcher changes, or (every wait.poll_sec, default 120) open PRs, open issues or the trunk head (default 1500)
-#   scan <pr>                    gate-weakening and leak scan of a PR's diff, title, body and commit messages (plus the local ban)
-#   watch-merge <pr> <full-sha> <lane> <report> [archive-name]   merge on the standing policy, then tear the lane down
-#   arm-merge  <pr> <full-sha> <lane> <report-name> [archive-name] [delay-s]   watch-merge detached (nohup, .out + .pid)
+#   scan <pr> [<full-sha>]       gate-weakening and leak scan of a PR's diff, title, body and commit messages (plus the local ban);
+#                                with a sha, SCAN FAILED unless the PR's head is that sha before and after the read
+#   watch-merge <pr> <full-sha> <lane> <report> [archive-name|-]   merge a lane PR on the standing policy, then tear the lane
+#                                down (archive -: no plan to wait for and no teardown)
+#   arm-merge  <pr> <full-sha> <lane> <report-name> [archive-name|-] [delay-s]   watch-merge detached (nohup, .out + .pid)
 #   disarm [<pr>]                stop one merge watcher, or every one
 #   receipt [--json] [--offline] [<lane>]   per lane: API-equivalent dollars, tokens, wall-clock, PRs merged, issues closed, failed arcs,
 #                                Codex rounds; --json prints orchy.receipt/1 with per-run costs, --offline skips the gh joins
@@ -101,11 +103,13 @@ watcher_alive() { local f=$1; [ -f "$f" ] || return 1; read -r p s < "$f"; [ -n 
 # A watcher log's newest marker line, not its last line (a runs table or status lines often follow), as the
 # state reports it: a merge reads MERGED, an unreadable post-merge state AMBIGUOUS, a closed PR or a disarm nothing.
 watch_marker() {
-  # terminal lines match whole lines only: a check name echoed into a MISSING line must not end the hand-back
-  local mk; mk=$(grep -oE '^#[0-9]+ MERGED|^#[0-9]+ is (MERGED|CLOSED); watcher stopped$|^[0-9]{2}:[0-9]{2}Z DISARMED$|HEAD MOVED|DIRTY|TRUNK RED|TRUNK UNREADABLE|REQUIRED FAILED|MISSING REQUIRED CHECK|NOT MERGED|TIMEOUT|REFUSED|state unreadable after the merge call' "$1" 2>/dev/null | tail -n 1)
+  # a marker counts only at a line's start, after the watcher's own `HH:MMZ ` or `#N ` stamp: check names and gh output are
+  # untrusted and the runs table is indented, so neither can end a hand-back or forge a merge
+  local mk; mk=$(grep -oE '^#[0-9]+ (MERGED|is (MERGED|CLOSED); watcher stopped$)|^[0-9]{2}:[0-9]{2}Z DISARMED$|^(([0-9]{2}:[0-9]{2}Z|#[0-9]+) )?(HEAD MOVED|DIRTY|TRUNK RED|TRUNK UNREADABLE|REQUIRED FAILED|MISSING REQUIRED CHECK|NOT MERGED|TIMEOUT|REFUSED|state unreadable after the merge call)' "$1" 2>/dev/null | tail -n 1)
+  [[ "$mk" =~ ^([0-9]{2}:[0-9]{2}Z|#[0-9]+)\ (.*)$ ]] && mk=${BASH_REMATCH[2]}
   case $mk in
-    "#"*" MERGED" | "#"*" is MERGED; watcher stopped") echo MERGED;;
-    "#"*" is CLOSED; watcher stopped" | *" DISARMED" | "") ;;
+    MERGED | "is MERGED; watcher stopped") echo MERGED;;
+    "is CLOSED; watcher stopped" | DISARMED | "") ;;
     "state unreadable"*) echo AMBIGUOUS;;
     *) echo "$mk";;
   esac
@@ -208,6 +212,14 @@ drop_main_ban() { # an earlier bootstrap banned the slot label main with the ros
   else rm -f "${t:-}"; echo "warning: could not drop main from prompt_ban" >&2; fi
 }
 sha_ok() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
+name_ok() { [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; }   # a slug or a file name: no path, nothing dot- or dash-led
+merge_arg_err() { # <pr> <pin> <lane> <report> <archive|->: why a watcher must not take these, or nothing; each lands in a path or gh's argv
+  [[ "$1" =~ ^[1-9][0-9]*$ ]] || { echo "the PR must be a number"; return; }
+  sha_ok "$2" || { echo "pin must be the full 40-hex head sha"; return; }
+  name_ok "$3" || { echo "the lane must be a slug"; return; }
+  name_ok "$4" || { echo "the report must be a file name under reports/"; return; }
+  [ "$5" = - ] || name_ok "$5" || echo "the archive must be a plan name, or - for none"
+}
 checks() { # name<TAB>status<TAB>conclusion: the newest check-run per name, then a commit status only for a name no check-run carries; exit 1 on an API failure
   local cr st
   cr=$(gh api "repos/$REPO/commits/$1/check-runs" --paginate --jq '.check_runs[] | {id, name, status, conclusion}' 2>/dev/null) || return 1
@@ -853,10 +865,16 @@ wait)
     if [ $(( $(date +%s) - t0 )) -ge "$LIMIT" ]; then u="${!unread[*]}"; echo "TIMEOUT after ${LIMIT}s, no change${u:+; unreadable: $u}"; exit 0; fi
   done;;
 scan)
-  need gh; n=$1
+  need gh; n=${1:-}; pin=${2:-}
+  [[ "$n" =~ ^[1-9][0-9]*$ ]] && { [ -z "$pin" ] || sha_ok "$pin"; } || { echo "usage: scan <pr> [<full-sha>]" >&2; exit 2; }
+  # gh reads the diff at whatever head the PR has then, so a pinned scan checks the head on both sides of the reads
+  pinned() { [ -z "$pin" ] && return; local h; h=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid) || { echo "SCAN FAILED: gh pr view #$n"; exit 2; }
+    [ "$h" = "$pin" ] || { echo "SCAN FAILED: head moved"; exit 2; }; }
+  pinned
   d=$(gh pr diff "$n" --repo "$REPO") || { echo "SCAN FAILED: gh pr diff #$n"; exit 2; }
   files=$(gh pr diff "$n" --repo "$REPO" --name-only) || { echo "SCAN FAILED: gh pr diff --name-only #$n"; exit 2; }
   meta=$(gh pr view "$n" --repo "$REPO" --json title,body,commits --jq '.title, .body, (.commits[].messageHeadline), (.commits[].messageBody)') || { echo "SCAN FAILED: gh pr view #$n"; exit 2; }
+  pinned
   # the local ban (roster names, page ids) never sits in the committed config, so it joins the leak pattern here
   leakre=$(cfg '.scan.leak'); ban=$(lcl '.prompt_ban // empty'); [ -n "$ban" ] && leakre="($leakre)|($ban)"
   rr=$(roster_re) || { echo "SCAN FAILED: the roster cannot be read"; exit 2; }; [ -z "$rr" ] || leakre="($leakre)|$rr"
@@ -869,10 +887,12 @@ scan)
   [ -n "$leak" ] && echo "$leak" | cut -c1-200 | sed 's/^/  LEAK: /'
   exit 0;;
 watch-merge)
-  need gh; N=$1; PIN=$2; LANE=$3; REPORT=$4; ARCH=${5:-$3}
-  sha_ok "$PIN" || { echo "REFUSED: pin must be the full 40-hex head sha"; exit 4; }
+  need gh; N=${1:-}; PIN=${2:-}; LANE=${3:-}; REPORT=${4:-}; ARCH=${5:-${3:-}}
+  e=$(merge_arg_err "$N" "$PIN" "$LANE" "$REPORT" "$ARCH"); [ -z "$e" ] || { echo "REFUSED: $e"; exit 4; }
   mapfile -t REQ < <(cfg '.merge.required_checks[]'); [ "${#REQ[@]}" -gt 0 ] || { echo "REFUSED: merge.required_checks is empty"; exit 4; }
-  method=$(cfg '.merge.method // "squash"'); rounds=$(cfg '.merge.watch_rounds // 300'); WS=${ORCHY_WATCH_SLEEP:-60}
+  # spliced into `--$method`, so any other value could be --admin
+  method=$(cfg '.merge.method // "squash"'); case $method in squash|merge|rebase) ;; *) echo "REFUSED: merge.method must be squash, merge or rebase"; exit 4;; esac
+  rounds=$(cfg '.merge.watch_rounds // 300'); WS=${ORCHY_WATCH_SLEEP:-60}
   echo "$$ $(pstart $$)" > "$H/watch/merge-$N.pid"   # the watcher's own identity, whatever wrapper started it
   pr_state() { gh pr view "$N" --repo "$REPO" --json state,isDraft,baseRefName,headRefOid,mergeable,mergeStateStatus --jq '"\(.state) \(.isDraft) \(.baseRefName) \(.headRefOid) \(.mergeable) \(.mergeStateStatus)"' 2>/dev/null; }
   report_done() { # the LAST marker line of the report decides; it must be exactly LEAD_DONE, with a PR line for this PR and a full-sha HEAD line equal to the pin
@@ -898,6 +918,15 @@ watch-merge)
   read -r state draft base head _ <<<"$st"
   [ "$base" = "$TRUNK" ] || { echo "REFUSED: #$N targets $base, not $TRUNK"; exit 4; }
   [ "$state" = OPEN ] || { echo "REFUSED: #$N is $state"; exit 4; }
+  # lane PRs share the owner's login, so the branch, not the author, is the provenance; a fork or an app's PR is never a lane's
+  pv=$(gh pr view "$N" --repo "$REPO" --json isCrossRepository,author,headRefName --jq '[.isCrossRepository, .author.is_bot, .author.login, .headRefName] | @tsv' 2>/dev/null) \
+    || { echo "REFUSED: cannot read #$N"; exit 4; }
+  IFS=$'\t' read -r fork bot who ref <<<"$pv"
+  [ "$fork" = false ] || { echo "REFUSED: #$N comes from a fork"; exit 4; }
+  [ "$bot" = false ] || { echo "REFUSED: #$N was opened by $who, not a lead"; exit 4; }
+  [ "$ref" = "worktree-$LANE" ] || [[ "$ref" == "$LANE"-* ]] || { echo "REFUSED: #$N head $ref is not lane $LANE's branch"; exit 4; }
+  # the pin binds the head, not the base: the merge must land on this base or a descendant of it
+  B0=$(gh api "repos/$REPO/commits/$TRUNK" --jq .sha 2>/dev/null) && sha_ok "$B0" || { echo "REFUSED: cannot read $TRUNK's head"; exit 4; }
   m=""; ok=0; missing_rounds=0; api_fail=0
   for i in $(seq 1 "$rounds"); do
     st=$(pr_state) || { api_fail=$((api_fail+1)); [ "$api_fail" = 10 ] && echo "$(date -u +%H:%MZ) API FAILURE: gh pr view failed 10 rounds running"; sleep "$WS"; continue; }; read -r state draft base head _ <<<"$st"
@@ -914,7 +943,8 @@ watch-merge)
     if [ "$ok" = "${#REQ[@]}" ] && report_done && trunk_ok; then
       read -r state draft base head mergeable mstate <<<"$(pr_state)"; m="$mergeable $mstate"
       [ "$m" = "MERGEABLE CLEAN" ] && break
-      case "$m" in CONFLICTING*|*DIRTY) echo "$(date -u +%H:%MZ) DIRTY: $m"; exit 5;; esac
+      # BEHIND (a strict base) never clears while the head is pinned: the base has to be merged in, and the PR rescanned
+      case "$m" in CONFLICTING*|*DIRTY) echo "$(date -u +%H:%MZ) DIRTY: $m"; exit 5;; *BEHIND) echo "$(date -u +%H:%MZ) DIRTY: $m; bring the base in first"; exit 5;; esac
     fi
     sleep "$WS"
   done
@@ -925,6 +955,11 @@ watch-merge)
   merged=0; for try in 1 2 3; do
     [ "$(cfg '.mode // empty')" = triage ] && { echo "REFUSED: orchy.json mode is triage; not merged"; exit 4; }
     [ "$try" = 1 ] || trunk_ok || { echo "TRUNK RED at merge time; not merged"; exit 7; }
+    case $(gh api "repos/$REPO/compare/$B0...$TRUNK" --jq .status 2>/dev/null) in
+      ahead|identical) ;;
+      "") echo "REFUSED at merge time: cannot read $TRUNK's history"; exit 4;;
+      *) echo "HEAD MOVED: $TRUNK history was rewritten since arming"; exit 2;;
+    esac
     out=$(gh pr merge "$N" --repo "$REPO" "--$method" --delete-branch --match-head-commit "$PIN" 2>&1 | tail -1); echo "$out"
     for _ in 1 2 3; do sleep $((WS/10)); s=$(gh pr view "$N" --repo "$REPO" --json state --jq .state 2>/dev/null) && break; done
     [ -n "$s" ] || { echo "#$N state unreadable after the merge call; check it by hand"; exit 6; }
@@ -933,16 +968,20 @@ watch-merge)
   done
   [ "$merged" = 1 ] || { echo "NOT MERGED; check #$N by hand"; exit 6; }
   gh pr view "$N" --repo "$REPO" --json state,mergeCommit --jq '"#'"$N"' \(.state) \(.mergeCommit.oid)"'
+  [ "$ARCH" = - ] && { echo "--- no plan to archive: the orchestrator tears $LANE down"; exit 0; }
   echo "--- teardown $LANE once the archived plan is on $TRUNK"
   on_trunk=0; for t in 1 2 3 4 5 6; do git -C "$ROOT" fetch -q origin "$TRUNK"; git -C "$ROOT" cat-file -e "FETCH_HEAD:$ARCHIVE/$ARCH/plan.md" 2>/dev/null && { on_trunk=1; break; }; sleep $((WS/4)); done
   if [ $on_trunk = 1 ]; then "$0" teardown "$LANE" 2>&1 | tail -3; else echo "archived plan not on $TRUNK yet; teardown skipped"; fi;;
 arm-merge)
-  N=$1; sha_ok "$2" || { echo "refused: pin must be the full 40-hex head sha"; exit 4; }
+  N=${1:-}; delay=${6:-0}
+  e=$(merge_arg_err "$N" "${2:-}" "${3:-}" "${4:-}" "${5:-${3:-}}"); [ -z "$e" ] || { echo "refused: $e"; exit 4; }
+  [[ "$delay" =~ ^[0-9]{1,5}$ ]] || { echo "refused: the delay is whole seconds"; exit 4; }
   # the watcher reads reports/<name> and waits silently for its LEAD_DONE, so a report it cannot find would idle for hours
-  [ -f "$H/reports/${4:-}" ] || { echo "refused: no report $H/reports/${4:-}; pass its file name under reports/"; exit 4; }
-  delay=${6:-0}; args=("$1" "$2" "$3" "$4"); [ -n "${5:-}" ] && args+=("$5")
+  [ -f "$H/reports/$4" ] || { echo "refused: no report $H/reports/$4; pass its file name under reports/"; exit 4; }
+  args=("$1" "$2" "$3" "$4"); [ -n "${5:-}" ] && args+=("$5")
   watcher_alive "$H/watch/merge-$N.pid" && { echo "refused: merge-$N is already armed (pid $(cut -d' ' -f1 "$H/watch/merge-$N.pid"))"; exit 1; }
-  ( cd "$ROOT" && exec env ORCHY_ROOT="$ROOT" ORCHY_HOME="$H" setsid nohup bash -c "sleep $delay; exec bash '$(realpath "$0")' watch-merge $(printf '%q ' "${args[@]}")" ) > "$H/watch/merge-$N.out" 2>&1 &
+  # every value is an argument, never part of the script bash -c reads
+  ( cd "$ROOT" && exec env ORCHY_ROOT="$ROOT" ORCHY_HOME="$H" setsid nohup bash -c 'sleep "$1"; shift; exec bash "$@"' _ "$delay" "$(realpath "$0")" watch-merge "${args[@]}" ) > "$H/watch/merge-$N.out" 2>&1 &
   p=$!; echo "$p $(pstart "$p")" > "$H/watch/merge-$N.pid"; sleep 1   # the watcher overwrites this with its own identity once it runs
   echo "armed merge-$N pid $(cut -d' ' -f1 "$H/watch/merge-$N.pid") (delay ${delay}s) -> $H/watch/merge-$N.out";;
 disarm)

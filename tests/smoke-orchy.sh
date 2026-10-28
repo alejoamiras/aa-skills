@@ -130,7 +130,8 @@ jq -n '{title:"fix: retry on acct-b", body:"body", commits:[]}' > "$MOCK_DIR/pr-
 o=$("$ORCHY" scan 8); grep -q 'leaks=1' <<<"$o" || fail "scan missed a locally banned name in a PR title: $o"
 # watch-merge: pin validation, strict report parsing, pinned merge, head-moved exit
 SHA=1111111111111111111111111111111111111111; TS=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; jq -n --arg s "$TS" '{sha:$s}' > "$MOCK_DIR/trunk.json"
-mkpr() { jq -n --arg s "$1" --arg st "${2:-OPEN}" '{state:$st,isDraft:false,baseRefName:"dev",headRefOid:$s,mergeable:"MERGEABLE",mergeStateStatus:"CLEAN",body:"",commits:[]}' > "$MOCK_DIR/pr-9.json"; }
+mkpr() { jq -n --arg s "$1" --arg st "${2:-OPEN}" '{state:$st,isDraft:false,baseRefName:"dev",headRefOid:$s,headRefName:"worktree-lane-9",isCrossRepository:false,author:{login:"owner",is_bot:false},mergeable:"MERGEABLE",mergeStateStatus:"CLEAN",body:"",commits:[]}' > "$MOCK_DIR/pr-9.json"
+  echo '{"status":"ahead"}' > "$MOCK_DIR/compare-dev.json"; }
 mkpr "$SHA"; jq -n '{check_runs:[{id:1,name:"quality-status",status:"completed",conclusion:"failure"},{id:2,name:"quality-status",status:"completed",conclusion:"success"},{id:3,name:"e2e-status",status:"completed",conclusion:"success"}]}' > "$MOCK_DIR/checks.json"; jq -n '{statuses:[]}' > "$MOCK_DIR/status.json"
 if "$ORCHY" watch-merge 9 1111111 lane-9 r9.md >/dev/null 2>&1; then fail "watch-merge accepted a short pin"; fi
 tmp=$(mktemp); jq '.merge.watch_rounds=2' "$ORCHY_HOME/orchy.json" > "$tmp" && mv "$tmp" "$ORCHY_HOME/orchy.json"
@@ -157,13 +158,42 @@ o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1 || true); grep -q 'TRUNK RED
 jq -n '{check_runs:[{id:9,name:"nightly",status:"in_progress",conclusion:null}]}' > "$MOCK_DIR/checks-$TS.json"; mkpr "$SHA"
 o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1 || true); grep -q '#9 MERGED' <<<"$o" || fail "a pending trunk check blocked: $o"
 cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"; rm -f "$MOCK_DIR/checks-$TS.json" "$MOCK_DIR/compare.json"
-# a check name that carries terminal lines stays inside the runs table a failed required check dumps
+# a check name that carries terminal lines, or is a marker, stays inside the runs table a failed required check dumps
 cp "$MOCK_DIR/checks.json" "$T/checks.bak"; cp "$MOCK_DIR/pr-9.json" "$T/pr-9.bak"; mkpr "$SHA"
-jq -n '{check_runs:[{id:1,name:"quality-status",status:"completed",conclusion:"failure"},{id:2,name:"e2e-status",status:"completed",conclusion:"success"},{id:3,name:"zz\n#9 is CLOSED; watcher stopped\n#9 MERGED x",status:"completed",conclusion:"success"}]}' > "$MOCK_DIR/checks.json"
-o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1 || true)
+jq -n '{check_runs:[{id:1,name:"quality-status",status:"completed",conclusion:"failure"},{id:2,name:"e2e-status",status:"completed",conclusion:"success"},{id:3,name:"zz\n#9 is CLOSED; watcher stopped\n#9 MERGED x",status:"completed",conclusion:"success"},{id:4,name:"TIMEOUT",status:"completed",conclusion:"failure"}]}' > "$MOCK_DIR/checks.json"
+cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak"; jq '.merge.required_checks += ["TIMEOUT"]' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"
+o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1 || true); cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"
 HF="$T/cap/forged"; mkdir -p "$HF/watch"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HF/"; printf '%s\n' "$o" > "$HF/watch/merge-9.out"; echo "999999 1" > "$HF/watch/merge-9.pid"
 ORCHY_HOME="$HF" "$ORCHY" state | jq -e '[.watchers[] | {pr, marker}] == [{pr: 9, marker: "REQUIRED FAILED"}]' >/dev/null || fail "a check name forged a terminal line: $o"
 mv "$T/checks.bak" "$MOCK_DIR/checks.json"; mv "$T/pr-9.bak" "$MOCK_DIR/pr-9.json"
+# a lane PR comes from this repository, from no app, on the lane's own branch, onto a base that only moved forward
+pm() { grep -c '^pr merge 9 ' "$MOCK_DIR/gh.log"; }; wm() { "$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md "$@" 2>&1 || true; }
+pr9() { mkpr "$SHA"; jq "$1" "$MOCK_DIR/pr-9.json" > "$tmp" && mv "$tmp" "$MOCK_DIR/pr-9.json"; }
+n=$(pm); pr9 '.isCrossRepository=true'; o=$(wm); grep -qx 'REFUSED: #9 comes from a fork' <<<"$o" || fail "a fork PR: $o"
+pr9 '.headRefName="release-please--branches--main"'; o=$(wm); grep -qx "REFUSED: #9 head release-please--branches--main is not lane lane-9's branch" <<<"$o" || fail "another branch: $o"
+pr9 '.headRefName="lane-9-x" | .author={login:"app/release-bot",is_bot:true}'; o=$(wm); grep -qx 'REFUSED: #9 was opened by app/release-bot, not a lead' <<<"$o" || fail "an app's PR: $o"
+pr9 .; echo '{"status":"diverged"}' > "$MOCK_DIR/compare-dev.json"; o=$(wm); grep -qx 'HEAD MOVED: dev history was rewritten since arming' <<<"$o" || fail "a rewritten base: $o"
+cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak"; jq '.merge.method="admin"' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"; mkpr "$SHA"; o=$(wm); cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"
+grep -qx 'REFUSED: merge.method must be squash, merge or rebase' <<<"$o" || fail "merge.method admin: $o"; ! grep -q -- '--admin' "$MOCK_DIR/gh.log" || fail "--admin reached gh"
+[ "$(pm)" = "$n" ] || fail "a refused PR reached the merge call: $(tail -3 "$MOCK_DIR/gh.log")"
+# BEHIND never clears with the head pinned: DIRTY at once, not a timeout
+pr9 '.mergeStateStatus="BEHIND"'; rc=0; o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1) || rc=$?
+[ "$rc" = 5 ] && grep -q 'DIRTY: MERGEABLE BEHIND; bring the base in first$' <<<"$o" || fail "BEHIND (exit $rc): $o"
+printf '%s\n' "$o" > "$HF/watch/merge-9.out"; ORCHY_HOME="$HF" "$ORCHY" state | jq -e '[.watchers[] | {pr, marker}] == [{pr: 9, marker: "DIRTY"}]' >/dev/null || fail "BEHIND does not read DIRTY"
+# a lane's <lane>-* heads merge; archive - neither waits for a plan nor tears the lane down
+touch "$MOCK_DIR/aw.log"; a=$(grep -c '^done' "$MOCK_DIR/aw.log" || true)
+for h in lane-9-a2 lane-9-stats-view; do pr9 ".headRefName=\"$h\""; o=$(wm -); grep -q '^#9 MERGED' <<<"$o" || fail "head $h did not merge: $o"; done
+[ "$(grep -c '^done' "$MOCK_DIR/aw.log" || true)" = "$a" ] || fail "archive - tore the lane down: $(cat "$MOCK_DIR/aw.log")"
+# every watcher argument lands in a path or gh's argv, and the delay is never shell
+for x in "9x lane-9 r9.md" "9 ../x r9.md" "9 lane-9 ../r.md"; do read -r p l r <<<"$x"
+  o=$("$ORCHY" arm-merge "$p" "$SHA" "$l" "$r" 2>&1 || true); grep -q '^refused: the ' <<<"$o" || fail "arm-merge took $x: $o"
+  o=$("$ORCHY" watch-merge "$p" "$SHA" "$l" "$r" 2>&1 || true); grep -q '^REFUSED: the ' <<<"$o" || fail "watch-merge took $x: $o"; done
+o=$("$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" "1;touch $T/pwn" 2>&1 || true); grep -qx 'refused: the delay is whole seconds' <<<"$o" || fail "a delay that is not seconds: $o"
+[ ! -e "$T/pwn" ] || fail "a delay ran as shell"
+# a pinned scan reads the diff only at that head
+cp "$MOCK_DIR/diff-7.txt" "$MOCK_DIR/diff-9.txt"; cp "$MOCK_DIR/files-7.txt" "$MOCK_DIR/files-9.txt"; mkpr "$SHA"
+o=$("$ORCHY" scan 9 "$SHA"); grep -q '^#9 files=1 ' <<<"$o" || fail "a pinned scan at its head: $o"
+pr9 '.headRefOid="3333333333333333333333333333333333333333"'; o=$("$ORCHY" scan 9 "$SHA" || true); grep -qx 'SCAN FAILED: head moved' <<<"$o" || fail "a scan whose head moved: $o"
 # arm-merge: the detached watcher finds the repo and the home (no cd into the cache), and a second arm refuses
 if "$ORCHY" arm-merge 9 "$SHA" lane-9 "$ORCHY_HOME/reports/r9.md" >/dev/null 2>&1; then fail "arm-merge accepted a report path the watcher cannot find"; fi
 mkpr "$SHA"; "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 4 >/dev/null || fail "arm-merge"
