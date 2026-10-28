@@ -9,4 +9,6 @@ Two standing biases worth knowing before you scaffold:
 
 Includes the supply-chain hardening defaults (7-day npm minimum release age via `bunfig.toml`, frozen lockfiles in CI, OIDC + npm trusted publisher with provenance instead of static tokens), per-package CI workflow conventions with path filtering, and parallel-safe E2E patterns (ephemeral ports, worktree-scoped cleanup).
 
+It also names the two branch and release shapes (one branch that ships, or a trunk promoted into a release branch) with their rulesets, and ships [`templates/release-skill.md`](templates/release-skill.md), a repository's release skill whose `## Release profile` block start-orchy reads.
+
 Templates and the full scaffolding sequence live in [`SKILL.md`](SKILL.md).

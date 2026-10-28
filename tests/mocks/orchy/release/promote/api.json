@@ -1,0 +1,78 @@
+{
+  "repos/example/app": {
+    "full_name": "example/app", "private": false, "default_branch": "dev",
+    "allow_merge_commit": true, "allow_squash_merge": true, "allow_rebase_merge": false
+  },
+  "repos/example/app/branches?protected=true&per_page=100": [
+    {"name": "dev", "commit": {"sha": "1111111111111111111111111111111111111111"}, "protected": true},
+    {"name": "main", "commit": {"sha": "2222222222222222222222222222222222222222"}, "protected": true}
+  ],
+  "repos/example/app/branches/dev": {"name": "dev", "commit": {"sha": "1111111111111111111111111111111111111111"}, "protected": true},
+  "repos/example/app/branches/main": {"name": "main", "commit": {"sha": "2222222222222222222222222222222222222222"}, "protected": true},
+  "repos/example/app/rules/branches/dev?per_page=100": [],
+  "repos/example/app/branches/dev/protection": {
+    "required_status_checks": {
+      "strict": false,
+      "contexts": ["quality", "unit", "e2e", "lint", "audit"],
+      "checks": [
+        {"context": "quality", "app_id": 15368}, {"context": "unit", "app_id": 15368}, {"context": "e2e", "app_id": 15368},
+        {"context": "lint", "app_id": 15368}, {"context": "audit", "app_id": 15368}
+      ]
+    },
+    "required_signatures": {"enabled": true},
+    "enforce_admins": {"enabled": false},
+    "required_linear_history": {"enabled": true},
+    "allow_force_pushes": {"enabled": false},
+    "allow_deletions": {"enabled": false}
+  },
+  "repos/example/app/rules/branches/main?per_page=100": [
+    {"type": "deletion", "ruleset_source_type": "Repository", "ruleset_source": "example/app", "ruleset_id": 3},
+    {"type": "non_fast_forward", "ruleset_source_type": "Repository", "ruleset_source": "example/app", "ruleset_id": 3},
+    {"type": "pull_request", "ruleset_source_type": "Repository", "ruleset_source": "example/app", "ruleset_id": 3,
+     "parameters": {"allowed_merge_methods": ["merge"], "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false,
+                    "require_code_owner_review": false, "require_last_push_approval": false, "required_review_thread_resolution": false}},
+    {"type": "required_status_checks", "ruleset_source_type": "Repository", "ruleset_source": "example/app", "ruleset_id": 3,
+     "parameters": {"strict_required_status_checks_policy": true, "do_not_enforce_on_create": false,
+                    "required_status_checks": [{"context": "release-gate", "integration_id": 15368}]}}
+  ],
+  "repos/example/app/branches/main/protection": {"$http": 404, "message": "Branch not protected", "status": "404"},
+  "repos/example/app/commits/1111111111111111111111111111111111111111/check-runs?per_page=100": {"total_count": 2, "check_runs": [
+    {"id": 11, "name": "quality", "status": "completed", "conclusion": "success", "app": {"slug": "github-actions"}},
+    {"id": 12, "name": "e2e", "status": "completed", "conclusion": "success", "app": {"slug": "github-actions"}}
+  ]},
+  "repos/example/app/commits/2222222222222222222222222222222222222222/check-runs?per_page=100": {"total_count": 2, "check_runs": [
+    {"id": 21, "name": "release-gate", "status": "completed", "conclusion": "success", "app": {"slug": "github-actions"}},
+    {"id": 22, "name": "Edge build: app", "status": "completed", "conclusion": "success", "app": {"slug": "edge-deploy"}}
+  ]},
+  "repos/example/app/rulesets?targets=tag&per_page=100": [
+    {"id": 7, "name": "release tags", "target": "tag", "source_type": "Repository", "source": "example/app", "enforcement": "active"}
+  ],
+  "repos/example/app/rulesets/7": {
+    "id": 7, "name": "release tags", "target": "tag", "enforcement": "active",
+    "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
+    "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}]
+  },
+  "repos/example/app/environments?per_page=100": {"total_count": 5, "environments": [
+    {"name": "preview", "protection_rules": []},
+    {"name": "production", "protection_rules": [{"type": "required_reviewers", "prevent_self_review": false,
+      "reviewers": [{"type": "User", "reviewer": {"login": "owner"}}]}]},
+    {"name": "registry", "protection_rules": [{"type": "required_reviewers", "prevent_self_review": false,
+      "reviewers": [{"type": "User", "reviewer": {"login": "owner"}}]}]},
+    {"name": "store-a", "protection_rules": [{"type": "required_reviewers", "prevent_self_review": false,
+      "reviewers": [{"type": "User", "reviewer": {"login": "owner"}}]}, {"type": "wait_timer", "wait_timer": 5}]},
+    {"name": "store-b", "protection_rules": [{"type": "required_reviewers", "prevent_self_review": false,
+      "reviewers": [{"type": "User", "reviewer": {"login": "owner"}}]}]}
+  ]},
+  "repos/example/app/contents/.github/workflows": [
+    {"name": "ci.yml", "path": ".github/workflows/ci.yml", "size": 245, "type": "file"},
+    {"name": "release.yml", "path": ".github/workflows/release.yml", "size": 2131, "type": "file"}
+  ],
+  "repos/example/app/contents/.github/workflows/ci.yml": {"$file": "ci.yml"},
+  "repos/example/app/contents/.github/workflows/release.yml": {"$file": "release.yml"},
+  "repos/example/app/contents/.claude/skills/release/SKILL.md": {"$file": "release-skill.md"},
+  "repos/example/app/contents/release-please-config.json": {"$file": "release-please-config.json"},
+  "repos/example/app/contents/.release-please-manifest.json": {"$file": "release-please-manifest.json"},
+  "repos/example/app/pulls?state=all&head=example:release-please--branches--main&per_page=1": [
+    {"number": 42, "state": "closed", "head": {"ref": "release-please--branches--main"}, "user": {"login": "release-bot[bot]", "type": "Bot"}}
+  ]
+}

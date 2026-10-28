@@ -1,6 +1,6 @@
 ---
 name: my-stack
-description: "Use when scaffolding a new repository, configuring development tooling, setting up CI/CD pipelines, or when working on owned repositories. Covers the preferred stack: bun 1.4+ (native-first — Bun.cron, Bun.Image, node:sqlite, Bun.Archive, isolated linker, test --parallel/--shard/--changed — before reaching for deps), biome, husky, commitlint, lint-staged, shellcheck, actionlint, sort-package-json, playwright, vitest, monorepo structure, trusted publisher for npm, OIDC, React + Vite frontend defaults, optional Effect 4 (when to suggest it: indexers, relayers, pollers, time-dependent logic), supply-chain hardening (7-day min-age, frozen lockfile), parallel-safe E2E patterns, and tiered infrastructure (Cloudflare Workers with static assets by default — not Pages; OpenTofu only once there's real cloud infra to track), and keyed runs: a command that needs real secrets (deploy or operator keys) gets them from 1Password on the Mac via env-exec/op-remote, never from a .env with values."
+description: "Use when scaffolding a new repository, configuring development tooling, setting up CI/CD pipelines, or when working on owned repositories. Covers the preferred stack: bun 1.4+ (native-first — Bun.cron, Bun.Image, node:sqlite, Bun.Archive, isolated linker, test --parallel/--shard/--changed — before reaching for deps), biome, husky, commitlint, lint-staged, shellcheck, actionlint, sort-package-json, playwright, vitest, monorepo structure, trusted publisher for npm, OIDC, branch and release shapes, React + Vite frontend defaults, optional Effect 4 (when to suggest it: indexers, relayers, pollers, time-dependent logic), supply-chain hardening (7-day min-age, frozen lockfile), parallel-safe E2E patterns, and tiered infrastructure (Cloudflare Workers with static assets by default — not Pages; OpenTofu only once there's real cloud infra to track), and keyed runs: a command that needs real secrets (deploy or operator keys) gets them from 1Password on the Mac via env-exec/op-remote, never from a .env with values."
 ---
 
 # My Preferred Development Stack
@@ -740,7 +740,7 @@ mkdir -p infra/tofu
 | Reusable workflows | `_<thing>.yml` | `_e2e.yml`, `_publish-sdk.yml`, `_aztec-update.yml` |
 | Deploy | `deploy-*.yml` | `deploy-landing.yml` |
 | Publish | `publish-*.yml` | `publish-testnet.yml`, `publish-nightlies.yml` |
-| Release | `release-*.yml` | `release-accelerator.yml` |
+| Release | `release.yml`; `release-<target>.yml` when there are several | `release.yml`, `release-accelerator.yml` |
 | Backport | `backport-*.yml` | `backport-nightlies.yml` |
 | Automation (upstream-tracking) | `<upstream>-*.yml` | `aztec-nightlies.yml`, `aztec-stable.yml` |
 | Standalone lint | `actionlint.yml` | `actionlint.yml` |
@@ -989,6 +989,54 @@ Preview URLs are on by default (`preview_urls` follows `workers_dev`); set `"pre
 - `tofu apply` on merge to main (or manual trigger)
 - State stored remotely in S3
 - OIDC for AWS credentials
+
+---
+
+## Branch and release shapes
+
+A repository has one of two shapes, and its release skill (below) says which.
+
+- **Single**: `main` is the trunk and ships. A release is a tag push (`v*`) or a dispatch of `release.yml`, or there is none.
+- **Promote**: `dev` is the trunk and the default branch; `main` is the release branch, and production deploys from it. Features squash into `dev`, a promote PR merges `dev` into `main`, release-please on `main` opens the release PR, and the release App opens a back-sync into `dev`.
+
+The promote conventions, each with its reason:
+
+- **Rulesets, never classic branch protection.** Classic protection is invisible to `GET repos/<owner>/<name>/rules/branches/<branch>`, the one read that answers for every ruleset, so a tool that derives the rules (orchy's release profile) needs a second read to find it. A private repository on a free plan gets neither: GitHub answers 403 and enforces nothing.
+- **The trunk allows squash and merge, with no linear history.** Lanes squash. The back-sync lands as a merge commit, which linear history forbids, so every release would need an admin bypass.
+- **The release branch is merge-only and up to date** (`allowed_merge_methods: ["merge"]`, strict status checks). A merge keeps the trunk's commits as they are, so what ships is exactly what passed on the trunk, and strict makes each promote carry the last back-sync.
+- **release-please runs on the release branch with an App token** (`target-branch: main`). A PR opened with `GITHUB_TOKEN` starts no workflow, so the release PR's checks would never run; an App's token does, and its bot (`app/<slug>`) is an author tools can tell from a person.
+- **The App opens a merge-commit back-sync** from `main` into `dev` after each release, so the release commit (version, changelog) returns to the trunk with its commit ids. A squashed back-sync re-creates them, and the next promote conflicts.
+- **Release tags only by the release App**: a tag ruleset on `refs/tags/v*` whose only bypass actor is the App, so a `v*` tag always means a release the tool cut.
+- **A reviewer on each publishing environment** (the registry, each store, `production`), with `prevent_self_review` off when one maintainer is the only reviewer. The review is the human gate before anything publishes; with self-review prevented, the maintainer who started a run could never approve it.
+- **One workflow, `release.yml`** (`release-<target>.yml` when there are several): release-please, the publish jobs, each in its environment, and the back-sync.
+- **PR titles** `chore(release): promote dev to main` and `chore(release): sync main into dev`, so each merge commit says what it is and passes commitlint.
+
+The rulesets and an environment, in the style of start-orchy's `references/from-scratch.md` §8 (`checks` holds the required job names, `<app-id>` the release App's id):
+
+```sh
+rules() { # rules <methods json> <strict>: the pull-request and status-check rules of a branch ruleset
+  printf '%s\n' "${checks[@]}" | jq -R '{context: .}' | jq -s --argjson m "$1" --argjson strict "$2" '[
+    {type: "pull_request", parameters: {allowed_merge_methods: $m, required_approving_review_count: 0,
+      dismiss_stale_reviews_on_push: false, require_code_owner_review: false, require_last_push_approval: false,
+      required_review_thread_resolution: false}},
+    {type: "required_status_checks", parameters: {strict_required_status_checks_policy: $strict, required_status_checks: .}},
+    {type: "non_fast_forward"}, {type: "deletion"}]'
+}
+rules '["squash", "merge"]' false | jq '{name: "dev", target: "branch", enforcement: "active",
+  conditions: {ref_name: {include: ["~DEFAULT_BRANCH"], exclude: []}}, rules: .}' | gh api -X POST "repos/<owner>/<name>/rulesets" --input -
+rules '["merge"]' true | jq '{name: "main", target: "branch", enforcement: "active",
+  conditions: {ref_name: {include: ["refs/heads/main"], exclude: []}}, rules: .}' | gh api -X POST "repos/<owner>/<name>/rulesets" --input -
+jq -n --argjson app <app-id> '{name: "release tags", target: "tag", enforcement: "active",
+  conditions: {ref_name: {include: ["refs/tags/v*"], exclude: []}},
+  bypass_actors: [{actor_id: $app, actor_type: "Integration", bypass_mode: "always"}],
+  rules: [{type: "creation"}, {type: "update"}, {type: "deletion"}]}' | gh api -X POST "repos/<owner>/<name>/rulesets" --input -
+jq -n --argjson id "$(gh api user --jq .id)" '{reviewers: [{type: "User", id: $id}], prevent_self_review: false}' \
+  | gh api -X PUT "repos/<owner>/<name>/environments/<environment>" --input -
+```
+
+No ruleset requires a review: orchy's merge watcher cannot give one.
+
+**The release skill.** Copy [`templates/release-skill.md`](templates/release-skill.md) to `.claude/skills/release/SKILL.md` and fill it in: who does each step and which are the maintainer's alone, the procedures, the staged switches, troubleshooting, the steps GitHub cannot see, and the `## Release profile` block, where orchy's derivation reads what GitHub cannot say.
 
 ---
 

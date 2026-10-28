@@ -1,0 +1,16 @@
+name: Docs
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: docs
+    steps:
+      - uses: actions/checkout@v4
+      - run: bun run docs:build

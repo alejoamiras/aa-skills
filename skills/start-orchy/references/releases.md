@@ -2,6 +2,14 @@
 
 The merge policy covers a lane's PR into the trunk. Everything else that cannot be undone (a merge into a release branch, a release PR, a PR no lead opened, Dependabot's included, a tag, a deployment approval, a dispatch) goes through `ORCHY act`, on an authority the owner gave in their own words, and each authority is spent once.
 
+## The release profile
+
+`bun ~/.claude/skills/start-orchy/scripts/release-profile.ts --repo <o/r>` reads the repository with GETs only, each under a 30 s timeout, and prints `orchy.release/1`: exit 0 complete, 3 partial, 2 failed. It names the shape (`promote`, `single`, `none`), the trunk and the release branch with their methods, checks, reviews and what a merge there deploys, the release tool and its PR head, the back-sync, the tag rules, the environments, and the workflows with their publish signals; `unknown` names every field it could not read, and a 403 is unread, never none. A repository's release skill (`.claude/skills/release/SKILL.md`, from my-stack's template) may carry a `release-profile/1` block, which fills only what GitHub's reads left open; where both answer and disagree, the field is unknown. Nothing in the block grants, picks an enforced method, makes a dispatch read-only or relaxes a check.
+
+The bootstrap writes the profile as `orchy.json`'s `release`; a home with none derives it at its first release ask; each release lane derives it again at its start and reports drift. `merge.branches.<b>` is written once, only when that branch's checks are known and not empty, no review is required, there is no merge queue and exactly one method is allowed; `merge.trunk_methods` when the trunk's methods are known. A later derivation never rewrites either: it reports drift, and they change only on the owner's words.
+
+The table goes to the owner wherever the derivation ran (the bootstrap report, or the reply to the first release ask), each unknown with what it blocks ("name `main`'s merge method to enable release merges"). Nothing is asked: release merges stay refused until the owner names what is missing, recorded as an ask.
+
 ## Acts
 
 | Act | Grammar | Checked before the call |

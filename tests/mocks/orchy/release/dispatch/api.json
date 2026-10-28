@@ -1,0 +1,38 @@
+{
+  "repo view": "example/tool",
+  "repos/example/tool": {
+    "full_name": "example/tool", "private": false, "default_branch": "main",
+    "allow_merge_commit": false, "allow_squash_merge": true, "allow_rebase_merge": false
+  },
+  "repos/example/tool/branches?protected=true&per_page=100": [
+    {"name": "main", "commit": {"sha": "4444444444444444444444444444444444444444"}, "protected": true}
+  ],
+  "repos/example/tool/branches/main": {"name": "main", "commit": {"sha": "4444444444444444444444444444444444444444"}, "protected": true},
+  "repos/example/tool/rules/branches/main?per_page=100": [
+    {"type": "pull_request", "ruleset_source_type": "Repository", "ruleset_source": "example/tool", "ruleset_id": 5,
+     "parameters": {"required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": false,
+                    "require_last_push_approval": false, "required_review_thread_resolution": false}},
+    {"type": "required_status_checks", "ruleset_source_type": "Repository", "ruleset_source": "example/tool", "ruleset_id": 5,
+     "parameters": {"strict_required_status_checks_policy": false, "required_status_checks": [{"context": "check"}, {"context": "test"}]}},
+    {"type": "non_fast_forward", "ruleset_source_type": "Repository", "ruleset_source": "example/tool", "ruleset_id": 5}
+  ],
+  "repos/example/tool/branches/main/protection": {"$http": 404, "message": "Branch not protected", "status": "404"},
+  "repos/example/tool/commits/4444444444444444444444444444444444444444/check-runs?per_page=100": {"total_count": 2, "check_runs": [
+    {"id": 41, "name": "check", "status": "completed", "conclusion": "success", "app": {"slug": "github-actions"}},
+    {"id": 42, "name": "test", "status": "completed", "conclusion": "success", "app": {"slug": "github-actions"}}
+  ]},
+  "repos/example/tool/rulesets?targets=tag&per_page=100": [],
+  "repos/example/tool/environments?per_page=100": {"total_count": 2, "environments": [
+    {"name": "docs", "protection_rules": []},
+    {"name": "registry", "protection_rules": [{"type": "required_reviewers", "prevent_self_review": false,
+      "reviewers": [{"type": "User", "reviewer": {"login": "owner"}}]}]}
+  ]},
+  "repos/example/tool/contents/.github/workflows": [
+    {"name": "ci.yml", "path": ".github/workflows/ci.yml", "size": 190, "type": "file"},
+    {"name": "docs.yml", "path": ".github/workflows/docs.yml", "size": 260, "type": "file"},
+    {"name": "publish.yml", "path": ".github/workflows/publish.yml", "size": 520, "type": "file"}
+  ],
+  "repos/example/tool/contents/.github/workflows/ci.yml": {"$file": "ci.yml"},
+  "repos/example/tool/contents/.github/workflows/docs.yml": {"$file": "docs.yml"},
+  "repos/example/tool/contents/.github/workflows/publish.yml": {"$file": "publish.yml"}
+}

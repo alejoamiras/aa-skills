@@ -10,15 +10,13 @@ export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_CAPACITY_RO
   ORCHY_WATCH_SLEEP=1 ORCHY_ASKS_DIR="$T/asks" ORCHY_GITLEAKS=fake-gitleaks ORCHY_ACCOUNTS="$T/accounts.json"; mkdir -p "$MOCK_DIR/cu"
 printf 'main %s\nacct-a %s\n' "$T/slot" "$T/a" > "$MOCK_DIR/cu/list.txt"; echo acct-a > "$MOCK_DIR/cu/current.txt"   # the roster check-public bans
 git init -q -b dev "$T/repo"; cd "$T/repo"
-# the promote shape: trunk dev, release branch main (merge only, its own check), release-please on main, a merge back-sync,
-# v* tags made only by the release App, one publishing workflow and one that is not
-mkdir -p "$ORCHY_HOME"; jq '.install = "true" | .merge.trunk_methods = ["squash", "merge"]
+# the promote fixture's profile as the bootstrap derives it: trunk dev, release branch main (merge only, its own check),
+# release-please on main, v* tags made only by the release App, a publishing release.yml; here the back-sync's head is main
+P=$(PATH="$HERE/tests/mocks/orchy/release:$PATH" RP_GH_LOG="$T/rp.log" RP_FIXTURES="$HERE/tests/mocks/orchy/release/promote" \
+  bun "$K/scripts/release-profile.ts" --repo "$ORCHY_REPO") || fail "the promote fixture's derivation exited $?"
+mkdir -p "$ORCHY_HOME"; jq --argjson p "$P" '.install = "true" | .merge.trunk_methods = ["squash", "merge"]
   | .merge.branches = {main: {method: "merge", required_checks: ["release-gate"]}, frozen: {method: "merge", required_checks: []}}
-  | .release = {schema: "orchy.release/1", shape: "promote", branch: {name: "main"},
-      tool: {kind: "release-please", branch: "main", bot: "app/release-bot", head: "release-please--branches--main"},
-      sync: {from: "main", to: "dev", method: "merge", head: "main"}, tags: [{pattern: "v*", creation: "restricted"}],
-      workflows: [{path: ".github/workflows/release.yml", dispatch: ["version"], environments: ["registry"], signals: ["id-token"]},
-                  {path: ".github/workflows/lint.yml", dispatch: [], environments: [], signals: []}]}' "$K/examples/orchy.example.json" > "$ORCHY_HOME/orchy.json"
+  | .release = ($p | .sync.head = "main")' "$K/examples/orchy.example.json" > "$ORCHY_HOME/orchy.json"
 cp "$K/examples/local.example.json" "$ORCHY_HOME/local.json"
 TS=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; MC=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef   # the trunk head; the mock's merge commit
 jq -n --arg s "$TS" '{sha: $s}' > "$MOCK_DIR/trunk.json"

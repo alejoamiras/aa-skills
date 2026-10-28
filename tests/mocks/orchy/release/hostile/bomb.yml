@@ -1,0 +1,26 @@
+# Nine anchors, each mapping four keys to the one before: a reader that walks or stringifies the document visits 4^9
+# nodes for every place that names *i, while each fixed-path read below costs one lookup.
+x-a: &a {k0: x, k1: x, k2: x, k3: x}
+x-b: &b {k0: *a, k1: *a, k2: *a, k3: *a}
+x-c: &c {k0: *b, k1: *b, k2: *b, k3: *b}
+x-d: &d {k0: *c, k1: *c, k2: *c, k3: *c}
+x-e: &e {k0: *d, k1: *d, k2: *d, k3: *d}
+x-f: &f {k0: *e, k1: *e, k2: *e, k3: *e}
+x-g: &g {k0: *f, k1: *f, k2: *f, k3: *f}
+x-h: &h {k0: *g, k1: *g, k2: *g, k3: *g}
+x-i: &i {k0: *h, k1: *h, k2: *h, k3: *h}
+name: Bomb
+on:
+  workflow_dispatch:
+    inputs: *i
+permissions: *i
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: *i
+    permissions: *i
+    steps:
+      - uses: actions/checkout@v4
+        with: *i
+      - run: echo build
+  more: *i
