@@ -41,7 +41,7 @@ printf '%s\n' "$out" > "$T/brief.md"; "$ORCHY" check-text "$T/brief.md" || fail 
 printf 'run it on acct-a\n' > "$T/bad.md"; if "$ORCHY" check-text "$T/bad.md" >/dev/null 2>&1; then fail "check-text accepted a roster name"; fi
 tmp=$(mktemp); jq '.prompt_ban="("' "$ORCHY_HOME/local.json" > "$tmp"; cp "$ORCHY_HOME/local.json" "$T/local.bak"; mv "$tmp" "$ORCHY_HOME/local.json"
 if "$ORCHY" check-text "$T/brief.md" >/dev/null 2>&1; then fail "check-text accepted an invalid regex"; fi; cp "$T/local.bak" "$ORCHY_HOME/local.json"
-# launch: never-list, allowlist, duplicate and cap refusals; a launched lead is alive with its start-time identity
+# launch: never-list, roster, duplicate and cap refusals; a launched lead is alive with its start-time identity
 mkdir -p "$ORCHY_HOME/prompts" ".claude/worktrees/x"; printf 'You are a subagent.\n' > "$ORCHY_HOME/prompts/x-plan.md"; cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/x-a1.md"; cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/x-a2.md"
 o=$("$ORCHY" launch x-plan x acct-main 2>&1 || true); grep -q 'acct-main: on a never-list' <<<"$o" || fail "launch did not refuse the policy's never-list: $o"
 o=$("$ORCHY" launch x-plan x acct-z 2>&1 || true); grep -q 'not on the claude-usage roster' <<<"$o" || fail "launch did not refuse an account off the roster: $o"
@@ -69,7 +69,7 @@ tail -1 "$MOCK_DIR/cu.log" | grep -q -- '--dangerously-skip-permissions' || fail
 tail -1 "$MOCK_DIR/cu.log" | grep -q -- "--add-dir $ORCHY_HOME/page/shots " || fail "a shots lead cannot write the page's shots"
 if head -1 "$MOCK_DIR/cu.log" | grep -q -- 'page/shots'; then fail "a lead with no shots plan got the shots dir"; fi
 if "$ORCHY" launch .x-hidden x acct-b >/dev/null 2>&1; then fail "launch accepted a dot-led key"; fi
-# the cap holds across every program under the capacity root, at the strictest cap among them
+# the policy's cap holds across every program under the capacity root
 # the second home's name carries a space, which must not shift the fields its rows are counted by
 H2="$T/cap/home 2"; mkdir -p "$H2/prompts"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$H2/"; cp "$ORCHY_HOME/prompts/x-plan.md" "$H2/prompts/y-a1.md"
 ORCHY_HOME="$H2" "$ORCHY" lock >/dev/null || fail "lock the second home"
@@ -528,28 +528,31 @@ rm "$E"; mkfifo "$E"; timeout 10 "$ORCHY" lock >/dev/null || fail "an event wait
 HA="$T/cap/acct"; CA="$T/cu-a"; PA="$T/acct-policy.json"; mkdir -p "$HA/prompts" .claude/worktrees/acc; cp "$ORCHY_HOME/orchy.json" "$HA/"
 jq '.accounts = {use: ["p-bravo"], never: ["p-mike"]}' "$K/examples/local.example.json" > "$HA/local.json"
 AC() { MOCK_LEAD_SECS=${MOCK_LEAD_SECS:-120} ORCHY_HOME="$HA" MOCK_CU="$CA" ORCHY_ACCOUNTS="$PA" "$ORCHY" "$@"; }
-roster "$CA" p-echo p-alpha p-bravo p-charlie p-delta p-echo p-fox p-golf p-hotel p-india p-juliet p-kilo p-lima-new=p-lima p-mike p-zulu
+roster "$CA" p-echo p-alpha p-bravo p-charlie p-delta p-echo p-fox p-golf p-hotel p-india p-juliet p-kilo p-lima-new=p-lima p-mike p-oscar p-zulu
 cu_rows() { { row p-alpha 60 20; row p-bravo 60 100; row p-charlie 20 5; row p-delta 90 100; row p-echo 90 100; row p-fox 25 150
   row p-golf 90 100 80 10800; row p-hotel 90 -1; row p-india 84 null; row p-juliet 90 100 80 60 "logged out"; row p-kilo 90 100 0
-  row p-lima-new 40 100; row p-mike 90 100; } | jq -s . > "$CA/rows.json"; }
+  row p-lima-new 40 100; row p-mike 90 100; row p-oscar 0 100; row main 10 50; } | jq -s . > "$CA/rows.json"; }
 cu_rows; echo '{"schema": "orchy.accounts/1", "never": ["p-delta"]}' > "$PA"
 for k in 1 2 3 4 5 6 7 8 9; do printf 'You are a subagent.\n' > "$HA/prompts/acc-a$k.md"; done
 AC lock >/dev/null || fail "lock the policy home"
 picked() { tail -1 "$MOCK_DIR/cu.log" | grep -oE '=[a-z-]+' | head -1; }
 AC launch acc-a1 acc auto >/dev/null && [ "$(picked)" = =p-alpha ] || fail "auto did not spend the heavy headroom that expires soonest: $(tail -1 "$MOCK_DIR/cu.log")"
 AC launch --light acc-a2 acc auto >/dev/null && [ "$(picked)" = =p-charlie ] || fail "a light auto did not take the account under the floor: $(tail -1 "$MOCK_DIR/cu.log")"
-for x in "p-delta:on a never-list" "p-mike:on a never-list" "p-echo:the orchestrator runs on it" "p-juliet:claude-usage notes logged out" "p-kilo:its session is spent"; do
+for x in "p-delta:on a never-list" "p-mike:on a never-list" "p-echo:the orchestrator runs on it" "p-juliet:claude-usage notes logged out" "p-kilo:its session is spent" "p-oscar:its week is spent"; do
   o=$(AC launch --light acc-a3 acc "${x%%:*}" 2>&1 || true); grep -qF "${x%%:*}: ${x#*:}" <<<"$o" || fail "launch on ${x%%:*}: $o"; done
 for x in "p-charlie:week 20% is under the 25% floor" "p-golf:the reading is over 2 h old" "p-hotel:its week reset after the reading" "p-zulu:no reading in the snapshot"; do
   o=$(AC launch acc-a3 acc "${x%%:*}" 2>&1 || true); grep -qF "${x%%:*} takes light leads only: ${x#*:}" <<<"$o" || fail "a heavy launch on ${x%%:*}: $o"; done
 AC launch acc-a3 acc p-fox >/dev/null || fail "exactly the floor is not heavy"
 AC launch --light acc-a4 acc p-golf >/dev/null || fail "a stale reading refused a light lead"
 AC launch --force-cap acc-a5 acc p-charlie >/dev/null || fail "--force-cap did not pass the floor"
+o=$(AC launch --force-cap acc-a8 acc p-golf 2>&1 || true); grep -qx 'refused: p-golf takes light leads only: the reading is over 2 h old; --light' <<<"$o" || fail "--force-cap passed a stale reading: $o"
 AC launch acc-a6 acc p-lima-new >/dev/null && [ "$(picked)" = =p-lima ] || fail "a renamed account did not launch by its key: $(tail -1 "$MOCK_DIR/cu.log")"
 AC accounts --json | jq -e '.schema == "orchy.headroom/1" and .orchestrator == "p-echo" and ([.accounts[] | select(.verdict == "heavy") | .key] == ["p-alpha", "p-bravo", "p-india", "p-lima", "p-fox"])
   and (.accounts[] | select(.key == "p-echo") | .verdict == "no" and .why == "the orchestrator runs on it") and all(.accounts[]; (.why | length) > 0)
-  and (.accounts[] | select(.key == "p-alpha") | .heavy_leads == 1)' >/dev/null || fail "accounts --json: $(AC accounts --json)"
-AC accounts | grep -qx 'orchestrator: p-echo' || fail "accounts text: $(AC accounts)"
+  and (.accounts[] | select(.key == "p-alpha") | .heavy_leads == 1) and ([.accounts[] | select(.floor) | .key] == ["p-charlie"])
+  and ([.accounts[] | select(.key == "p-hotel" or .key == "p-zulu") | .verdict] == ["light", "light"])' >/dev/null || fail "accounts --json: $(AC accounts --json)"
+AC accounts | grep -qE '^orchestrator: p-echo  week 90% session 80% resets in (99|100)h$' || fail "accounts text: $(AC accounts)"
+echo main > "$CA/current.txt"; AC accounts | grep -q '^orchestrator: main  week 10% ' || fail "a slot orchestrator lost its reading: $(AC accounts)"; echo p-echo > "$CA/current.txt"
 o=$(AC resume acc-a7 acc p-charlie 00000000-0000-4000-8000-000000000007 2>&1 || true); grep -q 'light leads only' <<<"$o" || fail "a heavy resume below the floor: $o"
 AC resume --light acc-a7 acc p-charlie 00000000-0000-4000-8000-000000000007 >/dev/null || fail "a light resume below the floor"
 for f in "" --light; do o=$(AC resume $f acc-a8 acc p-kilo 00000000-0000-4000-8000-000000000008 2>&1 || true); grep -q 'its session is spent' <<<"$o" || fail "a resume $f on a spent session: $o"; done
@@ -571,12 +574,13 @@ echo '{"schema": "orchy.accounts/1", "never": ["p-delta"]}' > "$PA"
 # the policy file: missing is the defaults; malformed, foreign-shaped or symlinked refuses every reader
 ORCHY_HOME="$HA" ORCHY_ACCOUNTS="$T/none.json" "$ORCHY" state | jq -e '.caps == {week_floor_pct: 25, heavy: 2, light: 3, load_max: 144}' >/dev/null || fail "state without a policy file"
 B() { ORCHY_HOME="$HA" MOCK_CU="$CA" ORCHY_ACCOUNTS="$T/bad.json" "$ORCHY" "$@"; }
-for m in '{"heavy_floor_pct": 101}' '[]' '{"x": 1}' '{"never": ["a b"]}' '{"schema": "orchy.accounts/2"}' '{"light_per_account": 1.5}' '{}{}' ''; do
+for m in '{"heavy_floor_pct": 101}' '[]' '{"x": 1}' '{"never": ["a b"]}' '{"schema": "orchy.accounts/2"}' '{"light_per_account": 1.5}' '{}{}' '' '{"never": false}' '{"never": ["p-delta\n"]}' '{"heavy_per_account": null}'; do
   printf '%s' "$m" > "$T/bad.json"; o=$(B accounts 2>&1) && fail "accounts read a malformed policy: $m"; grep -q 'not orchy.accounts/1' <<<"$o" || fail "accounts on $m: $o"; done
 o=$(B launch --light acc-a8 acc auto 2>&1) && fail "launch read a malformed policy: $o"
 B state | jq -e '.caps == null and (.errors | index("caps"))' >/dev/null || fail "state over a malformed policy"
-ln -s "$PA" "$T/lnk.json"; o=$(ORCHY_HOME="$HA" MOCK_CU="$CA" ORCHY_ACCOUNTS="$T/lnk.json" "$ORCHY" accounts 2>&1) && fail "a symlinked policy was read"
-grep -q 'not a symlink' <<<"$o" || fail "symlinked policy: $o"
+ln -s "$PA" "$T/lnk.json"; LK() { ORCHY_HOME="$HA" MOCK_CU="$CA" ORCHY_ACCOUNTS="$T/lnk.json" "$ORCHY" "$@"; }
+for c in accounts "launch --light acc-a8 acc auto"; do o=$(LK $c 2>&1) && fail "$c read a symlinked policy"; grep -q 'not a symlink' <<<"$o" || fail "$c on a symlinked policy: $o"; done
+LK state | jq -e '.caps == null' >/dev/null || fail "state read a symlinked policy"
 # the seat: only its holder spawns; two programs racing for an account's last heavy slot take that one and the next
 for f in "$HA"/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/null || true; done; sleep 1
 for k in r0 r1 r2; do printf 'You are a subagent.\n' > "$HA/prompts/acc-$k.md"; done
@@ -586,14 +590,23 @@ MOCK_LEAD_SECS=30 AC launch acc-r0 acc p-alpha >/dev/null || fail "first heavy l
 : > "$T/race.log"; ( MOCK_LEAD_SECS=30 AC launch acc-r1 acc auto >> "$T/race.log" 2>&1 ) & r1=$!
 ( MOCK_LEAD_SECS=30 ORCHY_HOME="$HB" MOCK_CU="$CA" ORCHY_ACCOUNTS="$PA" "$ORCHY" launch acc-r2 acc auto >> "$T/race.log" 2>&1 ) & r2=$!; wait "$r1" "$r2" || true
 [ "$(grep -oE ' on p-[a-z]+ ' "$T/race.log" | sort | tr -d ' ' | paste -sd, -)" = "onp-alpha,onp-bravo" ] || fail "two programs racing for the last slot: $(cat "$T/race.log")"
+# a launch that waited on the spawn lock checks the seat again inside it
+"$T/sess/claude" 600 & s2=$!; sess="$sess $s2"; exec {sl}>"$T/cap/.spawn.lock"; flock "$sl"
+( exec {sl}>&-; AC launch --light acc-a9 acc auto > "$T/late.out" 2>&1 ) & lw=$!
+for _ in $(seq 50); do for q in $(pgrep -f 'orchy.sh launch --light acc-a9 acc auto'); do readlink /proc/"$q"/fd/* 2>/dev/null | grep -q 'spawn.lock$' && break 2; done; sleep 0.1; done
+cp "$HA/orchestrator.lock" "$T/seat.keep"; echo "$s2 $(awk '{print $22}' /proc/$s2/stat) 2026-01-01T00:00:00Z - -" > "$HA/orchestrator.lock"
+exec {sl}>&-; wait "$lw" || true; cp "$T/seat.keep" "$HA/orchestrator.lock"
+grep -q 'does not hold the seat' "$T/late.out" || fail "a launch spawned after its seat changed hands: $(cat "$T/late.out")"
 mkdir -p "$HA/watch"; sleep 60 & sw=$!; echo "$sw $(awk '{print $22}' /proc/$sw/stat)" > "$HA/watch/merge-41.pid"; printf '10:00Z required ok=1/2\n' > "$HA/watch/merge-41.out"
 AC unlock | grep -qx unlocked || fail "unlock the policy home"
-o=$(AC launch --light acc-a9 acc auto 2>&1 || true); grep -q 'no session holds the seat' <<<"$o" || fail "a session without the seat launched: $o"
-"$T/sess/claude" 600 & s2=$!; sess="$sess $s2"
+for c in "launch --light acc-a9 acc auto" "resume --light acc-a9 acc p-alpha 00000000-0000-4000-8000-000000000009"; do
+  o=$(AC $c 2>&1 || true); grep -q 'no session holds the seat' <<<"$o" || fail "$c ran with no seat holder: $o"; done
 CLAUDE_PID=$s2 AC lock | grep -q '^locked' || fail "another session could not take a handed-over seat"
 for c in "launch --light acc-a9 acc auto" "resume --light acc-a9 acc p-alpha 00000000-0000-4000-8000-000000000009"; do
   o=$(AC $c 2>&1 || true); grep -q 'does not hold the seat' <<<"$o" || fail "the session that handed the seat over ran $c: $o"; done
-o=$(CLAUDE_PID=$s2 AC snapshot 2>&1); grep -q '^alive acc-r0 ' <<<"$o" && grep -qx "alive merge-41 pid $sw" <<<"$o" || fail "a handed-over seat lost a lead or a watcher: $o"
+"$T/sess/claude" 600 & s3=$!; sess="$sess $s3"
+o=$(CLAUDE_PID=$s3 AC launch --light acc-a9 acc auto 2>&1 || true); grep -q "(pid $s3) does not hold the seat" <<<"$o" || fail "a session that never held the seat launched: $o"
+: > "$MOCK_DIR/refresh.log"; o=$(CLAUDE_PID=$s2 AC snapshot 2>&1); grep -qx refresh "$MOCK_DIR/refresh.log" || fail "snapshot did not refresh the readings"; grep -q '^alive acc-r0 ' <<<"$o" && grep -qx "alive merge-41 pid $sw" <<<"$o" || fail "a handed-over seat lost a lead or a watcher: $o"
 CLAUDE_PID=$s2 AC unlock >/dev/null; ORCHY_HOME="$HB" "$ORCHY" unlock >/dev/null; kill "$sw"; wait "$sw" 2>/dev/null || true
 for f in "$T"/cap/*/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/null || true; done; for f in "$MOCK_DIR"/gc.*; do kill "$(cat "$f")" 2>/dev/null || true; done
 wait "$pgp" || { tail -n 20 "$T/page.log"; fail "page smoke"; }; pgp=

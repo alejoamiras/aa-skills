@@ -123,11 +123,12 @@ policy() { # orchy.accounts/1 with its defaults filled in; a missing file is the
   local f=$ACCOUNTS j='{}'
   if [ -L "$f" ] || { [ -e "$f" ] && { [ ! -f "$f" ] || [ ! -O "$f" ]; }; }; then echo "refused: $f must be a regular file owned by $(id -un), not a symlink" >&2; return 1; fi
   if [ -e "$f" ]; then j=$(cat "$f") || { echo "refused: cannot read $f" >&2; return 1; }; fi
-  jq -sce 'select(length == 1) | .[0] | select(type == "object" and (keys - ["schema", "never", "heavy_floor_pct", "heavy_per_account", "light_per_account"]) == []
-      and (.schema // "orchy.accounts/1") == "orchy.accounts/1"
-      and ((.never // []) | type == "array" and length <= 64 and all(.[]; type == "string" and test("^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$")))
-      and ((.heavy_floor_pct // 25) | type == "number" and . == floor and . >= 0 and . <= 100)
-      and all((.heavy_per_account // 2), (.light_per_account // 3); type == "number" and . == floor and . >= 0 and . <= 9))
+  # a present key is checked as written (`//` reads false and null as absent); \z, since $ also matches before a final newline
+  jq -sce 'def opt($k; f): (has($k) | not) or (.[$k] | f); def whole: type == "number" and . == floor and . >= 0;
+    select(length == 1) | .[0] | select(type == "object" and (keys - ["schema", "never", "heavy_floor_pct", "heavy_per_account", "light_per_account"]) == []
+      and opt("schema"; . == "orchy.accounts/1")
+      and opt("never"; type == "array" and length <= 64 and all(.[]; type == "string" and test("\\A[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}\\z")))
+      and opt("heavy_floor_pct"; whole and . <= 100) and opt("heavy_per_account"; whole and . <= 9) and opt("light_per_account"; whole and . <= 9))
     | {schema: "orchy.accounts/1", never: (.never // []), heavy_floor_pct: (.heavy_floor_pct // 25),
        heavy_per_account: (.heavy_per_account // 2), light_per_account: (.light_per_account // 3)}' <<<"$j" 2>/dev/null \
     || { echo "refused: $f is not orchy.accounts/1 (never: names; heavy_floor_pct: 0-100; heavy_per_account, light_per_account: 0-9)" >&2; return 1; }
@@ -155,11 +156,12 @@ acct_view() { # {policy, orchestrator, known, accounts}: one row per roster acco
     | ($roster | map({(.label): .key}, {(.key): .key}) | add // {}) as $key
     | ([$pol.never[], ($never | split("\n")[] | select(. != ""))] | map($key[.] // .)) as $nk
     | ($key[$cur] // $cur) as $me
-    | {policy: $pol, orchestrator: $cur, known: ($me == "main" or ($roster | any(.key == $me))),
+    | {policy: $pol, orchestrator: $cur, known: ($me == "main" or ($roster | any(.key == $me))), me: ([$rows[] | objects | select(.account == $cur)] | first),
        accounts: ([$roster[] | . as $a | ([$rows[] | objects | select(.account == $a.label)] | first) as $r
         # a reading stands for 2 h, and never past the weekly reset it was taken before
         | ($r != null and ($r.observed_at | type) == "number" and $now - $r.observed_at <= 7200
            and (($r.week_resets_at | type) != "number" or $r.week_resets_at > $now)) as $fresh
+        # a spent bucket stays spent until its own reset, so a 0 refuses however old its reading; --force-cap passes only the floor
         | (if ($nk | index($a.key)) != null then ["no", "on a never-list"]
            elif $a.key == $me then ["no", "the orchestrator runs on it"]
            elif $r == null then ["light", "no reading in the snapshot"]
@@ -168,10 +170,11 @@ acct_view() { # {policy, orchestrator, known, accounts}: one row per roster acco
            elif $r.session_left_pct == 0 and (($r.session_resets_at | type) != "number" or $r.session_resets_at > $now) then ["no", "its session is spent"]
            elif ($fresh | not) then ["light", (if ($r.week_resets_at | type) == "number" and $r.week_resets_at <= $now
                then "its week reset after the reading" else "the reading is over 2 h old" end)]
-           elif ($r.week_left_pct | type) != "number" or $r.week_left_pct < $pol.heavy_floor_pct then ["light", "week \($r.week_left_pct // "?")% is under the \($pol.heavy_floor_pct)% floor"]
+           elif ($r.week_left_pct | type) != "number" then ["light", "its week headroom is unknown"]
            elif ($r.session_left_pct | type) != "number" then ["light", "its session headroom is unknown"]
-           else ["heavy", "week \($r.week_left_pct)% left"] end) as [$v, $why]
-        | {key: $a.key, label: $a.label, verdict: $v, why: $why, week_left_pct: $r.week_left_pct, session_left_pct: $r.session_left_pct,
+           elif $r.week_left_pct < $pol.heavy_floor_pct then ["light", "week \($r.week_left_pct)% is under the \($pol.heavy_floor_pct)% floor", true]
+           else ["heavy", "week \($r.week_left_pct)% left"] end) as [$v, $why, $floor]
+        | {key: $a.key, label: $a.label, verdict: $v, why: $why, floor: ($floor // false), week_left_pct: $r.week_left_pct, session_left_pct: $r.session_left_pct,
            week_resets_at: $r.week_resets_at, observed_at: $r.observed_at,
            # the headroom that expires soonest goes first: week left per hour to its reset
            score: (if $v != "no" and $fresh then ($r.week_left_pct // 0) / hrs($r.week_resets_at) else -1 end)}]
@@ -557,14 +560,15 @@ launch|resume)
   v=$(acct_view) || exit 1
   jq -e .known <<<"$v" >/dev/null || { echo "refused: this session runs on $(jq -r .orchestrator <<<"$v"), which is not on the claude-usage roster, so no lead can be kept off it" >&2; exit 1; }
   if [ "$a" = auto ]; then
-    cands=$(jq -r --arg w "$weight" --argjson f "$force" '.accounts[] | select(.verdict == "heavy" or (.verdict == "light" and ($w == "light" or $f == 1))) | .key' <<<"$v")
+    cands=$(jq -r --arg w "$weight" --argjson f "$force" '.accounts[] | select(.verdict == "heavy" or (.verdict == "light" and ($w == "light" or ($f == 1 and .floor)))) | .key' <<<"$v")
     [ -n "$cands" ] || { echo "refused: no account may take a $weight lead now: $(jq -r '[.accounts[] | "\(.label) \(.verdict) (\(.why))"] | join("; ")' <<<"$v")" >&2; exit 1; }
   else
     acc=$(jq -c --arg a "$a" 'first(.accounts[] | select(.key == $a or .label == $a)) // empty' <<<"$v")
     [ -n "$acc" ] || { echo "refused: $a is not on the claude-usage roster" >&2; exit 1; }
     case "$(jq -r .verdict <<<"$acc")" in
       no) echo "refused: $a: $(jq -r .why <<<"$acc")" >&2; exit 1;;
-      light) [ "$weight" = light ] || [ "$force" = 1 ] || { echo "refused: $a takes light leads only: $(jq -r .why <<<"$acc"); --light, or --force-cap on the owner's word" >&2; exit 1; };;
+      light) fl=$(jq -r .floor <<<"$acc"); [ "$weight" = light ] || { [ "$force" = 1 ] && [ "$fl" = true ]; } || {
+        echo "refused: $a takes light leads only: $(jq -r .why <<<"$acc"); --light$([ "$fl" = true ] && echo ", or --force-cap on the owner's word")" >&2; exit 1; };;
     esac
     cands=$(jq -r .key <<<"$acc")
   fi
@@ -604,9 +608,11 @@ launch|resume)
   [ -f "$H/page/shots-plan/$k.json" ] && { mkdir -p "$H/page/shots"; dirs+=(--add-dir "$H/page/shots"); }
   hook=$(printf '%q ' bash "$(realpath "$(dirname "$0")")/inbox-hook.sh" "$H/inbox/$k.jsonl"); hook=${hook% }
   jq -n --arg c "$hook" '{hooks: {PostToolUse: [{matcher: "*", hooks: [{type: "command", command: $c}]}]}}' > "$S"
-  # Key check, count, spawn and the .started write are one step, so two programs cannot both take an account's last slot.
+  # Seat and key checks, count, spawn and the .started write are one step: two programs cannot both take an account's last slot,
+  # and a session that lost the seat while this launch waited spawns nothing.
   # Nothing in here touches the network; the lead starts with fd 9 closed, so no descendant ever holds the lock.
   exec 9>"$CAP/.spawn.lock"; flock -w 30 9 || { echo "refused: spawn lock busy for 30 s" >&2; exit 1; }
+  seat_held || exit 1
   if [ -f "$H/leads/$k.started" ]; then read -r pid st _ < "$H/leads/$k.started"; alive "$pid" "$st" && { echo "refused: lead $k is alive (pid $pid)" >&2; exit 1; }; fi
   if [[ "$k" == *-closeout ]]; then other=$(lead_rows | awk -v k="$k" '$1 ~ /-closeout$/ && $1 != k {print $1; exit}')
     [ -z "$other" ] || { echo "refused: close-out lead $other is alive; close-outs run one at a time" >&2; exit 1; }; fi
@@ -708,12 +714,12 @@ accounts)
   need claude-usage; v=$(acct_view) || exit 1; c=$(lead_counts "$v")
   v=$(jq -c --argjson c "$c" '.accounts |= map(. + {heavy_leads: ($c[.key].heavy // 0), light_leads: ($c[.key].light // 0)})' <<<"$v")
   if [ "${1:-}" = --json ]; then jq -c --arg at "$(now)" '{schema: "orchy.headroom/1", at: $at, policy, orchestrator, accounts}' <<<"$v"; exit 0; fi
-  jq -r --argjson now "$(date +%s)" '.policy as $p
+  jq -r --argjson now "$(date +%s)" 'def reading: "week \(.week_left_pct // "?")% session \(.session_left_pct // "?")%"
+      + (if (.week_resets_at | type) != "number" then "" elif .week_resets_at > $now then " resets in \((.week_resets_at - $now) / 3600 | floor)h" else " reset passed" end);
+    .policy as $p
     | "policy: heavy leads need \($p.heavy_floor_pct)% of the week left, light ones any; \($p.heavy_per_account) heavy and \($p.light_per_account) light per account",
-      "orchestrator: \(.orchestrator)",
-      (.accounts[] | "\(.label)\(if .key != .label then " (\(.key))" else "" end)  \(.verdict)  week \(.week_left_pct // "?")% session \(.session_left_pct // "?")%"
-        + (if (.week_resets_at | type) != "number" then "" elif .week_resets_at > $now then " resets in \((.week_resets_at - $now) / 3600 | floor)h" else " reset passed" end)
-        + "  leads \(.heavy_leads) heavy \(.light_leads) light  \(.why)")' <<<"$v";;
+      "orchestrator: \(.orchestrator)  \(.me // {} | reading)",
+      (.accounts[] | "\(.label)\(if .key != .label then " (\(.key))" else "" end)  \(.verdict)  \(reading)  leads \(.heavy_leads) heavy \(.light_leads) light  \(.why)")' <<<"$v";;
 state)
   # orchy.state/1 for a poller: local facts only (no gh, usage or network call) and nothing written. The seat and the
   # pages are left to the reader, who parses those files directly. An unreadable source is null and named in errors.
