@@ -4,9 +4,10 @@ Each rule was paid for once. The orchestrator reads this file before its first t
 
 ## Merging
 
-- **Every merge is the policy, mechanically checked.** `watch-merge` merges only on the pinned head, every required check green (the newest check-run per name, ids sorted: a re-run leaves the old run in the list), `MERGEABLE CLEAN`, and the lead's `LEAD_DONE`. A moved head exits 2 (rescan: the diff you read is not the diff that lands); `DIRTY` exits 5. The orchestrator reads the scan and the gate-file hunks before arming. *Evidence: a UI regression shipped from a security batch that every audit approved and nobody looked at.*
+- **Every merge is the policy, mechanically checked.** `watch-merge` merges only on the pinned head, every required check green (the newest check-run per name, ids sorted: a re-run leaves the old run in the list), `MERGEABLE CLEAN`, and the lead's `LEAD_DONE`. A moved head, or a base rewritten since arming, exits 2 (rescan: the diff you read is not the diff that lands); `DIRTY`, a strict base's BEHIND included, exits 5. The orchestrator reads the scan and the gate-file hunks before arming. *Evidence: a UI regression shipped from a security batch that every audit approved and nobody looked at.*
 - **Required checks are the bare check-run names**, never `Workflow / Job`. Grep for them with an exact list: a suffix grep (`e2e-status`) missed a `-firefox-status` twin once.
 - **GitHub ignores `merge=union`.** A union-merge attribute on an index or lessons file resolves locally and conflicts on GitHub. Re-resolve such a conflict in the lane worktree by keeping both lanes' lines; never a union merge.
+- **A lane PR's provenance is its branch.** Leads share the owner's login, so the author proves nothing: the watcher merges a lane PR only from this repository, never one an app opened, and only from the lane's own branch (`worktree-<lane>` or `<lane>-*`). Name lanes so no slug prefixes another's (Known limits). *Why: a lane slug that prefixed a release bot's branch would merge the bot's release PR without the owner.*
 - **Leads never merge**, and the orchestrator never merges into a protected branch or with `--admin`. A Dependabot PR is the owner's unless delegated in writing.
 - **Merge order is a note, not a feeling.** Two PRs that touch one file land in the order the note says; the second rebuilds on the trunk's tip first.
 - **A red trunk holds merges.** A trunk check that concluded failure or timed out on the trunk head's exact sha holds every merge, except a PR that contains that commit and passed the failed checks itself, so a fix can land and an unrelated PR cannot. Pending does not hold, and nothing proves the trunk healthy: the watcher re-reads it every round and before a retry. *Why: a PR green on its own branch says nothing about the trunk it lands on.*
@@ -90,6 +91,7 @@ A finding becomes a change only once its path is written (initial conditions, ac
 ## Known limits
 
 - A process that detaches and re-parents before `stop`'s tree walk survives `stop`.
+- A lane slug that prefixes another lane's (`ui` and `ui-2`) accepts that lane's heads as its own.
 - A reopened issue already in `triaged.txt` is not listed as untriaged again.
 - orchy assumes a single-user host or a private group. The home and the capacity root are made 700, which protects everything inside from then on; a home that was ever group-accessible on a shared host may hold files edited in place before that and must be inspected before use. Symlinked homes and files another user owns are refused.
 - An inbox cursor past the end of its file (only a hand truncation shrinks an inbox) holds that lead's notes until the inbox grows past it.
