@@ -249,6 +249,7 @@ git worktree lock .claude/worktrees/y; o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 
 grep -q 'hand removal failed' <<<"$o" && [ -d .claude/worktrees/y ] && "$ORCHY" hold list | grep -q '^lane:y ' || fail "a failed hand removal: $o"
 o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1); grep -q 'hand-removed' <<<"$o" || fail "teardown did not remove an exact merged head: $o"
 [ ! -d .claude/worktrees/y ] || fail "worktree y still there"
+"$ORCHY" hold list --json | jq -e '[.holds[].ref] == ["lane:z"]' >/dev/null || fail "the hand removal's holds: $("$ORCHY" hold list)"
 "$ORCHY" hold add lane:y trunk >/dev/null; "$ORCHY" teardown y >/dev/null || fail "teardown of a lane with no worktree"
 "$ORCHY" wt-new y2 >/dev/null || fail "wt-new y2"; "$ORCHY" hold add lane:y2 trunk >/dev/null; "$ORCHY" teardown y2 >/dev/null || fail "teardown y2"
 "$ORCHY" hold list --json | jq -e '[.holds[].ref] == ["lane:z"]' >/dev/null || fail "teardown's holds: $("$ORCHY" hold list)"
