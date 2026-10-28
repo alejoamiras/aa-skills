@@ -36,8 +36,9 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   snapshot                     the tick's facts: reports, leads, watchers, PRs, worktrees, load, headroom
 #   state [--json]               a poller's view as orchy.state/1 JSON: local facts only, no gh, usage or network call, nothing written
 #   wait [seconds]               block until a report, lead or watcher changes, or (every wait.poll_sec, default 120) open PRs, open issues or the trunk head (default 1500)
-#   scan <pr> [<full-sha>]       gate-weakening and leak scan of a PR's diff, title, body and commit messages (plus the local ban),
-#                                the content read at that sha (default: the head now); SCAN FAILED unless it is the head before and after
+#   scan <pr> [<full-sha>] [--quick]   gate-weakening and leak scan of a PR's diff, title, body and commit messages (plus the
+#                                local ban), the content read at that sha (default: the head now); SCAN FAILED unless it is the head
+#                                before and after; --quick exits 3 past a quick lane's bounds
 #   watch-merge <pr> <full-sha> <lane> <report> [archive-name|-]   merge a lane PR on the standing policy, then tear the lane
 #                                down (archive -: no plan to wait for and no teardown)
 #   arm-merge  <pr> <full-sha> <lane> <report-name> [archive-name|-] [delay-s]   watch-merge detached (nohup, .out + .pid)
@@ -865,8 +866,9 @@ wait)
     if [ $(( $(date +%s) - t0 )) -ge "$LIMIT" ]; then u="${!unread[*]}"; echo "TIMEOUT after ${LIMIT}s, no change${u:+; unreadable: $u}"; exit 0; fi
   done;;
 scan)
-  need gh; n=${1:-}; pin=${2:-}
-  [[ "$n" =~ ^[1-9][0-9]*$ ]] && { [ -z "$pin" ] || sha_ok "$pin"; } || { echo "usage: scan <pr> [<full-sha>]" >&2; exit 2; }
+  need gh; quick=0; a=(); for x in "$@"; do if [ "$x" = --quick ]; then quick=1; else a+=("$x"); fi; done
+  n=${a[0]:-}; pin=${a[1]:-}
+  [[ "$n" =~ ^[1-9][0-9]*$ ]] && { [ -z "$pin" ] || sha_ok "$pin"; } && [ "${#a[@]}" -le 2 ] || { echo "usage: scan <pr> [<full-sha>] [--quick]" >&2; exit 2; }
   hb=$(gh pr view "$n" --repo "$REPO" --json headRefOid,baseRefName --jq '"\(.headRefOid) \(.baseRefName)"') || { echo "SCAN FAILED: gh pr view #$n"; exit 2; }
   read -r h base <<<"$hb"; pin=${pin:-$h}
   [ "$h" = "$pin" ] || { echo "SCAN FAILED: head moved"; exit 2; }
@@ -879,6 +881,7 @@ scan)
   jq -e '(.files | type) == "array" and (.files | length) < 300 and .total_commits == (.commits | length)' <<<"$cj" >/dev/null \
     || { echo "SCAN FAILED: #$n is more than one compare lists (300 files, 250 commits); read it by hand"; exit 2; }
   files=$(jq -r '.files[] | .filename, (.previous_filename // empty)' <<<"$cj" | sort -u)   # a rename touches its old path too
+  nf=$(jq '[.files[] | .filename, (.previous_filename // empty)] | unique | length' <<<"$cj")   # a name with a newline is one file
   meta=$(gh pr view "$n" --repo "$REPO" --json title,body --jq '.title, .body') || { echo "SCAN FAILED: gh pr view #$n"; exit 2; }
   meta=$meta$'\n'$(jq -r '.commits[].commit.message' <<<"$cj")
   h=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid) || { echo "SCAN FAILED: gh pr view #$n"; exit 2; }
@@ -889,11 +892,20 @@ scan)
   gf=$(echo "$files" | grep -E "$(cfg '.scan.gate_files')" || true)
   add=$(echo "$d" | grep -E '^\+' | grep -v '^+++' | grep -E "$(cfg '.scan.weakening')" || true)
   leak=$( (echo "$d" | grep -E '^\+'; echo "$meta") | grep -E "$leakre" || true)
-  echo "#$n files=$(echo "$files" | grep -c .) gatefiles=$(echo -n "$gf" | grep -c .) added=$(echo -n "$add" | grep -c .) leaks=$(echo -n "$leak" | grep -c .)"
+  echo "#$n files=$nf gatefiles=$(echo -n "$gf" | grep -c .) added=$(echo -n "$add" | grep -c .) leaks=$(echo -n "$leak" | grep -c .)"
   [ -n "$gf" ] && echo "$gf" | sed 's/^/  GATE FILE: /'
   [ -n "$add" ] && echo "$add" | cut -c1-200 | sed 's/^/  ADDED: /'
   [ -n "$leak" ] && echo "$leak" | cut -c1-200 | sed 's/^/  LEAK: /'
-  exit 0;;
+  [ "$quick" = 1 ] || exit 0
+  # the bounds a script can see: a manifest holds the dependencies and the scripts the gates run. One surface, persisted
+  # shapes, a dependency no manifest names (a URL import) and what a person sees are the reader's.
+  why=$( { [ -n "$gf" ] && echo "a gate file"
+    grep -qE '(^|/)([^/]*\.lockb?|[^/]*-lock\.(json|yaml)|npm-shrinkwrap\.json|go\.sum|[^/]*\.lockfile)$' <<<"$files" && echo "a lockfile"
+    grep -qE '(^|/)(package\.json|deno\.jsonc?|Cargo\.toml|go\.mod|pyproject\.toml|Pipfile|requirements[^/]*\.txt|Gemfile|composer\.json)$' <<<"$files" && echo "a manifest"
+    grep -qE '^\.github/(workflows|actions)/' <<<"$files" && echo "a workflow"
+    [ "$nf" -le 5 ] || echo "$nf files"; } | paste -sd, | sed 's/,/, /g')
+  [ -z "$why" ] && { echo "QUICK: within bounds"; exit 0; }
+  echo "QUICK: past the bounds: $why"; exit 3;;
 watch-merge)
   need gh; N=${1:-}; PIN=${2:-}; LANE=${3:-}; REPORT=${4:-}; ARCH=${5:-${3:-}}
   e=$(merge_arg_err "$N" "$PIN" "$LANE" "$REPORT" "$ARCH"); [ -z "$e" ] || { echo "REFUSED: $e"; exit 4; }
