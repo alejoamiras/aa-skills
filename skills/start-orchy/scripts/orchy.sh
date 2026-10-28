@@ -896,10 +896,12 @@ scan)
   [ -n "$add" ] && echo "$add" | cut -c1-200 | sed 's/^/  ADDED: /'
   [ -n "$leak" ] && echo "$leak" | cut -c1-200 | sed 's/^/  LEAK: /'
   [ "$quick" = 1 ] || exit 0
-  # the bounds a script can see; one surface, persisted shapes and what a person sees are the reader's. A dependency moves a lockfile.
-  nf=$(echo "$files" | grep -c .)
+  # the bounds a script can see; one surface, persisted shapes and what a person sees are the reader's. A manifest holds the
+  # dependencies and the scripts the gates run. Names are counted as JSON strings: one with a newline is still one file.
+  nf=$(jq '[.files[] | .filename, (.previous_filename // empty)] | unique | length' <<<"$cj")
   why=$( { [ -n "$gf" ] && echo "a gate file"
-    grep -qE '(^|/)(bun\.lockb?|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|go\.sum|poetry\.lock|uv\.lock|Gemfile\.lock|composer\.lock)$' <<<"$files" && echo "a lockfile"
+    grep -qE '(^|/)([^/]*\.lockb?|[^/]*-lock\.(json|yaml)|npm-shrinkwrap\.json|go\.sum|[^/]*\.lockfile)$' <<<"$files" && echo "a lockfile"
+    grep -qE '(^|/)(package\.json|deno\.jsonc?|Cargo\.toml|go\.mod|pyproject\.toml|Pipfile|requirements[^/]*\.txt|Gemfile|composer\.json)$' <<<"$files" && echo "a manifest"
     grep -qE '^\.github/(workflows|actions)/' <<<"$files" && echo "a workflow"
     [ "$nf" -le 5 ] || echo "$nf files"; } | paste -sd, | sed 's/,/, /g')
   [ -z "$why" ] && { echo "QUICK: within bounds"; exit 0; }

@@ -212,8 +212,9 @@ o=$("$ORCHY" scan 9 "$SHA" || true); grep -q '^SCAN FAILED: #9 is more than one 
 # scan --quick: past a quick lane's bounds is exit 3; a two-file change is within them
 qs() { cmpfix "$SHA" "fix: q" "$@"; mkpr "$SHA"; rc=0; o=$("$ORCHY" scan 9 "$SHA" --quick) || rc=$?; }
 qs src/a.ts src/a.test.ts; [ "$rc" = 0 ] && [ "$(tail -n 1 <<<"$o")" = 'QUICK: within bounds' ] || fail "a two-file change (exit $rc): $o"
-for c in "biome.json|a gate file" "bun.lock|a lockfile" "src/1.ts src/2.ts src/3.ts src/4.ts src/5.ts src/6.ts|6 files"; do read -ra fs <<<"${c%%|*}"; qs "${fs[@]}"
-  [ "$rc" = 3 ] && [ "$(tail -n 1 <<<"$o")" = "QUICK: past the bounds: ${c#*|}" ] || fail "scan --quick on ${c%%|*} (exit $rc): $o"; done
+for c in "biome.json|a gate file" "bun.lock|a lockfile" "Pipfile.lock|a lockfile" "package.json|a manifest" "src/1.ts src/2.ts src/3.ts src/4.ts src/5.ts src/6.ts|6 files"; do
+  read -ra fs <<<"${c%%|*}"; qs "${fs[@]}"; [ "$rc" = 3 ] && [ "$(tail -n 1 <<<"$o")" = "QUICK: past the bounds: ${c#*|}" ] || fail "scan --quick on ${c%%|*} (exit $rc): $o"; done
+qs src/a.ts src/b.ts src/c.ts src/d.ts src/e.ts $'src/a.ts\nsrc/b.ts'; [ "$rc" = 3 ] && [ "$(tail -n 1 <<<"$o")" = 'QUICK: past the bounds: 6 files' ] || fail "a name with a newline hid a file (exit $rc): $o"
 cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak"; jq '.scan.gate_files = "biome\\.json"' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"
 qs .github/workflows/ci.yml; cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"
 [ "$rc" = 3 ] && [ "$(tail -n 1 <<<"$o")" = 'QUICK: past the bounds: a workflow' ] || fail "a workflow outside gate_files (exit $rc): $o"
