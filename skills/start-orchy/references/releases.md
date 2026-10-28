@@ -19,7 +19,7 @@ The table goes to the owner wherever the derivation ran (the bootstrap report, o
 | dispatch | `dispatch <.github/workflows/name.yml> <ref> <sha40> [<input>=<value> …]` | The ref is the trunk, a `merge.branches` base or a tag, and its head is the sha. Inputs are sorted by name, each named once, and sent as strings |
 | tag | `tag <name> <sha40>` | `release.tags` is known and no `creation: restricted` pattern matches the name (those tags are the release tool's); the tag does not exist; the sha is on the trunk or a `merge.branches` base. Tags are lightweight |
 
-`act … --check` runs the checks and calls nothing. A refusal is `refused: <rule>` (exit 1). A call GitHub refused (an HTTP 4xx) still spends its act. Any other failure, a timeout included, prints `AMBIGUOUS` (exit 6): check by hand whether it happened, and ask the owner for an OK only when it did not.
+`act … --check` runs the checks and calls nothing; with `--lane`, `--ok` or `--grant` it checks that authority too, and an approve, a dispatch or a tag also reads the holds that would refuse its call. A refusal is `refused: <rule>` (exit 1). A call GitHub refused (an HTTP 4xx) still spends its act. Any other failure, a timeout included, prints `AMBIGUOUS` (exit 6): check by hand whether it happened, and ask the owner for an OK only when it did not.
 
 ## Authorities
 
@@ -36,6 +36,10 @@ The `used:` row is written before the call, under the ledger lock and after the 
 A go comes from the owner's request or one yes to a proposal. A per-act OK (a PR no lead opened, a retry) and a version outside the go are asked one at a time, in one line that names the PR or run, so the reply cannot cover two. The reply becomes `ask add`, `ask public` and `ask ok askN <act> -- <the words>`. A "no" is `ask said` with the words, then `ask note askN "answered: no"`.
 
 **The version rule.** When the go names a version or a bump, a release that differs waits for the owner's word; when it names none, only a major bump waits. CI cannot judge a version.
+
+## Goals
+
+A goal's go is recorded on the open goal ask, and it reaches the release lane the goal starts: the go survives one move, from open into that lane, so `ask lane askN <slug> release` after `answered: ready` lets `act … --lane <slug>` find it. Any other move ends it, as for every go. The version rule holds: a go that names no version waits only on a major bump.
 
 ## Release lanes
 

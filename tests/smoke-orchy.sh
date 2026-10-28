@@ -534,7 +534,7 @@ o=$(ORCHY_HOME="$HR" "$ORCHY" receipt r); grep -qF "asks done 1 ($r)" <<<"$o" ||
 fp() { find "$HR" "$T/asks" -printf '%p %s %T@ %m\n' | sort; md5sum < "$MOCK_DIR/gh.log"; }
 mkdir -p "$HR/runbooks"; printf -- '- [x] Publish the build\n- [ ] Announce it (proof: release v1.0.0)\n' > "$HR/runbooks/rb-r.md"
 b=$(fp); R() { ORCHY_HOME="$HR" "$ORCHY" "$@" >/dev/null || fail "reader $*"; }
-R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline; R waiting list; R waiting list --json; R accounts; R accounts --json; R grants; R grants --json; R hold list; R hold list --json; R runbook show rb-r
+R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline; R waiting list; R waiting list --json; R accounts; R accounts --json; R grants; R grants --json; R hold list; R hold list --json; R runbook show rb-r; R goals; R goals --json
 [ "$(fp)" = "$b" ] || fail "a reader changed the home, the ledger or gh.log: $(diff <(echo "$b") <(fp))"
 "$ORCHY" state > "$T/st.json"; jq -e --arg g "$g" '.asks | any(.id == $g and .lane == "gone-1" and .has_public) and all(has("text") | not)' "$T/st.json" >/dev/null || fail "state asks: $(jq -c .asks "$T/st.json")"
 grep -q 'Ana' "$T/st.json" && fail "state printed an ask's text"
@@ -545,6 +545,11 @@ lt() { printf 'You are a subagent.\n%s\n' "$1" > "$ORCHY_HOME/prompts/x-lt.md"; 
 o=$(lt "$l: Show a greeting"); grep -q 'not its stored public wording' <<<"$o" || fail "launch with a reworded ask line: $o"
 o=$(lt "$l: Show a greeting on the home page, a vulnerability fix"); grep -q 'SENSITIVE' <<<"$o" || fail "launch with a sensitive ask line: $o"
 o=$(lt "$r: Receipt requirement"); grep -q "$r is not laned to x" <<<"$o" || fail "launch with another lane's ask: $o"
+# a goal's line reaches a lead only once the orchestrator has written answered: ready and laned it
+gq=$(A add "the beta list"); A public "$gq" "Beta: the onboarding fixes" >/dev/null; A goal "$gq" beta >/dev/null || fail "ask goal"
+o=$(lt "$gq: Beta: the onboarding fixes"); grep -q "$gq is waiting: goal beta" <<<"$o" || fail "launch with a held goal's line: $o"
+A note "$gq" "answered: ready" >/dev/null && A lane "$gq" x "a repo change" >/dev/null || fail "lane the ready goal"
+o=$(lt "$gq: Beta: the onboarding fixes"); grep -q '^x-lt launched on acct-a' <<<"$o" || fail "launch with a ready goal's line: $o"; "$ORCHY" stop x-lt >/dev/null
 o=$(lt "Context: on the home page because my landlord asked twice"); grep -q 'copies the owner' <<<"$o" || fail "launch with a copied sentence: $o"
 printf 'Lane x for acct-a\n' > "$ORCHY_HOME/briefs/x.md"; o=$(lt "$l: Show a greeting on the home page"); grep -q 'banned text' <<<"$o" || fail "launch with a banned lane brief: $o"; rm "$ORCHY_HOME/briefs/x.md"
 o=$(lt "$l: Show a greeting on the home page"); grep -qE 'refused: (the|.* is not laned|.*copies)|SENSITIVE|LEAK' <<<"$o" && fail "launch refused a clean ask line: $o"

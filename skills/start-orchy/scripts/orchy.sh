@@ -24,8 +24,13 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   ask ok <id> <act> -- <words> | grant <id> <scope> -- <words>   the owner's OK for one act; a standing grant (one scope in v1:
 #                                merge dependabot <trunk> <method>); the words are the owner's, verbatim, and stay in the ledger
 #   ask revoke <id> [<act>|<scope>]   end a go (bare), an OK or a grant
+#   ask goal <id> <name> [by|on <YYYY-MM-DD>] [then release]   make an open ask a goal: milestone <name>, created with its
+#                                title only, and the ask held as 'waiting: goal <name>'; the date stays in the ledger
+#   goals [--json]               each goal: its ask, state, milestone counts, runbook goal-<name>, days left and whether it is
+#                                ready (orchy.goals/1 with --json)
 #   grants [--json]              the live standing grants (orchy.grants/1 with --json)
-#   act <act> --lane <slug> | --ok <id> | --grant | --check   an irreversible act on an authority (or only its checks); acts are
+#   act <act> (--lane <slug> | --ok <id> | --grant) [--check] | --check   an irreversible act on an authority; --check runs
+#                                its checks, and the authority's when one is named, and calls nothing; acts are
 #                                merge <pr> <sha> <base> <method>, approve <run> <attempt> <env>, dispatch <workflow> <ref> <sha>
 #                                [<input>=<value>...], tag <name> <sha>; a merge arms watch-merge --act, the others call at once
 #   ask close-lane <slug>        after teardown: each ask laned there is done (delivered, with its PR) or reopened, from the reports' ASKS: lines
@@ -94,7 +99,7 @@ for d in "${ds[@]}"; do [ ! -L "$d" ] && [ -O "$d" ] || { echo "orchy: $d must b
 f=$({ find "$H" -maxdepth 2 ! -user "$EUID"; [ $under = 0 ] || find "$CAP" -maxdepth 1 ! -user "$EUID"; } 2>/dev/null | head -1)
 [ -z "$f" ] || { echo "orchy: $f belongs to another user; refusing a home someone else could write" >&2; exit 1; }
 # Readers keep the ownership checks but create nothing, so a poller never changes the home it reads.
-ro=0; case "$cmd" in state|config|local|session-id|receipt|accounts|grants) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting|hold) case "${1:-}" in list) ro=1;; esac;; runbook) case "${1:-}" in show) ro=1;; esac;; esac
+ro=0; case "$cmd" in state|config|local|session-id|receipt|accounts|grants|goals) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting|hold) case "${1:-}" in list) ro=1;; esac;; runbook) case "${1:-}" in show) ro=1;; esac;; esac
 if [ $ro = 0 ]; then
   mkdir -p "$H"/{briefs,prompts,reports,leads,watch,wt,scratch,inbox,page/shots,page/build}
   chmod 700 "$H"; [ $under = 1 ] && chmod 700 "$CAP"
@@ -380,7 +385,8 @@ FOLD='reduce (inputs | fromjson? | select(type == "object" and (.id | type) == "
 fold() { if [ -f "$LEDGER" ]; then jq -Rn "$FOLD" "$LEDGER"; else echo '{}'; fi; }
 ask_get() { fold | jq -c --arg id "$1" '.[$id] // empty'; }
 ask_moves() { case "$1>$2" in open\>lane|open\>done|open\>dropped|open\>filed|lane\>done|lane\>open|lane\>dropped|lane\>filed|done\>open|dropped\>open) return 0;; esac; return 1; }
-ASK_HOLD='[.notes[] | select(test("^(waiting:|answered:)") or . == "wording ok")][-1] // "" | select(startswith("waiting:"))'
+ASK_CTL='[.notes[] | select(test("^(waiting:|answered:)") or . == "wording ok")][-1] // ""'   # the latest control note
+ASK_HOLD="$ASK_CTL"' | select(startswith("waiting:"))'
 ask_ready() { # ask_ready <fold-json> <id>: a handoff needs the stored restatement and no open owner question
   local w; [ -n "$(jq -r '.public // empty' <<<"$1")" ] || { echo "refused: $2 has no public wording; ask public $2 first" >&2; return 1; }
   # only control notes decide a hold, so an ordinary note never clears one
@@ -476,6 +482,23 @@ print(json.dumps(steps))
 PY
 }
 rb_line() { jq -r '.[] | "- [\(if .[0] then "x" else " " end)] \(.[1])\(if .[2] != "" then " (proof: \(.[2]) \(.[3]))" else "" end)"'; }
+date_in() { # date_in <text> <YYYY-MM-DD>...: whether the text writes one of the dates in a common form
+  python3 -I - "$@" <<'PY2'
+import re, sys
+text, M = sys.argv[1].lower(), ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]
+for d in sys.argv[2:]:
+    y, m, dd = d.split("-"); mi, di = int(m), int(dd)
+    mon, day = f"(?:{M[mi - 1]}|{M[mi - 1][:3]}\\.?)", f"0?{di}(?:st|nd|rd|th)?"
+    # without its year only a slashed form counts: a dotted or dashed one is also a version or a range (1.15, 1-15)
+    forms = [f"{y}{m}{dd}", f"(?<!\\d){y}[-/.]0?{mi}[-/.]0?{di}(?!\\d)", f"(?<!\\d)0?{di}[-/.]0?{mi}[-/.]{y}(?!\\d)", f"(?<!\\d)0?{mi}[-/.]0?{di}[-/.]{y}(?!\\d)",
+             f"(?<!\\d)0?{mi}/0?{di}(?!\\d)", f"(?<!\\d)0?{di}/0?{mi}(?!\\d)", f"\\b{mon}[\\s,-]*{day}\\b", f"\\b{day}(?:\\s+of)?[\\s,-]*{mon}\\b"]
+    if any(re.search(f, text) for f in forms): sys.exit(0)
+sys.exit(1)
+PY2
+}
+GOAL_DATES='[.notes[] | select(startswith("goal: ")) | capture(" (by|on) (?<d>[0-9]{4}-[0-9]{2}-[0-9]{2})").d] | unique | join(" ")'
+GOAL_LINE='"goal \(.name) " + (.milestone | if . == null then "milestones unread" elif . == "missing" then "milestone missing"
+  else "\(.closed)/\(.open + .closed)" end) + (.runbook | if . == null then "" elif type == "object" then " runbook \(.done)/\(.steps)" else " runbook unreadable" end)'
 case "$cmd" in
 config) cfg "$1";;
 local) lcl "$1";;
@@ -554,9 +577,9 @@ check-public)
 ask)
   sub=${1:-}; shift || true
   case "$sub" in list|show) ledger_ro || exit 1;; *) need flock; ledger_ok || exit 1;; esac
-  case "$sub" in add|list|close-lane) ;; public|said|note|done|drop|reopen|show|lane|file|go|ok|grant|revoke)
+  case "$sub" in add|list|close-lane) ;; public|said|note|done|drop|reopen|show|lane|file|go|ok|grant|revoke|goal)
     [[ "${1:-}" =~ ^ask[0-9]+$ ]] || { echo "usage: ask $sub <askN> ..." >&2; exit 1; }; id=$1; shift;;
-    *) echo "usage: ask add|public|said|note|lane|done|drop|reopen|list|show|file|go|ok|grant|revoke ... (orchy.sh help)" >&2; exit 1;; esac
+    *) echo "usage: ask add|public|said|note|lane|done|drop|reopen|list|show|file|go|ok|grant|revoke|goal ... (orchy.sh help)" >&2; exit 1;; esac
   row() { jq -nc --arg id "$id" --arg at "$(now)" "$@"; }
   case "$sub" in
   add)
@@ -569,6 +592,8 @@ ask)
     tf=$(mktemp "$H/scratch/public.XXXXXX"); printf '%s\n' "$t" > "$tf"; "$0" check-public "$tf"; rc=$?; rm -f "$tf"; [ "$rc" = 0 ] || exit 1
     ask_public() { local a st; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
       st=$(jq -r .state <<<"$a"); case "$st" in open|lane) ;; *) echo "refused: $id is $st" >&2; return 1;; esac
+      read -ra ds <<<"$(jq -r "$GOAL_DATES" <<<"$a")"
+      [ ${#ds[@]} = 0 ] || ! date_in "$t" "${ds[@]}" || { echo "refused: $id is a goal, and its public text never carries the goal's date" >&2; return 1; }
       # the owner's OK covered the wording they saw, never its replacement; one row, so no reader sees it unheld
       if jq -e 'any(.notes[]; startswith("waiting: wording"))' <<<"$a" >/dev/null; then
         append_row "$(row --arg t "$t" '{id: $id, at: $at, public: $t, note: "waiting: wording (changed)"}')" || return 1; echo "$id public wording stored; it needs the owner's OK again"
@@ -595,6 +620,9 @@ ask)
     ask_lane() { local a st; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
       st=$(jq -r .state <<<"$a"); ask_moves "$st" lane || { echo "refused: $id is $st; lane does not apply" >&2; return 1; }
       ask_ready "$a" "$id" || return 1
+      # a goal leaves on the orchestrator's 'answered: ready' alone, never on the answer to a question that replaced its hold
+      if jq -e 'any(.notes[]; startswith("goal: "))' <<<"$a" >/dev/null && [ "$(jq -r "$ASK_CTL" <<<"$a")" != "answered: ready" ]; then
+        echo "refused: $id is a goal; it takes a lane only after 'answered: ready'" >&2; return 1; fi
       if lane_reported "$s" && [ ! -d "$WT_ROOT/$s" ]; then echo "refused: lane $s is closed (its reports remain); name a new lane" >&2; return 1; fi
       append_row "$(row --arg s "$s" --arg t "$t" '{id: $id, at: $at, state: "lane", lane: $s, note: $t}')" && echo "$id lane $s"; }
     with_ledger ask_lane;;
@@ -661,6 +689,43 @@ ask)
       case "$sub/$w" in */ | grant/* | */"waiting: goal"*) ;; *) append_row "$(row --arg t "answered: $sub" '{id: $id, at: $at, note: $t}')" || return 1;; esac
       echo "$id $n recorded"; }
     with_ledger ask_auth;;
+  goal)
+    nm=${1:-}; shift || true; dk=; dt=; th=
+    [[ "$nm" =~ ^[a-z0-9][a-z0-9-]{0,26}$ ]] || { echo "usage: ask goal <askN> <name> [by|on <YYYY-MM-DD>] [then release]; a name is [a-z0-9-], at most 27, so runbook goal-<name> is a slug" >&2; exit 1; }
+    while [ $# -gt 0 ]; do case "$1" in
+      by|on) [ -z "$dk" ] && [ $# -ge 2 ] || { echo "refused: a goal has at most one date, by or on <YYYY-MM-DD>" >&2; exit 1; }; dk=$1; dt=$2; shift 2;;
+      then) [ -z "$th" ] && [ "${2:-}" = release ] || { echo "refused: the only end action is 'then release'" >&2; exit 1; }; th=release; shift 2;;
+      *) echo "refused: ask goal takes [by|on <YYYY-MM-DD>] [then release], not '$1'" >&2; exit 1;; esac; done
+    [ -z "$dk" ] || { [[ "$dt" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && python3 -I -c 'import datetime, sys; datetime.date.fromisoformat(sys.argv[1])' "$dt" 2>/dev/null; } \
+      || { echo "refused: $dt is not a calendar date (YYYY-MM-DD)" >&2; exit 1; }
+    tf=$(mktemp "$H/scratch/goal.XXXXXX"); printf '%s\n' "$nm" > "$tf"; "$0" check-public "$tf" >/dev/null; rc=$?; rm -f "$tf"
+    [ "$rc" = 0 ] || { echo "refused: the goal's name fails check-public" >&2; exit 1; }
+    need gh; need timeout; gn="goal: $nm${dk:+ $dk $dt}${th:+ then $th}"
+    ask_goal() { local a st w p ms nh ds; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
+      st=$(jq -r .state <<<"$a"); [ "$st" = open ] || { echo "refused: $id is $st; a goal is an open ask" >&2; return 1; }
+      # a goal's hold would replace another, which answers nothing
+      w=$(jq -r "$ASK_HOLD" <<<"$a"); case "$w" in "" | "waiting: goal "*) ;; *) echo "refused: $id is $w; settle that first" >&2; return 1;; esac
+      # every date this ask's goals have named, so a goal set again cannot publish an earlier one
+      read -ra ds <<<"$(jq -r "$GOAL_DATES" <<<"$a")"; [ -z "$dt" ] || ds+=("$dt"); p=$(jq -r '.public // empty' <<<"$a")
+      if [ ${#ds[@]} -gt 0 ]; then
+        ! date_in "$nm" "${ds[@]}" || { echo "refused: the goal's name carries its date, and the name is public" >&2; return 1; }
+        [ -z "$p" ] || ! date_in "$p" "${ds[@]}" || { echo "refused: $id's public text carries the goal's date; restate it first" >&2; return 1; }
+      fi
+      ms=$(timeout 30 gh api "repos/$REPO/milestones?state=all&per_page=100") \
+        && jq -e 'type == "array" and all(.[]; type == "object" and (.title | type) == "string")' <<<"$ms" >/dev/null \
+        || { echo "refused: the milestones could not be read; nothing recorded" >&2; return 1; }
+      [ "$(jq length <<<"$ms")" -lt 100 ] || { echo "refused: 100 milestones or more, past one page; nothing recorded" >&2; return 1; }
+      nh=$(jq --arg t "$nm" 'map(select(.title == $t)) | length' <<<"$ms") || { echo "refused: the milestones could not be read; nothing recorded" >&2; return 1; }
+      case $nh in
+        # the title only: a due date would publish the goal's date
+        0) jq -n --arg t "$nm" '{title: $t}' | timeout 30 gh api "repos/$REPO/milestones" -X POST --input - >/dev/null \
+             || { echo "refused: creating milestone $nm failed; nothing recorded, and a rerun finds it if GitHub made it" >&2; return 1; };;
+        1) ;;
+        *) echo "refused: $nh milestones are titled $nm; nothing recorded" >&2; return 1;; esac
+      # the hold first: a reader never sees the goal unheld
+      append_row "$(row --arg t "waiting: goal $nm" '{id: $id, at: $at, note: $t}')" && append_row "$(row --arg t "$gn" '{id: $id, at: $at, note: $t}')" \
+        && echo "$id $gn recorded; milestone $nm"; }
+    with_ledger ask_goal;;
   revoke)
     # only removes authority, so it checks the grammar and that the ask exists, whatever its state
     n="revoke:"; if [ $# -gt 0 ]; then xt=$(act_norm "$@" 2>/dev/null || scope_norm "$@" 2>/dev/null) || { echo "refused: revoke takes nothing (a go), an act or a scope" >&2; exit 1; }; n="revoke: $xt"; fi
@@ -706,6 +771,27 @@ ask)
       done; }
     with_ledger ask_close;;
   esac;;
+goals)
+  ledger_ro || exit 1
+  gs=$(ledger_rows | jq -c 'group_by(.id) | map(([.[] | select((.note // "") | startswith("goal: "))] | last) as $g | select($g != null)
+    | ($g.note | capture("^goal: (?<name>[a-z0-9-]+)(?: (?<kind>by|on) (?<date>[0-9]{4}-[0-9]{2}-[0-9]{2}))?(?: then (?<then>release))?$"))
+      + {ask: $g.id, state: ([.[] | select((.state | type) == "string")] | last | .state), hold: ({notes: [.[].note | strings]} | ['"$ASK_HOLD"'] | first // "")})') || exit 1
+  ms='[]'; [ "$gs" = '[]' ] || { need gh; need timeout
+    ms=$(timeout 30 gh api "repos/$REPO/milestones?state=all&per_page=100" 2>/dev/null) && jq -e 'type == "array" and length < 100 and all(.[]; type == "object" and (.title | type) == "string")' <<<"$ms" >/dev/null || ms=null; }
+  rb=$(for n in $(jq -r '.[].name' <<<"$gs"); do f="$RUNBOOKS/goal-$n.md"; [ -L "$RUNBOOKS" ] || [ -e "$f" ] || [ -L "$f" ] || continue
+      if [ ! -L "$RUNBOOKS" ] && [ -f "$f" ] && [ ! -L "$f" ] && j=$(rb_parse "$f" 2>/dev/null); then jq -c --arg n "$n" '{($n): {done: (map(select(.[0])) | length), steps: length}}' <<<"$j"
+      else jq -nc --arg n "$n" '{($n): "unreadable"}'; fi; done | jq -sc 'add // {}')
+  # a goal another question holds is never ready, or the tick's 'answered: ready' would answer that question for the owner
+  g=$(jq -c --argjson ms "$ms" --argjson rb "$rb" --arg today "$(date -u +%F)" '{schema: "orchy.goals/1", goals: map(. as $x
+    | ($ms | if . == null then null else map(select(.title == $x.name)) | if length == 0 then "missing" elif length > 1 then null
+        else .[0] | if [.open_issues, .closed_issues] | all(type == "number" and . >= 0 and . == floor) then {open: .open_issues, closed: .closed_issues}
+        else null end end end) as $m | ($rb[$x.name] // null) as $b
+    | $x + {milestone: $m, runbook: $b,
+       days: (if $x.date then ((($x.date + "T00:00:00Z" | fromdateiso8601) - ($today + "T00:00:00Z" | fromdateiso8601)) / 86400 | floor) else null end),
+       ready: ($x.state == "open" and ($x.hold | IN("", "waiting: goal \($x.name)")) and ($m | type) == "object" and $m.open == 0
+         and ($b == null or (($b | type) == "object" and $b.done == $b.steps)) and ($x.kind != "on" or $x.date <= $today))} | del(.hold))}' <<<"$gs") || exit 1
+  if [ "${1:-}" = --json ]; then echo "$g"
+  else jq -r 'if .goals == [] then "no goals" else .goals[] | '"$GOAL_LINE"' + (if .days != null then ", \(.days) days" else "" end) + (if .ready then ", ready" else "" end) end' <<<"$g"; fi;;
 grants)
   ledger_ro || exit 1
   g=$(ledger_rows | jq -c "$LIVE_JQ"'{schema: "orchy.grants/1", grants: live_grants}') || exit 1
@@ -996,7 +1082,9 @@ snapshot)
   echo "-- waiting"; "$0" waiting list 2>&1
   echo "-- grants"; "$0" grants 2>&1
   echo "-- holds"; "$0" hold list 2>&1
-  echo "-- runbooks"; for f in "$RUNBOOKS"/*.md; do [ -f "$f" ] || continue; b=$(basename "$f" .md); j=$(rb_parse "$f" 2>&1) || { echo "$b: $j"; continue; }
+  echo "-- goals"; g=$("$0" goals --json 2>/dev/null) && jq -r '.goals[] | '"$GOAL_LINE" <<<"$g" 2>/dev/null || echo "goals: unreadable (ORCHY goals)"
+  echo "-- runbooks"; [ ! -L "$RUNBOOKS" ] || echo "runbooks: $RUNBOOKS is a symlink; refusing"
+  [ -L "$RUNBOOKS" ] || for f in "$RUNBOOKS"/*.md; do [ -f "$f" ] || continue; b=$(basename "$f" .md); j=$(rb_parse "$f" 2>&1) || { echo "$b: $j"; continue; }
     jq -r --arg b "$b" '(map(select(.[0])) | length) as $k | select($k < length) | "\($b) \($k)/\(length)"' <<<"$j"; done
   # launch reads only the cached snapshot, so the tick refreshes it: a reading over 2 h old allows light leads only
   echo "-- headroom"; claude-usage refresh >/dev/null 2>&1; "$0" accounts 2>&1 | head -20;;
@@ -1326,13 +1414,14 @@ arm-merge)
   arm_watch "$delay" "${args[@]}" || exit 1
   echo "armed merge-$N pid $(cut -d' ' -f1 "$H/watch/merge-$N.pid") (delay ${delay}s) -> $H/watch/merge-$N.out";;
 act)
-  need gh; need timeout; how=""; who=""; aw=()
-  use() { echo "usage: act <merge|approve|dispatch|tag> <field>... (--lane <slug> | --ok <askN> | --grant | --check)" >&2; exit 1; }
+  need gh; need timeout; how=""; who=""; chk=""; aw=()
+  use() { echo "usage: act <merge|approve|dispatch|tag> <field>... (--lane <slug> | --ok <askN> | --grant) [--check] | --check" >&2; exit 1; }
   while [ $# -gt 0 ]; do case "$1" in
     --lane|--ok) [ -z "$how" ] && [ $# -ge 2 ] || use; how=${1#--}; who=$2; shift 2;;
-    --grant|--check) [ -z "$how" ] || use; how=${1#--}; shift;;
+    --grant) [ -z "$how" ] || use; how=grant; shift;;
+    --check) [ -z "$chk" ] || use; chk=1; shift;;
     *) aw+=("$1"); shift;; esac; done
-  [ -n "$how" ] || use
+  [ -n "$how" ] || { [ -n "$chk" ] || use; how=check; }
   X=$(act_norm "${aw[@]}") || exit 1; read -ra af <<<"$X"; kind=${af[0]}; ask=""; auth=""; lbl=""; lane=-
   no() { echo "refused: $*" >&2; exit 1; }
   case $how in
@@ -1369,7 +1458,7 @@ act)
       || no "#$N is none of the shapes a go merges (the promote, the release tool's PR, the lane's own PR, the back-sync); it needs a per-act OK";;
     grant) [ "$base" = "$TRUNK" ] && grant_pr_ok "$N" || no "#$N is not Dependabot's own PR into $TRUNK with every commit Dependabot's";;
     esac
-    [ "$how" != check ] || { echo "checked: $X"; exit 0; }
+    [ -z "$chk" ] || { echo "checked: $X${lbl:+ ($lbl $ask)}"; exit 0; }
     arm_watch 0 "$N" "$sha" --act "$base" "$m" "$auth" "$ask" "$lane" || exit 1
     echo "armed merge-$N ($lbl $ask)";;
   approve)
@@ -1393,7 +1482,7 @@ act)
       done < <(ledger_rows | jq -r --arg id "$ask" 'map(select(.id == $id)) | (map(.note == "go") | rindex(true) // -1) as $g | .[$g + 1:][]
         | select((.note // "") | test("^used: (merge|dispatch) ")) | [(.at | fromdateiso8601), (.note | ltrimstr("used: ") | split(" ") | .[0:4][])] | @tsv' 2>/dev/null)
       [ "$p" = yes ] || no "run $run is no run this go produced; it needs a per-act OK"; fi
-    [ "$how" != check ] || { echo "checked: $X ($rwf, $rev on $rbr)"; exit 0; }
+    [ -z "$chk" ] || { hold_guard; echo "checked: $X ($rwf, $rev on $rbr)${lbl:+ ($lbl $ask)}"; exit 0; }
     call "repos/$REPO/actions/runs/$run/pending_deployments" "$(jq -nc --argjson id "$eid" '{environment_ids: [$id], state: "approved", comment: "Approved on the repository owner'"'"'s word."}')"
     echo "approved run $run attempt $att for $env: $rwf, $rev on $rbr ($lbl $ask)";;
   dispatch)
@@ -1405,7 +1494,7 @@ act)
     [ "$how" != lane ] || jq -e --arg p "$wf" '(.release.workflows // []) | any(.[]; .path == $p
         and (((.environments // []) | length > 0) or any((.signals // [])[]; IN("id-token", "npm publish", "gh release"))))' "$CFG" >/dev/null \
       || no "the profile does not mark $wf as publishing; it needs a per-act OK"
-    [ "$how" != check ] || { echo "checked: $X"; exit 0; }
+    [ -z "$chk" ] || { hold_guard; echo "checked: $X${lbl:+ ($lbl $ask)}"; exit 0; }
     call "repos/$REPO/actions/workflows/$(basename "$wf")/dispatches" \
       "$(jq -nc --arg r "$r" '{ref: $r, inputs: ($ARGS.positional | map(split("=") | {(.[0]): .[1]}) | add // {}), return_run_details: true}' --args "${af[@]:4}")"
     rid=$(jq -r '.workflow_run_id // empty' <<<"$CALL_OUT" 2>/dev/null); [[ "$rid" =~ ^[0-9]+$ ]] || rid=unknown
@@ -1414,12 +1503,14 @@ act)
     t=${af[1]}; sha=${af[2]}
     tags=$(jq -c '.release.tags // null' "$CFG"); [ "$tags" != null ] || no "release.tags is unknown, so creating $t is the owner's step"
     while IFS= read -r pat; do
-      # shellcheck disable=SC2053  # a ruleset pattern is a glob
+      # GitHub matches with Ruby's fnmatch, whose **/ may match no directory; bash cannot, and reads braces and parentheses its own way
+      case $pat in *'**/'* | *'{'* | *'('*) no "$pat is a restricted pattern this check cannot evaluate; the tag is the owner's step";; esac
+      # shellcheck disable=SC2053  # a glob, where bash's * and ? also cross /, which only refuses more
       [ -n "$pat" ] && [[ "$t" == $pat ]] && no "$t matches $pat, whose tags only the release tool creates; the step is the owner's"
     done < <(jq -r '.[] | select(.creation == "restricted") | .pattern' <<<"$tags")
     case $(tag_state "$t") in no) ;; yes) no "tag $t exists";; *) no "cannot read tag $t";; esac
     reach "$sha" || no "${sha:0:8} is on neither the trunk nor a merge.branches base"
-    [ "$how" != check ] || { echo "checked: $X"; exit 0; }
+    [ -z "$chk" ] || { hold_guard; echo "checked: $X${lbl:+ ($lbl $ask)}"; exit 0; }
     call "repos/$REPO/git/refs" "$(jq -nc --arg r "refs/tags/$t" --arg s "$sha" '{ref: $r, sha: $s}')"
     echo "tagged $t at ${sha:0:8} ($lbl $ask)";;
   esac;;
