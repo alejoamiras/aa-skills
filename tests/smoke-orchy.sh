@@ -62,7 +62,7 @@ grep -q -- "--settings $ORCHY_HOME/leads/x-plan.settings.json --add-dir $ORCHY_H
 jq -e '.hooks.PostToolUse[0].hooks[0].command | test("inbox-hook.sh .*/inbox/x-plan.jsonl$")' "$ORCHY_HOME/leads/x-plan.settings.json" >/dev/null || fail "hook settings"
 grep -q '"type":"orchy_invocation","key":"x-plan","lane":"x"' "$ORCHY_HOME/leads/x-plan.log" || fail "no invocation marker"
 if grep -q '^claude-usage:' "$ORCHY_HOME/leads/x-plan.log" || ! grep -q '^claude-usage:' "$ORCHY_HOME/leads/x-plan.err"; then fail "the banner is not in .err alone"; fi
-for f in "$ORCHY_HOME"/leads/*.started; do read -r p _ < "$f"; for fd in /proc/"$p"/fd/*; do case "$(readlink "$fd")" in *spawn.lock) fail "lead $p holds the spawn lock";; esac; done; done
+for f in "$ORCHY_HOME"/leads/*.started; do read -r p _ < "$f"; for fd in /proc/"$p"/fd/*; do case "$(readlink "$fd")" in *spawn.lock|*holds.lock) fail "lead $p holds $(readlink "$fd")";; esac; done; done
 tmp=$(mktemp)
 jq '.leads.permission_mode="bypass"' "$ORCHY_HOME/orchy.json" > "$tmp" && cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak" && mv "$tmp" "$ORCHY_HOME/orchy.json"
 cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/x-b1.md"; mkdir -p "$ORCHY_HOME/page/shots-plan"; echo '[]' > "$ORCHY_HOME/page/shots-plan/x-b1.json"
@@ -243,8 +243,17 @@ jq -n --arg h 4444444444444444444444444444444444444444 '[{number:5,headRefOid:$h
 o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1 || true); grep -q 'not the head of a PR merged' <<<"$o" || fail "teardown removed a worktree whose HEAD is not a merged PR head: $o"
 [ -d .claude/worktrees/y ] || fail "worktree y was removed"
 jq -n --arg h "$HY" '[{number:5,headRefOid:$h,baseRefName:"dev"}]' > "$MOCK_DIR/merged.json"
+# a removal that fails keeps the lane's hold; each success path ends it, and no other hold
+"$ORCHY" hold add lane:y trunk >/dev/null || fail "hold add lane:y"; "$ORCHY" hold add lane:z trunk >/dev/null || fail "hold add lane:z"
+git worktree lock .claude/worktrees/y; o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1 || true); git worktree unlock .claude/worktrees/y
+grep -q 'hand removal failed' <<<"$o" && [ -d .claude/worktrees/y ] && "$ORCHY" hold list | grep -q '^lane:y ' || fail "a failed hand removal: $o"
 o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1); grep -q 'hand-removed' <<<"$o" || fail "teardown did not remove an exact merged head: $o"
 [ ! -d .claude/worktrees/y ] || fail "worktree y still there"
+"$ORCHY" hold list --json | jq -e '[.holds[].ref] == ["lane:z"]' >/dev/null || fail "the hand removal's holds: $("$ORCHY" hold list)"
+"$ORCHY" hold add lane:y trunk >/dev/null; "$ORCHY" teardown y >/dev/null || fail "teardown of a lane with no worktree"
+"$ORCHY" wt-new y2 >/dev/null || fail "wt-new y2"; "$ORCHY" hold add lane:y2 trunk >/dev/null; "$ORCHY" teardown y2 >/dev/null || fail "teardown y2"
+"$ORCHY" hold list --json | jq -e '[.holds[].ref] == ["lane:z"]' >/dev/null || fail "teardown's holds: $("$ORCHY" hold list)"
+"$ORCHY" hold "done" lane:z >/dev/null; git worktree remove --force .claude/worktrees/y2; git branch -q -D worktree-y2
 # disarm stops a live watcher (its whole process group); lock refuses while another live holder has it and replaces a stale one
 mkpr "$SHA"; "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 30 >/dev/null || fail "arm-merge for disarm"
 # another home's watcher on the same PR number is never this home's stray
@@ -502,7 +511,7 @@ o=$(ORCHY_HOME="$HR" "$ORCHY" receipt r); grep -qF "asks done 1 ($r)" <<<"$o" ||
 # readers write nothing: the home, the ledger and gh's log stay byte-for-byte; the state names asks by id and flags only
 fp() { find "$HR" "$T/asks" -printf '%p %s %T@ %m\n' | sort; md5sum < "$MOCK_DIR/gh.log"; }
 b=$(fp); R() { ORCHY_HOME="$HR" "$ORCHY" "$@" >/dev/null || fail "reader $*"; }
-R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline; R waiting list; R waiting list --json; R accounts; R accounts --json; R grants; R grants --json
+R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline; R waiting list; R waiting list --json; R accounts; R accounts --json; R grants; R grants --json; R hold list; R hold list --json
 [ "$(fp)" = "$b" ] || fail "a reader changed the home, the ledger or gh.log: $(diff <(echo "$b") <(fp))"
 "$ORCHY" state > "$T/st.json"; jq -e --arg g "$g" '.asks | any(.id == $g and .lane == "gone-1" and .has_public) and all(has("text") | not)' "$T/st.json" >/dev/null || fail "state asks: $(jq -c .asks "$T/st.json")"
 grep -q 'Ana' "$T/st.json" && fail "state printed an ask's text"
@@ -675,4 +684,5 @@ for f in "$T"/cap/*/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/nul
 wait "$pgp" || { tail -n 20 "$T/page.log"; fail "page smoke"; }; pgp=
 # no project names, home paths or roster names anywhere in the skills
 if grep -rnE 'nulo|Nulo|program-2|program2|/mnt/user-data|/Users/|martu|proton|icloud|GzKw77' "$K" "$HERE/skills/pause-orchy" --include='*.md' --include='*.sh' --include='*.py' --include='*.js' --include='*.ts' --include='*.json' --include='*.cjs' | grep -v 'page/fixtures' ; then fail "project-specific text in the skill"; fi
+[ ! -e "$MOCK_DIR/locked.log" ] || fail "a call held holds.lock: $(cat "$MOCK_DIR/locked.log")"
 echo "smoke-orchy: ok"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke for start-orchy's release acts: the owner's go, OKs and grants in the ask ledger, and act with watch-merge --act, against
+# Smoke for start-orchy's release acts: the owner's go, OKs and grants in the ask ledger, act with watch-merge --act, and holds, against
 # a throwaway home with a mocked gh. Every PR, run and tag is a fixture; nothing reaches GitHub.
 set -eEuo pipefail
 trap 'echo "FAIL: line $LINENO: $BASH_COMMAND" >&2' ERR
@@ -221,6 +221,48 @@ o=$(W merge 71 "$S12" dev squash --grant || true); grep -q 'no live grant' <<<"$
 A said "$pg" "words on another row" >/dev/null; o=$(W merge 71 "$S12" dev squash --grant || true); grep -q 'no live grant' <<<"$o" || fail "a planted grant beside other said rows: $o"
 po=$(A add "a planted ok"); A public "$po" "A planted OK" >/dev/null; A said "$po" "the owner said something else" >/dev/null; plant "$po" "ok: merge 71 $S12 dev squash"
 o=$(W merge 71 "$S12" dev squash --ok "$po" || true); grep -q "no live OK on $po" <<<"$o" || fail "a planted ok row beside other said rows: $o"
+
+# --- holds: an all hold stops new work and an act's call, a trunk hold only merges into the trunk; a call in flight ends first
+o=$("$ORCHY" hold list); [ "$o" = "no holds" ] && [ ! -e "$ORCHY_HOME/holds.json" ] || fail "hold list: $o"
+for c in "lane:../x trunk" "other:peer-Q all" "other:peer-q some"; do read -ra w <<<"$c"
+  o=$("$ORCHY" hold add "${w[@]}" 2>&1 || true); grep -q '^refused' <<<"$o" || fail "hold add $c: $o"; done
+echo '{"schema": "orchy.holds/1", "holds": [{"ref": "other:peer-q", "scope": "all"}]}' > "$ORCHY_HOME/holds.json"; echo '{"schema": "orchy.holds/1", "holds": []}' > "$T/holds.other"
+for f in malformed symlink; do [ "$f" = symlink ] && ln -sf "$T/holds.other" "$ORCHY_HOME/holds.json"
+  for c in list "add other:peer-q all"; do read -ra w <<<"$c"; o=$("$ORCHY" hold "${w[@]}" 2>&1 || true); grep -q '^refused' <<<"$o" || fail "hold $c on a $f holds.json: $o"; done; done
+rm "$ORCHY_HOME/holds.json"; jq -e '.holds == []' "$T/holds.other" >/dev/null || fail "hold add wrote through a symlink"
+"$ORCHY" hold add other:peer-q all >/dev/null || fail "hold add"
+for c in "wt-new h1" "launch k1 h1 acct-a" "resume k1 h1 acct-a s1"; do read -ra w <<<"$c"
+  o=$("$ORCHY" "${w[@]}" 2>&1 || true); [ "$o" = "refused: other:peer-q holds the program (ORCHY hold list)" ] || fail "$c under an all hold: $o"; done
+hq=$(A add "approve run 830"); A public "$hq" "Approve run 830" >/dev/null; A ok "$hq" approve 830 1 registry -- "approve 830" >/dev/null; run 830 "$MC" push .github/workflows/release.yml
+X approve 830 1 registry --ok "$hq"; [ "$rc" = 1 ] && [ "$o" = "refused: other:peer-q holds the program (ORCHY hold list)" ] && [ "$(used "approve 830")" = 0 ] || fail "approve under an all hold (exit $rc): $o"
+"$ORCHY" hold "done" other:peer-q >/dev/null; o=$(W approve 830 1 registry --ok "$hq" || true); grep -q '^approved run 830 attempt 1' <<<"$o" || fail "the held approval, after hold done: $o"
+# hold add returns only after a merge call already past its check has written its outcome; a watcher checking after it says HELD
+S25=$(sha 25); x=$(A add "merge PR 82"); A public "$x" "Merge PR 82" >/dev/null; A ok "$x" merge 82 "$S25" main merge -- "merge 82" >/dev/null; pr 82 "$S25" main hotfix-m
+MOCK_GH_MERGE_SLEEP=3 "$ORCHY" act merge 82 "$S25" main merge --ok "$x" >/dev/null
+for _ in $(seq 1 200); do [ "$(merges 82)" = 1 ] && break; sleep 0.1; done; ! grep -q '^#82 MERGED' "$ORCHY_HOME/watch/merge-82.out" || fail "the merge call did not wait"
+"$ORCHY" hold add other:peer-r all >/dev/null; grep -q '^#82 MERGED' "$ORCHY_HOME/watch/merge-82.out" || fail "hold add returned before the call in flight ended: $(cat "$ORCHY_HOME/watch/merge-82.out")"
+"$ORCHY" hold "done" other:peer-r >/dev/null; S26=$(sha 26); y=$(A add "merge PR 83"); A public "$y" "Merge PR 83" >/dev/null; A ok "$y" merge 83 "$S26" main merge -- "merge 83" >/dev/null
+pr 83 "$S26" main hotfix-n; c0=$(grep -c '/compare/.*\.\.\.main' "$MOCK_DIR/gh.log"); MOCK_GH_COMPARE_SLEEP=3 "$ORCHY" act merge 83 "$S26" main merge --ok "$y" >/dev/null
+for _ in $(seq 1 200); do [ "$(grep -c '/compare/.*\.\.\.main' "$MOCK_DIR/gh.log")" -gt "$c0" ] && break; sleep 0.1; done; "$ORCHY" hold add other:peer-r all >/dev/null   # past its last poll
+for _ in $(seq 1 60); do grep -q 'HELD: other:peer-r' "$ORCHY_HOME/watch/merge-83.out" && break; sleep 0.5; done
+grep -q 'HELD: other:peer-r; waiting' "$ORCHY_HOME/watch/merge-83.out" && [ "$(merges 83)" = 0 ] || fail "a watcher past its poll when a hold landed: $(cat "$ORCHY_HOME/watch/merge-83.out")"
+"$ORCHY" hold "done" other:peer-r >/dev/null; [[ "$(done_line 83)" == "#83 MERGED"* ]] || fail "the held watcher, after hold done: $(done_line 83)"
+# under a trunk hold a lane watcher says HELD once and waits, while an act into main merges
+"$ORCHY" hold add lane:release-7 trunk >/dev/null; mkdir -p "$ORCHY_HOME/reports"
+S27=$(sha 27); pr 84 "$S27" dev worktree-hold-1; printf 'PR #84\nHEAD %s\nLEAD_DONE\n' "$S27" > "$ORCHY_HOME/reports/hold-1.md"
+"$ORCHY" arm-merge 84 "$S27" hold-1 hold-1.md - >/dev/null; for _ in $(seq 1 60); do grep -q 'HELD' "$ORCHY_HOME/watch/merge-84.out" && break; sleep 0.5; done
+S28=$(sha 28); z=$(A add "merge PR 85"); A public "$z" "Merge PR 85" >/dev/null; A ok "$z" merge 85 "$S28" main merge -- "merge 85" >/dev/null; pr 85 "$S28" main hotfix-o
+W merge 85 "$S28" main merge --ok "$z" >/dev/null; [[ "$(done_line 85)" == "#85 MERGED"* ]] || fail "an act into main under a trunk hold: $(done_line 85)"
+[ "$(grep -c 'HELD' "$ORCHY_HOME/watch/merge-84.out")" = 1 ] && [ "$(merges 84)" = 0 ] || fail "a lane watcher under a trunk hold: $(cat "$ORCHY_HOME/watch/merge-84.out")"
+"$ORCHY" hold "done" lane:release-7 >/dev/null; for _ in $(seq 1 60); do grep -q '^#84 MERGED' "$ORCHY_HOME/watch/merge-84.out" && break; sleep 0.5; done
+grep -q '^#84 MERGED' "$ORCHY_HOME/watch/merge-84.out" || fail "the lane watcher, after hold done: $(cat "$ORCHY_HOME/watch/merge-84.out")"
+# an act's call in flight when a hold is added finishes first, as a merge call does
+tq=$(A add "tag build-h"); A public "$tq" "Tag build-h" >/dev/null; A ok "$tq" tag build-h "$TS" -- "tag build-h" >/dev/null
+c0=$(grep -c '^api repos/example/app/git/refs ' "$MOCK_DIR/gh.log" || true); MOCK_GH_POST_SLEEP=3 "$ORCHY" act tag build-h "$TS" --ok "$tq" > "$T/tag-h.out" 2>&1 & tp=$!
+for _ in $(seq 1 200); do [ "$(grep -c '^api repos/example/app/git/refs ' "$MOCK_DIR/gh.log")" -gt "$c0" ] && break; sleep 0.1; done
+"$ORCHY" hold add other:peer-t all >/dev/null; grep -q 'refs/tags/build-h' "$MOCK_DIR/posts.log" || fail "hold add returned before an act's call in flight ended"
+wait "$tp" || true; grep -q '^tagged build-h' "$T/tag-h.out" || fail "the tag in flight: $(cat "$T/tag-h.out")"; "$ORCHY" hold "done" other:peer-t >/dev/null
+[ ! -e "$MOCK_DIR/locked.log" ] || fail "a call held holds.lock: $(cat "$MOCK_DIR/locked.log")"
 
 # --- triage mode refuses act; the acts above wrote only ask rows to the event log
 jq '.mode = "triage"' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"; o=$(W tag build-9 "$TS" --check || true); cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"
