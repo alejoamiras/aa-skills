@@ -175,7 +175,7 @@ export function readWorkflow(path: string, text: string): Read | { error: string
 
 /** The first fenced json block under `## Release profile`, as release-profile/1. Unknown keys are ignored and listed; any
  *  other fault rejects the whole block, so a half-valid block never fills a fact. */
-function parseBlock(md: string): { block?: Block; ignored: string[]; error?: string } {
+export function parseBlock(md: string): { block?: Block; ignored: string[]; error?: string } {
   let fence = "", section = false, closed = false, lines: string[] | null = null;
   for (const line of md.split(/\r\n|\r|\n/)) {
     if (fence) {   // CommonMark: a line of the fence's character, at least as long, and nothing else closes it
@@ -184,9 +184,10 @@ function parseBlock(md: string): { block?: Block; ignored: string[]; error?: str
       else lines?.push(line);
       continue;
     }
-    // a backtick fence's info string holds no backtick anywhere; its first word is the language
-    const f = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line), info = f?.[2].replace(/^[ \t]+|[ \t]+$/g, "") ?? "";
-    if (f && !(f[1][0] === "`" && info.includes("`"))) { fence = f[1]; if (section && info.split(/[ \t]/)[0] === "json") lines = []; continue; }
+    // a backtick fence's info string holds no backtick; its first word is the language. s and the left-only trim keep this
+    // linear: without them, backticks before a U+2028, or blanks before a last word, backtrack quadratically
+    const f = /^ {0,3}(`{3,}|~{3,})(.*)$/s.exec(line), info = f?.[2] ?? "";
+    if (f && !(f[1][0] === "`" && info.includes("`"))) { fence = f[1]; if (section && info.replace(/^[ \t]+/, "").split(/[ \t]/)[0] === "json") lines = []; continue; }
     if (/^ {0,3}#{1,2}(?:[ \t]|$)/.test(line)) { if (section) break; section = /^ {0,3}## Release profile[ \t]*$/.test(line); }
   }
   if (!lines) return { ignored: [] };

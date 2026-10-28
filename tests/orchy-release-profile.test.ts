@@ -4,7 +4,7 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { branchMatches, readWorkflow } from "../skills/start-orchy/scripts/release-profile.ts";
+import { branchMatches, parseBlock, readWorkflow } from "../skills/start-orchy/scripts/release-profile.ts";
 
 const ROOT = join(import.meta.dir, "..");
 const SCRIPT = join(ROOT, "skills/start-orchy/scripts/release-profile.ts");
@@ -107,6 +107,12 @@ test("push filters: GitHub's semantics, in linear time on a pattern built to bac
   expect([branchMatches(["**", "!release/**"], "release/x"), branchMatches(["**", "!release/**", "release/keep"], "release/keep")]).toEqual([false, true]);
   expect(branchMatches(["v[12].[0-9]+.[0-9]+"], "v1.10.1")).toBe(true);
   expect(readWorkflow("w.yml", "on:\n  push:\n    branches: ['[main']\n")).toEqual({ error: "a branch filter with a quantifier after nothing or an open [" });
+});
+
+test("a release skill line built to backtrack parses in linear time", () => {
+  const t0 = performance.now();
+  expect([parseBlock("`".repeat(60_000) + "\u2028x"), parseBlock("```x" + " ".repeat(60_000) + "y")]).toEqual([{ ignored: [] }, { ignored: [] }]);
+  expect(performance.now() - t0).toBeLessThan(1000);
 });
 
 test("a forged status, a second page and a review count of another type are unread, never none", async () => {
