@@ -34,8 +34,10 @@ out=$("$ORCHY" render common-brief.md REPO=example/app PRODUCT="the app" TRUNK=d
 grep -q 'example/app backlog program (the app)' <<<"$out" || fail "render substitution"
 "$ORCHY" render --keep LANE,KEY,WORKTREE,BRANCH common-brief.md REPO=example/app PRODUCT=x TRUNK=dev PLANS_DIR=plans ARCHIVE_DIR=plans/archive ORCHY_HOME="$ORCHY_HOME" CODEX_EFFORT=high CODEX_MODEL=m CODEX_MODEL_SHORT=s LEAD_MODEL=opus LEAD_MODEL_NAME=x QUALITY_BAR=p GATES=g PROTECTED=main KNOWN_LIMIT_LABEL=k DELEGATIONS= NEVER_OPEN= | grep -q '<WORKTREE>' || fail "render --keep did not keep the lead-bound tokens"
 if "$ORCHY" render common-brief.md REPO=x >/dev/null 2>&1; then fail "render must fail on a leftover token"; fi
-for t in planner-brief implementer-brief lane-brief plan-spawn arc-spawn closeout-spawn shots-spawn tick; do [ -f "$K/templates/$t.md" ] || fail "template $t missing"; done
+for t in planner-brief implementer-brief lane-brief plan-spawn arc-spawn closeout-spawn shots-spawn quick-spawn tick; do [ -f "$K/templates/$t.md" ] || fail "template $t missing"; done
 "$ORCHY" render tick.md REPO=example/app ORCHY_SH="$ORCHY" > "$T/tick.txt" || fail "render tick left a token"; "$ORCHY" check-text "$T/tick.txt" >/dev/null || fail "check-text tick"
+"$ORCHY" render quick-spawn.md LANE=qk KEY=qk-a1 WORKTREE=/w/qk BRANCH=worktree-qk TRUNK=dev ORCHY_HOME="$ORCHY_HOME" DECISIONS=none CODEX_MODEL=gpt-6.1-sol CODEX_EFFORT=high CLOSES="Delivers ask3" DATE=2031-01-15 STATE="a fresh lane" NEVER_OPEN="" > "$T/quick.md" || fail "render quick-spawn left a token"
+"$ORCHY" check-text "$T/quick.md" >/dev/null || fail "check-text quick-spawn"
 # every rendered brief passes check-text (no roster name, no account-variable assignment)
 printf '%s\n' "$out" > "$T/brief.md"; "$ORCHY" check-text "$T/brief.md" || fail "rendered common brief fails check-text"
 printf 'run it on acct-a\n' > "$T/bad.md"; if "$ORCHY" check-text "$T/bad.md" >/dev/null 2>&1; then fail "check-text accepted a roster name"; fi
@@ -207,6 +209,14 @@ jq '.files = [{filename: "docs/ci.yml", previous_filename: ".github/workflows/ci
 o=$("$ORCHY" scan 9 "$SHA"); grep -qx '  GATE FILE: .github/workflows/ci.yml' <<<"$o" || fail "a workflow renamed away is not a gate file: $o"
 jq '.total_commits = 251' "$MOCK_DIR/cmp-$SHA.json" > "$tmp" && mv "$tmp" "$MOCK_DIR/cmp-$SHA.json"
 o=$("$ORCHY" scan 9 "$SHA" || true); grep -q '^SCAN FAILED: #9 is more than one compare lists' <<<"$o" || fail "a compare cut short: $o"
+# scan --quick: past a quick lane's bounds is exit 3; a two-file change is within them
+qs() { cmpfix "$SHA" "fix: q" "$@"; mkpr "$SHA"; rc=0; o=$("$ORCHY" scan 9 "$SHA" --quick) || rc=$?; }
+qs src/a.ts src/a.test.ts; [ "$rc" = 0 ] && [ "$(tail -n 1 <<<"$o")" = 'QUICK: within bounds' ] || fail "a two-file change (exit $rc): $o"
+for c in "biome.json|a gate file" "bun.lock|a lockfile" "src/1.ts src/2.ts src/3.ts src/4.ts src/5.ts src/6.ts|6 files"; do read -ra fs <<<"${c%%|*}"; qs "${fs[@]}"
+  [ "$rc" = 3 ] && [ "$(tail -n 1 <<<"$o")" = "QUICK: past the bounds: ${c#*|}" ] || fail "scan --quick on ${c%%|*} (exit $rc): $o"; done
+cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak"; jq '.scan.gate_files = "biome\\.json"' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"
+qs .github/workflows/ci.yml; cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"
+[ "$rc" = 3 ] && [ "$(tail -n 1 <<<"$o")" = 'QUICK: past the bounds: a workflow' ] || fail "a workflow outside gate_files (exit $rc): $o"
 # arm-merge: the detached watcher finds the repo and the home (no cd into the cache), and a second arm refuses
 if "$ORCHY" arm-merge 9 "$SHA" lane-9 "$ORCHY_HOME/reports/r9.md" >/dev/null 2>&1; then fail "arm-merge accepted a report path the watcher cannot find"; fi
 mkpr "$SHA"; "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 4 >/dev/null || fail "arm-merge"
@@ -471,6 +481,15 @@ st() { A show "$1" | sed '/^-- history/,$d' | jq -r '"\(.state) \(.notes[-1])"';
 [ "$(st "${c[5]}")" = "open lane cl closed without delivering it: conflicting reports a1/arc1" ] || fail "a1/arc1 conflict: $(st "${c[5]}")"
 o=$(A lane "${c[3]}" cl "again" 2>&1 || true); grep -q 'lane cl is closed' <<<"$o" || fail "ask lane reused a closed slug: $o"
 o=$("$ORCHY" wt-new cl 2>&1 || true); grep -q 'never reused' <<<"$o" || fail "wt-new recreated a closed lane: $o"
+# a quick lane closes on its one report: delivered with its PR, or bounced, which reopens the ask for a planned lane
+qa=$(A add "quick case"); A public "$qa" "Quick-lane requirement" >/dev/null; A lane "$qa" qk quick >/dev/null || fail "ask lane $qa qk quick"
+printf 'LEAD_DONE\nPR #33 fix it ready checks: green\nHEAD %s\nCODEX: converged in 1 rounds\nOWNER_ASKS: none\nASKS: delivered %s\nPLAN: none\n' "$SHA" "$qa" > "$RP/qk-a1.md"
+A close-lane qk >/dev/null || fail "close-lane qk"; [ "$(st "$qa")" = "done delivered in qk PR #33" ] || fail "a quick lane's delivery: $(st "$qa")"
+qb=$(A add "bounce case"); A public "$qb" "Bounced requirement" >/dev/null; A lane "$qb" qb quick >/dev/null || fail "ask lane $qb qb quick"
+printf 'LEAD_BLOCKED: needs a plan\nOWNER_ASKS: none\nASKS: left out %s needs a plan\nPLAN: none\n' "$qb" > "$RP/qb-a1.md"
+A close-lane qb >/dev/null || fail "close-lane qb"; [ "$(st "$qb")" = "open lane qb closed without delivering it: needs a plan" ] || fail "a bounce did not reopen its ask: $(st "$qb")"
+A lane "$qb" qb2 "planned after a bounce" >/dev/null || fail "a bounced ask was not laned again"
+o=$("$ORCHY" wt-new qb 2>&1 || true); grep -q 'never reused' <<<"$o" || fail "wt-new reused a bounced lane: $o"
 # snapshot names asks by id and state only, flags an ask whose lane is gone, and lists no untriaged issue for an empty backlog
 g=$(A add "my sister Ana wants the gone lane"); A public "$g" "Gone-lane requirement" >/dev/null; A lane "$g" gone-1 "a repo change" >/dev/null
 echo '[]' > "$MOCK_DIR/issues.json"; : > "$ORCHY_HOME/triaged.txt"; "$ORCHY" snapshot > "$T/snap.out" 2>&1

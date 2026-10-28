@@ -36,8 +36,9 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   snapshot                     the tick's facts: reports, leads, watchers, PRs, worktrees, load, headroom
 #   state [--json]               a poller's view as orchy.state/1 JSON: local facts only, no gh, usage or network call, nothing written
 #   wait [seconds]               block until a report, lead or watcher changes, or (every wait.poll_sec, default 120) open PRs, open issues or the trunk head (default 1500)
-#   scan <pr> [<full-sha>]       gate-weakening and leak scan of a PR's diff, title, body and commit messages (plus the local ban),
-#                                the content read at that sha (default: the head now); SCAN FAILED unless it is the head before and after
+#   scan <pr> [<full-sha>] [--quick]   gate-weakening and leak scan of a PR's diff, title, body and commit messages (plus the
+#                                local ban), the content read at that sha (default: the head now); SCAN FAILED unless it is the head
+#                                before and after; --quick exits 3 past a quick lane's bounds
 #   watch-merge <pr> <full-sha> <lane> <report> [archive-name|-]   merge a lane PR on the standing policy, then tear the lane
 #                                down (archive -: no plan to wait for and no teardown)
 #   arm-merge  <pr> <full-sha> <lane> <report-name> [archive-name|-] [delay-s]   watch-merge detached (nohup, .out + .pid)
@@ -865,8 +866,9 @@ wait)
     if [ $(( $(date +%s) - t0 )) -ge "$LIMIT" ]; then u="${!unread[*]}"; echo "TIMEOUT after ${LIMIT}s, no change${u:+; unreadable: $u}"; exit 0; fi
   done;;
 scan)
-  need gh; n=${1:-}; pin=${2:-}
-  [[ "$n" =~ ^[1-9][0-9]*$ ]] && { [ -z "$pin" ] || sha_ok "$pin"; } || { echo "usage: scan <pr> [<full-sha>]" >&2; exit 2; }
+  need gh; quick=0; a=(); for x in "$@"; do if [ "$x" = --quick ]; then quick=1; else a+=("$x"); fi; done
+  n=${a[0]:-}; pin=${a[1]:-}
+  [[ "$n" =~ ^[1-9][0-9]*$ ]] && { [ -z "$pin" ] || sha_ok "$pin"; } && [ "${#a[@]}" -le 2 ] || { echo "usage: scan <pr> [<full-sha>] [--quick]" >&2; exit 2; }
   hb=$(gh pr view "$n" --repo "$REPO" --json headRefOid,baseRefName --jq '"\(.headRefOid) \(.baseRefName)"') || { echo "SCAN FAILED: gh pr view #$n"; exit 2; }
   read -r h base <<<"$hb"; pin=${pin:-$h}
   [ "$h" = "$pin" ] || { echo "SCAN FAILED: head moved"; exit 2; }
@@ -893,7 +895,15 @@ scan)
   [ -n "$gf" ] && echo "$gf" | sed 's/^/  GATE FILE: /'
   [ -n "$add" ] && echo "$add" | cut -c1-200 | sed 's/^/  ADDED: /'
   [ -n "$leak" ] && echo "$leak" | cut -c1-200 | sed 's/^/  LEAK: /'
-  exit 0;;
+  [ "$quick" = 1 ] || exit 0
+  # the bounds a script can see; one surface, persisted shapes and what a person sees are the reader's. A dependency moves a lockfile.
+  nf=$(echo "$files" | grep -c .)
+  why=$( { [ -n "$gf" ] && echo "a gate file"
+    grep -qE '(^|/)(bun\.lockb?|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|go\.sum|poetry\.lock|uv\.lock|Gemfile\.lock|composer\.lock)$' <<<"$files" && echo "a lockfile"
+    grep -qE '^\.github/(workflows|actions)/' <<<"$files" && echo "a workflow"
+    [ "$nf" -le 5 ] || echo "$nf files"; } | paste -sd, | sed 's/,/, /g')
+  [ -z "$why" ] && { echo "QUICK: within bounds"; exit 0; }
+  echo "QUICK: past the bounds: $why"; exit 3;;
 watch-merge)
   need gh; N=${1:-}; PIN=${2:-}; LANE=${3:-}; REPORT=${4:-}; ARCH=${5:-${3:-}}
   e=$(merge_arg_err "$N" "$PIN" "$LANE" "$REPORT" "$ARCH"); [ -z "$e" ] || { echo "REFUSED: $e"; exit 4; }
