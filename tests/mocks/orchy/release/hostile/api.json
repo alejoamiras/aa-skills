@@ -1,0 +1,12 @@
+{
+  "repos/example/tool/contents/.github/workflows": [
+    {"name": "bomb.yml", "path": ".github/workflows/bomb.yml", "size": 937, "type": "file"},
+    {"name": "broken.yml", "path": ".github/workflows/broken.yml", "size": 68, "type": "file"},
+    {"name": "ci.yml", "path": ".github/workflows/ci.yml", "size": 190, "type": "file"},
+    {"name": "docs.yml", "path": ".github/workflows/docs.yml", "size": 260, "type": "file"},
+    {"name": "huge.yml", "path": ".github/workflows/huge.yml", "size": 300000, "type": "file"},
+    {"name": "publish.yml", "path": ".github/workflows/publish.yml", "size": 520, "type": "file"}
+  ],
+  "repos/example/tool/contents/.github/workflows/bomb.yml": {"$file": "bomb.yml"},
+  "repos/example/tool/contents/.github/workflows/broken.yml": {"$file": "broken.yml"}
+}

@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# gh for tests/orchy-release-profile.test.ts. Answers from the fixture dirs in RP_FIXTURES (':'-separated; the first api.json
+# holding the key wins). A key is an API path, query included, or "repo view"; its value is the 200 body, {"$file": <f>}
+# for a file's raw content (beside that api.json, or absolute; served only with the raw Accept header), or
+# {"$http": <code>, "message": ...}. An error looks like gh's: the body on stdout, "gh: <message> (HTTP <code>)" on stderr,
+# exit 1. Every call is logged to RP_GH_LOG; a method, field or input flag, another header or another command exits 2.
+set -u
+printf '%s\n' "$*" >> "${RP_GH_LOG:?}"
+no() { echo "gh shim: refused: $1" >&2; exit 2; }
+key="" rawh=0
+if [ "${1:-} ${2:-}" = "repo view" ]; then key="repo view"
+elif [ "${1:-}" = api ]; then shift
+  while [ $# -gt 0 ]; do case "$1" in
+    -H) [ "${2:-}" = "Accept: application/vnd.github.raw" ] || no "header ${2:-}"; rawh=1; shift 2;;
+    -*) no "flag $1";;
+    *) [ -z "$key" ] || no "a second path $1"; key=$1; shift;;
+  esac; done
+else no "$*"; fi
+IFS=: read -ra dirs <<<"${RP_FIXTURES:?}"; apis=()
+for d in "${dirs[@]}"; do [ -f "$d/api.json" ] && apis+=("$d/api.json"); done
+[ ${#apis[@]} -gt 0 ] || no "no fixture in RP_FIXTURES"
+out=$(jq -rn --arg k "$key" '(first(inputs | select(has($k)) | [input_filename, .[$k]]) // [null, {"$http": 404, "message": "Not Found"}]) as [$f, $r]
+  | if ($r | type) == "object" and ($r | has("$file")) then "file\t\($r["$file"] | if startswith("/") then . else ($f | sub("[^/]*$"; "")) + . end)"
+    elif ($r | type) == "object" and ($r | has("$http")) then "\($r["$http"])\t\($r.message)\n\($r | del(.["$http"]) | tojson)"
+    elif ($r | type) == "string" then "200\t\n\($r)" else "200\t\n\($r | tojson)" end' "${apis[@]}") || no "no readable fixture for $key"
+head=${out%%$'\n'*}; code=${head%%$'\t'*}; rest=${head#*$'\t'}
+if [ "$code" = file ]; then [ "$rawh" = 1 ] || no "a file read without the raw Accept header: $key"; cat "$rest"; exit 0; fi
+[ "$rawh" = 0 ] || [ "$code" != 200 ] || no "a raw read of a JSON answer: $key"
+printf '%s\n' "${out#*$'\n'}"
+[ "$code" = 200 ] && exit 0
+echo "gh: $rest (HTTP $code)" >&2; exit 1

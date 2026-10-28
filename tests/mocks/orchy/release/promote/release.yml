@@ -1,0 +1,83 @@
+name: Release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish_registry:
+        type: boolean
+        default: false
+      publish_store_a:
+        type: boolean
+        default: false
+      publish_store_b:
+        type: boolean
+        default: false
+      deploy_production:
+        type: boolean
+        default: false
+      dry_run:
+        type: boolean
+        default: true
+permissions:
+  contents: read
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.rp.outputs.release_created }}
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          token: ${{ steps.app.outputs.token }}
+          target-branch: main
+  registry:
+    needs: release-please
+    if: needs.release-please.outputs.released == 'true' || inputs.publish_registry
+    runs-on: ubuntu-latest
+    environment: registry
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm publish --provenance --access public
+  store-a:
+    needs: release-please
+    if: inputs.publish_store_a
+    runs-on: ubuntu-latest
+    environment: store-a
+    steps:
+      - uses: actions/checkout@v4
+      - run: bun run submit:store-a
+  store-b:
+    needs: release-please
+    if: inputs.publish_store_b
+    runs-on: ubuntu-latest
+    environment:
+      name: store-b
+      url: https://example.com/store-b
+    steps:
+      - uses: actions/checkout@v4
+      - run: bun run submit:store-b
+  production:
+    needs: release-please
+    if: needs.release-please.outputs.released == 'true' || inputs.deploy_production
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - run: bun run deploy
+  sync:
+    needs: release-please
+    if: needs.release-please.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          gh pr create --base dev --head sync/main-into-dev --title "chore(release): sync main into dev" --body "Back-sync"

@@ -1,0 +1,21 @@
+{
+  "repos/example/private-app": {
+    "full_name": "example/private-app", "private": true, "default_branch": "main",
+    "allow_merge_commit": true, "allow_squash_merge": true, "allow_rebase_merge": true
+  },
+  "repos/example/private-app/branches?protected=true&per_page=100": [],
+  "repos/example/private-app/branches/main": {"name": "main", "commit": {"sha": "3333333333333333333333333333333333333333"}, "protected": false},
+  "repos/example/private-app/rules/branches/main": {"$http": 403, "status": "403",
+    "message": "Upgrade to GitHub Pro or make this repository public to enable this feature."},
+  "repos/example/private-app/branches/main/protection": {"$http": 403, "status": "403",
+    "message": "Upgrade to GitHub Pro or make this repository public to enable this feature."},
+  "repos/example/private-app/commits/3333333333333333333333333333333333333333/check-runs?per_page=100": {"total_count": 1, "check_runs": [
+    {"id": 31, "name": "test", "status": "completed", "conclusion": "success", "app": {"slug": "github-actions"}}
+  ]},
+  "repos/example/private-app/rulesets?targets=tag&per_page=100": [],
+  "repos/example/private-app/environments?per_page=100": {"total_count": 0, "environments": []},
+  "repos/example/private-app/contents/.github/workflows": [
+    {"name": "ci.yml", "path": ".github/workflows/ci.yml", "size": 180, "type": "file"}
+  ],
+  "repos/example/private-app/contents/.github/workflows/ci.yml": {"$file": "ci.yml"}
+}

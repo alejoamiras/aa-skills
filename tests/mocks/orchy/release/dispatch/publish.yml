@@ -1,0 +1,26 @@
+name: Publish
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version to publish
+        required: true
+        type: string
+      mode:
+        type: choice
+        options: [dry-run, publish]
+        default: dry-run
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: registry
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm version "$VERSION" --no-git-tag-version && npm publish --provenance --access public
+        env:
+          VERSION: ${{ inputs.version }}
