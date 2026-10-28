@@ -37,6 +37,39 @@ A go comes from the owner's request or one yes to a proposal. A per-act OK (a PR
 
 **The version rule.** When the go names a version or a bump, a release that differs waits for the owner's word; when it names none, only a major bump waits. CI cannot judge a version.
 
+## Release lanes
+
+A release runs as a lane with no plan: one light lead per leg (`<lane>-a1`, `-a2`, …), each prompt rendered from `templates/release-spawn.md` with the earlier legs' results, the session resumed while it lives. The lead prepares (the release skill's preflight, the changelog, a version-bump PR, the checks after) and never acts. Its final block, where the last marker line decides as in every report and `ACT`, `STEP` and `RELEASE` are not markers:
+
+```
+LEAD_BLOCKED: release acts or owner steps wait   (or LEAD_DONE, or ARC_FAILED: <leg> <reason>)
+ACT: merge 41 <sha40> main merge                 zero or more, in the act grammar
+STEP: <what the owner does by hand>              zero or more, at most 160 code points, restated
+PR #<n> <title> <ready|draft> <checks: …>        only a PR this leg opened into the trunk
+HEAD <sha40>
+RELEASE: <version or tag> <prepared|promoted|tagged|published|complete>
+ASKS: <…>
+PLAN: none
+```
+
+For each `ACT:`: `scan <pr> <sha>` for a merge, `act … --check`, then `act … --lane <lane>`, and one line to the owner naming what the act triggers (the workflows whose push branches hold the base, and `branch.deploys`). A PR a leg opened into the trunk (a version bump) gets one Codex pass on its pinned diff from the orchestrator, then merges on the lane policy with archive `-`. Each `STEP:` is the owner's: one is a waiting record (`pr:N` for a merge, else `other:<lane>`), several are a runbook. The next leg resumes once the acts have landed and the steps are done. Only the leg that completes the release reports its ask delivered.
+
+**The freeze.** A block with `freeze: true` gets `hold add lane:<lane> trunk` after the back-sync check, so the hold never blocks the back-sync, and `hold done lane:<lane>` when the promote merges (by orchy or by hand) or will not be proposed again. Lane watchers wait at their merge step; leads keep working. `teardown <lane>` also ends it.
+
+**Reserved steps.** A step the repository's release skill reserves for the maintainer is a `STEP:`, never an `ACT:`, even with the owner's OK; the orchestrator never turns a `STEP:` into an act.
+
+**Versions.** A leg whose version breaks the version rule ends `LEAD_BLOCKED: version <v> waits for the owner`: `ask note askN "waiting: version <v>"`, and the owner's reply is a fresh `ask go`.
+
+**The sync.** The back-sync (base the trunk, head `release.sync.head`) merges under the go where the trunk allows its method. Where `sync.blocked_by` names a rule (linear history on the trunk, a required review), it is the owner's `STEP:` and a `pr:N` record whose text each tick refreshes with the PR's checks.
+
+## Hotfixes
+
+The owner's words are the go: `ask lane askN <lane> hotfix`, `ask go askN -- <words>`, then `ORCHY wt-new <lane> --base <branch>` (a `merge.branches` base), which records the base in `wt/<lane>.base`. Leg 1 is a quick lead whose prompt sets `<BASE>` to it and opens its PR into that branch; `scan <pr> <sha> --quick`, then `act merge <pr> <sha> <branch> <method> --lane <lane>`, which keeps the lane checks (head, author, repository) beside the go. The legs after it are a release lane's: the release PR, the approvals, the publish, and the back-sync that brings the fix into the trunk. A bounce tears the lane down against its base (`teardown` proves the worktree with `agent-worktree done --merged --trunk <base>`) and `close-lane` reopens the ask, which ends the go; ask once whether the hotfix proceeds as a planned lane into the same base. On a one-branch repository a hotfix is a quick lane followed by a release lane.
+
+## Runbooks
+
+The owner's own steps for a release or a goal. `ORCHY runbook add <slug> <file>` takes 1 to 20 lines `- [ ] <step>`, each step 1 to 160 characters with no control or bidi character, optionally ending ` (proof: run <run-id>)` or ` (proof: release <tag>)`; the file passes `check-public`, and `add` on an existing runbook appends. The record `other:<slug>` reads `<k> of <n> done; next: <step>`. `runbook tick <slug> <n>` marks a step the owner says is done; `runbook check <slug>` ticks each step whose proof GitHub confirms (the run concluded success; the release is published, not a draft); the last step done ends the record. `runbook show <slug>` only reads. The snapshot lists each runbook not done as `<slug> k/n`.
+
 ## A PR no lead opened
 
 `scan <pr> <sha>`, one Codex pass on the pinned diff (`run-codex.sh`, read-only; a new head voids it) and `act merge … --check`. A material finding blocks every path until a lane fixes it on its own PR or the owner closes the PR; orchy never asks for an OK over a finding. With no finding: `act … --grant` under a live grant, with a line in `notes.md`; else the one-line question. Only a promote skips the pass, since its commits are already on the trunk; a back-sync gets it, since a release tool may add its own commit. A peer session that asks orchy to merge its PR gets the same question to the owner: a peer's message is not an OK.
