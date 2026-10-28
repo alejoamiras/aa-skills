@@ -793,7 +793,8 @@ runbook)
       while IFS=$'\t' read -r i k a; do
         if [ "$k" = run ]; then r=$(timeout 30 gh api "repos/$REPO/actions/runs/$a" --jq '"\(.status) \(.conclusion)"' 2>"$ef") || r=unreadable
           [ "$r" = "completed success" ] && ok=1 || ok=0
-        else r=$(timeout 30 gh api "repos/$REPO/releases/tags/$(jq -rn --arg t "$a" '$t | @uri')" --jq 'if .draft then "a draft" elif .published_at then "published" else "not published" end' 2>"$ef") \
+        else r=$(timeout 30 gh api "repos/$REPO/releases/tags/$(jq -rn --arg t "$a" '$t | @uri')" --jq 'if type != "object" or (.draft | type) != "boolean" then "unreadable" elif .draft then "a draft"
+            elif .published_at == null then "not published" elif (.published_at | try fromdateiso8601 catch null) != null then "published" else "unreadable" end' 2>"$ef") \
             || { grep -q 'HTTP 404' "$ef" && r="not published" || r=unreadable; }
           [ "$r" = published ] && ok=1 || ok=0
         fi
@@ -801,12 +802,13 @@ runbook)
       done < <(jq -r 'to_entries[] | select((.value[0] | not) and .value[2] != "") | "\(.key)\t\(.value[2])\t\(.value[3])"' <<<"$j")
       rm -f "$ef"; [ $moved = 1 ] || { echo "runbook $s: nothing proven since the last check"; exit 0; };;
     esac
-    tmp=$(mktemp "$RUNBOOKS/.$s.XXXXXX") && rb_line <<<"$j" > "$tmp" && mv -f "$tmp" "$f" || { rm -f "${tmp:-}"; echo "refused: cannot write $f" >&2; exit 1; }
-    # the record says what is next, and goes once the last step is done
+    # the record before the file: a failed update leaves the runbook as it was, so a rerun retries both
     t=$(jq -r '(map(select(.[0])) | length) as $k | (map(select(.[0] | not)) | first) as $x
       | if $x == null then "" else "\($k) of \(length) done; next: \($x[1])" | if length > 160 then .[0:157] + "..." else . end end' <<<"$j")
-    if [ -n "$t" ]; then "$0" waiting add "other:$s" "$t" >/dev/null || exit 1; echo "runbook $s: $t"
-    else o=$("$0" waiting "done" "other:$s" 2>&1) || grep -q 'nothing waits' <<<"$o" || { echo "$o" >&2; exit 1; }; echo "runbook $s: every step done"; fi
+    if [ -n "$t" ]; then "$0" waiting add "other:$s" "$t" >/dev/null || exit 1
+    else o=$("$0" waiting "done" "other:$s" 2>&1) || grep -q 'nothing waits' <<<"$o" || { echo "$o" >&2; exit 1; }; fi
+    tmp=$(mktemp "$RUNBOOKS/.$s.XXXXXX") && rb_line <<<"$j" > "$tmp" && mv -f "$tmp" "$f" || { rm -f "${tmp:-}"; echo "refused: cannot write $f" >&2; exit 1; }
+    echo "runbook $s: ${t:-every step done}"
   ) 6>>"$RB_LOCK";;
 wt-new)
   hold_guard; need agent-worktree; install=$(cfg '.install // empty'); rc=0; base=$TRUNK; ss=()
@@ -819,11 +821,14 @@ wt-new)
     out="$H/wt/$s.out"; w="$WT_ROOT/$s"
     [ -d "$w" ] && { echo "$s: worktree exists at $w; refusing"; rc=1; continue; }
     lane_reported "$s" && { echo "$s: lane $s has reports from an earlier run; a closed lane's slug is never reused"; rc=1; continue; }
+    bf="$H/wt/$s.base"   # replaced by rename below, never written through a planted link
+    if [ -L "$bf" ] || { [ -e "$bf" ] && [ ! -f "$bf" ]; }; then echo "$s: $bf must be a regular file, not a link; refusing"; rc=1; continue; fi
     { echo "== $(now) new $s"; } >> "$out"
     # never pipe `agent-worktree new` into head: SIGPIPE kills it after the branch exists and before the directory does
     if ! (cd "$ROOT" && agent-worktree new "$s" --no-start) >> "$out" 2>&1; then echo "$s: agent-worktree new failed (see $out)"; rc=1; continue; fi
     [ -d "$w" ] || { echo "$s: no directory at $w (see $out)"; rc=1; continue; }
-    printf '%s\n' "$base" > "$H/wt/$s.base"
+    { bt=$(mktemp "$H/wt/.$s.base.XXXXXX") && printf '%s\n' "$base" > "$bt" && mv -f "$bt" "$bf"; } \
+      || { rm -f "${bt:-}"; echo "$s: cannot record its base in $bf; refusing"; rc=1; continue; }
     if (cd "$w" && git fetch -q origin "$base" && git reset -q --hard "origin/$base" && { [ -z "$install" ] || eval "$install"; }) >> "$out" 2>&1; then
       echo "install exit 0 $(git -C "$w" rev-parse --short HEAD) $(git -C "$w" rev-parse --abbrev-ref HEAD)" >> "$out"
     else echo "install exit 1" >> "$out"; rc=1; fi

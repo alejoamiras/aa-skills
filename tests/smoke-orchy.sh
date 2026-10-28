@@ -2,7 +2,7 @@
 # Smoke for skills/start-orchy: orchy.sh against a throwaway repo and home with mocked gh / agent-worktree / claude-usage, the templates, the page toolchain's own smoke.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd); K="$HERE/skills/start-orchy"; ORCHY="$K/scripts/orchy.sh"
-T=$(mktemp -d -t orchy-smoke-XXXX); pgp=; sess=; trap '[ -z "$pgp" ] || kill "$pgp" 2>/dev/null; [ -z "$sess" ] || kill $sess 2>/dev/null; rm -rf "$T"' EXIT
+T=$(mktemp -d -t orchy-smoke-XXXX); pgp=; sess=; trap '[ -z "$pgp" ] || kill "$pgp" 2>/dev/null || true; [ -z "$sess" ] || kill $sess 2>/dev/null || true; rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_CAPACITY_ROOT="$T/cap" ORCHY_HOME="$T/cap/home" ORCHY_REPO=example/app ORCHY_WATCH_SLEEP=1 ORCHY_PROFILE_DIR="$T/profile" ORCHY_ASKS_DIR="$T/asks" ORCHY_GITLEAKS=fake-gitleaks ORCHY_ACCOUNTS="$T/accounts.json"; mkdir -p "$MOCK_DIR"
 # the orchestrator session the seat records: a sleep named claude, so lock, launch and resume agree on it from any subshell
@@ -259,14 +259,17 @@ o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1); grep -q 'hand-removed' <<<"$o" |
 "$ORCHY" hold list --json | jq -e '[.holds[].ref] == ["lane:z"]' >/dev/null || fail "teardown's holds: $("$ORCHY" hold list)"
 "$ORCHY" hold "done" lane:z >/dev/null; git worktree remove --force .claude/worktrees/y2; git branch -q -D worktree-y2
 # a hotfix worktree starts from the release branch; bounced and clean, it tears down against that branch, though main holds a
-# release commit dev lacks; its replacement lane starts from main too
+# release commit dev lacks; a second hotfix lane starts from main too
 m=$(git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit-tree -p origin/dev -m "release 1.4" "origin/dev^{tree}"); git push -q origin "$m:refs/heads/main"
 cp "$ORCHY_HOME/orchy.json" "$T/cfg.bak"; jq '.merge.branches = {main: {method: "merge", required_checks: ["release-gate"]}}' "$T/cfg.bak" > "$ORCHY_HOME/orchy.json"
 o=$("$ORCHY" wt-new hx --base feature-x 2>&1 || true); grep -q 'neither the trunk nor a merge.branches base' <<<"$o" && [ ! -d .claude/worktrees/hx ] || fail "wt-new on another base: $o"
 "$ORCHY" wt-new hf --base main >/dev/null || fail "wt-new --base main"
 [ "$(git -C .claude/worktrees/hf rev-parse HEAD)" = "$m" ] && [ "$(cat "$ORCHY_HOME/wt/hf.base")" = main ] || fail "wt-new --base main is at $(git -C .claude/worktrees/hf rev-parse --short HEAD)"
 o=$(MOCK_AW_ANCESTRY=1 "$ORCHY" teardown hf 2>&1) && grep -qx 'done [^ ]*/hf --merged --trunk main' "$MOCK_DIR/aw.log" || fail "teardown of a hotfix lane against main: $o"
-"$ORCHY" wt-new hf2 --base main >/dev/null && [ "$(git -C .claude/worktrees/hf2 rev-parse HEAD)" = "$m" ] || fail "the replacement lane's base"
+"$ORCHY" wt-new hf2 --base main >/dev/null && [ "$(git -C .claude/worktrees/hf2 rev-parse HEAD)" = "$m" ] || fail "a second hotfix lane's base"
+echo keep > "$T/target"; ln -s "$T/target" "$ORCHY_HOME/wt/hx.base"; o=$("$ORCHY" wt-new hx --base main 2>&1 || true)
+grep -q 'must be a regular file, not a link' <<<"$o" && [ "$(cat "$T/target")" = keep ] && [ ! -d .claude/worktrees/hx ] || fail "wt-new wrote through a planted base link: $o"
+rm -f "$ORCHY_HOME/wt/hx.base"
 echo feature-x > "$ORCHY_HOME/wt/hf2.base"; o=$("$ORCHY" teardown hf2 2>&1 || true); grep -q 'names neither the trunk nor a merge.branches base' <<<"$o" || fail "teardown on a planted base: $o"
 for w in hf hf2; do git worktree remove --force ".claude/worktrees/$w"; git branch -q -D "worktree-$w"; done; cp "$T/cfg.bak" "$ORCHY_HOME/orchy.json"
 # disarm stops a live watcher (its whole process group); lock refuses while another live holder has it and replaces a stale one

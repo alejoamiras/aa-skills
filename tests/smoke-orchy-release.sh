@@ -287,15 +287,26 @@ for c in "rb1|is not '- \[ \] <step>'" "rb2|a proof is" "rb3|a release proof nam
 printf -- '- [ ] Publish the staged build in the store dashboard\n- [ ] Answer the store review\n- [ ] Announce the release\n' > "$T/rb6.md"
 rbadd rel-7 "$T/rb6.md"; [ "$rc" = 0 ] && [ "$(w rel-7)" = "0 of 3 done; next: Publish the staged build in the store dashboard" ] || fail "runbook add: $o; $(w rel-7)"
 "$ORCHY" runbook tick rel-7 1 >/dev/null; [ "$(w rel-7)" = "1 of 3 done; next: Answer the store review" ] || fail "tick: $(w rel-7)"
+# a record that cannot be written leaves the runbook as it was; the tick of step 2 below retries both
+cp -p "$ORCHY_HOME/waiting.json" "$T/waiting.keep"; ln -sf "$T/waiting.keep" "$ORCHY_HOME/waiting.json"
+o=$("$ORCHY" runbook tick rel-7 2 2>&1) && rc=0 || rc=$?; rm -f "$ORCHY_HOME/waiting.json"; mv "$T/waiting.keep" "$ORCHY_HOME/waiting.json"
+[ "$rc" != 0 ] && grep -q 'must be a regular file' <<<"$o" && "$ORCHY" runbook show rel-7 | grep -qx '2. \[ \] Answer the store review' && [ "$(w rel-7)" = "1 of 3 done; next: Answer the store review" ] \
+  || fail "a failed record update ticked the runbook: $o"
 o=$("$ORCHY" runbook tick rel-7 1 2>&1 || true); grep -q 'already done' <<<"$o" || fail "a step ticked twice: $o"
 o=$("$ORCHY" runbook tick rel-7 4 2>&1 || true); grep -q 'has no step 4' <<<"$o" || fail "a step past the end: $o"
 "$ORCHY" runbook tick rel-7 3 >/dev/null; "$ORCHY" runbook tick rel-7 2 >/dev/null; [ -z "$(w rel-7)" ] || fail "the last tick left the record: $(w rel-7)"
 printf -- '- [ ] Run the store check (proof: run 901)\n- [ ] Publish the release notes (proof: release v1.4.0)\n- [ ] Confirm the listing\n' > "$T/rb7.md"
 rbadd rel-8 "$T/rb7.md"; [ "$rc" = 0 ] || fail "runbook add with proofs: $o"
-echo '{"status": "in_progress", "conclusion": null}' > "$MOCK_DIR/run-901.json"; "$ORCHY" runbook check rel-8 > "$T/chk.out"
-echo '{"status": "completed", "conclusion": "failure"}' > "$MOCK_DIR/run-901.json"; jq -n '{draft: true, published_at: null}' > "$MOCK_DIR/release-v1.4.0.json"
-"$ORCHY" runbook check rel-8 >> "$T/chk.out"; [ "$(w rel-8)" = "0 of 3 done; next: Run the store check" ] || fail "check ticked an unproven step: $(cat "$T/chk.out")"
-grep -q '^step 2: release v1.4.0: not published$' "$T/chk.out" && grep -q '^step 2: release v1.4.0: a draft$' "$T/chk.out" || fail "check's lines: $(cat "$T/chk.out")"
+# a run not completed though its conclusion reads success; a draft though it carries a publication time; a release without
+# a draft flag, or with a publication time that does not parse
+echo '{"status": "in_progress", "conclusion": "success"}' > "$MOCK_DIR/run-901.json"; "$ORCHY" runbook check rel-8 > "$T/chk.out"
+echo '{"status": "completed", "conclusion": "failure"}' > "$MOCK_DIR/run-901.json"; jq -n '{draft: true, published_at: "2031-01-15T00:00:00Z"}' > "$MOCK_DIR/release-v1.4.0.json"
+"$ORCHY" runbook check rel-8 >> "$T/chk.out"
+for r in '{published_at: "2031-01-15T00:00:00Z"}' '{draft: false, published_at: "2031-01-15T"}'; do
+  jq -n "$r" > "$MOCK_DIR/release-v1.4.0.json"; "$ORCHY" runbook check rel-8 >> "$T/chk.out"; done
+[ "$(w rel-8)" = "0 of 3 done; next: Run the store check" ] && "$ORCHY" runbook show rel-8 | grep -qx '1. \[ \] Run the store check (proof: run 901)' || fail "check ticked an unproven step: $(cat "$T/chk.out")"
+for l in 'run 901: in_progress success' 'release v1.4.0: not published' 'release v1.4.0: a draft' 'release v1.4.0: unreadable'; do
+  grep -q "^step [12]: $l\$" "$T/chk.out" || fail "check's lines lack '$l': $(cat "$T/chk.out")"; done
 echo '{"status": "completed", "conclusion": "success"}' > "$MOCK_DIR/run-901.json"; jq -n '{draft: false, published_at: "2031-01-15T00:00:00Z"}' > "$MOCK_DIR/release-v1.4.0.json"
 "$ORCHY" runbook check rel-8 >/dev/null; [ "$(w rel-8)" = "2 of 3 done; next: Confirm the listing" ] || fail "check after the run succeeded and the release published: $(w rel-8)"
 "$ORCHY" snapshot 2>/dev/null | sed -n '/^-- runbooks/,/^--/p' | grep -qx 'rel-8 2/3' || fail "the snapshot's runbooks: $("$ORCHY" snapshot 2>&1 | sed -n '/^-- runbooks/,/^--/p')"
