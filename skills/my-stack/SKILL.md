@@ -1,6 +1,6 @@
 ---
 name: my-stack
-description: "Use when scaffolding a new repository, configuring development tooling, setting up CI/CD pipelines, or when working on owned repositories. Covers the preferred stack: bun 1.4+ (native-first — Bun.cron, Bun.Image, node:sqlite, Bun.Archive, isolated linker, test --parallel/--shard/--changed — before reaching for deps), biome, husky, commitlint, lint-staged, shellcheck, actionlint, sort-package-json, playwright, vitest, monorepo structure, trusted publisher for npm, OIDC, branch and release shapes (rulesets, a release-please promote, a release skill template), React + Vite frontend defaults, optional Effect 4 (when to suggest it: indexers, relayers, pollers, time-dependent logic), supply-chain hardening (7-day min-age, frozen lockfile), parallel-safe E2E patterns, and tiered infrastructure (Cloudflare Workers with static assets by default — not Pages; OpenTofu only once there's real cloud infra to track), and keyed runs: a command that needs real secrets (deploy or operator keys) gets them from 1Password on the Mac via env-exec/op-remote, never from a .env with values."
+description: "Use when scaffolding a new repository, configuring development tooling, setting up CI/CD pipelines, or when working on owned repositories. Covers the preferred stack: bun 1.4+ (native-first — Bun.cron, Bun.Image, node:sqlite, Bun.Archive, isolated linker, test --parallel/--shard/--changed — before reaching for deps), biome, husky, commitlint, lint-staged, shellcheck, actionlint, sort-package-json, playwright, vitest, monorepo structure, trusted publisher for npm, OIDC, branch and release shapes, React + Vite frontend defaults, optional Effect 4 (when to suggest it: indexers, relayers, pollers, time-dependent logic), supply-chain hardening (7-day min-age, frozen lockfile), parallel-safe E2E patterns, and tiered infrastructure (Cloudflare Workers with static assets by default — not Pages; OpenTofu only once there's real cloud infra to track), and keyed runs: a command that needs real secrets (deploy or operator keys) gets them from 1Password on the Mac via env-exec/op-remote, never from a .env with values."
 ---
 
 # My Preferred Development Stack
@@ -997,7 +997,7 @@ Preview URLs are on by default (`preview_urls` follows `workers_dev`); set `"pre
 A repository has one of two shapes, and its release skill (below) says which.
 
 - **Single**: `main` is the trunk and ships. A release is a tag push (`v*`) or a dispatch of `release.yml`, or there is none.
-- **Promote**: `dev` is the trunk and the default branch; `main` is the release branch, and production deploys from it. Features squash into `dev`, a promote PR merges `dev` into `main`, release-please on `main` opens the release PR, and the release App merges a back-sync into `dev`.
+- **Promote**: `dev` is the trunk and the default branch; `main` is the release branch, and production deploys from it. Features squash into `dev`, a promote PR merges `dev` into `main`, release-please on `main` opens the release PR, and the release App opens a back-sync into `dev`.
 
 The promote conventions, each with its reason:
 

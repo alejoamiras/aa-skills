@@ -15,7 +15,7 @@ How `<repository>` ships, in my-stack's promote shape: features land on `dev`, `
 | Promote PR, `dev` into `main` | opened by the release lead; merged with a merge commit by orchy under the owner's go, or by the maintainer |
 | Release PR | opened by release-please; merged under the go when its version is the one the go named (no version named: anything but a major) |
 | Publishing approvals and dispatches | orchy under the go, except the steps reserved below |
-| Back-sync, `main` into `dev` | opened by the release App; merged with a merge commit |
+| Back-sync, `main` into `dev` | opened by the release App; merged with a merge commit by orchy under the go, or by the maintainer |
 
 **Reserved for the maintainer.** Each is reported as a `STEP:`, never run as an `ACT:`, and never approved on the maintainer's behalf, whoever asks:
 
@@ -66,7 +66,7 @@ What GitHub cannot see, in order. Each is the maintainer's, and each is listed a
 
 ## Release profile
 
-orchy's release derivation (start-orchy's `scripts/release-profile.ts`) reads the first fenced `json` block in this section. GitHub's own answers win: the block fills only what GitHub cannot say, and where both say different things the field becomes unknown. It grants nothing, picks no enforced merge method, makes no dispatch safe, and relaxes no check.
+orchy's release derivation (start-orchy's `scripts/release-profile.ts`) reads the first fenced `json` block in this section. The block fills only what GitHub cannot say; where both answer and disagree, the field becomes unknown. It grants nothing, picks no enforced merge method, makes no dispatch safe, and relaxes no check.
 
 | Key | Values |
 |---|---|

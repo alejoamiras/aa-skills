@@ -683,6 +683,9 @@ CLAUDE_PID=$s2 AC unlock >/dev/null; ORCHY_HOME="$HB" "$ORCHY" unlock >/dev/null
 for f in "$T"/cap/*/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/null || true; done; for f in "$MOCK_DIR"/gc.*; do kill "$(cat "$f")" 2>/dev/null || true; done
 wait "$pgp" || { tail -n 20 "$T/page.log"; fail "page smoke"; }; pgp=
 # no project names, home paths or roster names anywhere in the skills
-if grep -rnE 'nulo|Nulo|program-2|program2|/mnt/user-data|/Users/|martu|proton|icloud|GzKw77' "$K" "$HERE/skills/pause-orchy" --include='*.md' --include='*.sh' --include='*.py' --include='*.js' --include='*.ts' --include='*.json' --include='*.cjs' | grep -v 'page/fixtures' ; then fail "project-specific text in the skill"; fi
+if grep -rnE 'nulo|Nulo|program-2|program2|/mnt/user-data|/Users/|martu|proton|icloud|GzKw77' "$K" "$HERE/skills/pause-orchy" "$HERE/skills/my-stack" \
+  "$HERE/tests/orchy-release-profile.test.ts" "$HERE/tests/live-orchy-release.sh" "$HERE/tests/mocks/orchy/release" --include='*.md' --include='*.sh' \
+  --include='*.py' --include='*.js' --include='*.ts' --include='*.json' --include='*.cjs' --include='*.yml' --include='*.jq' --include=gh | grep -v 'page/fixtures' ; then
+  fail "project-specific text in the skill"; fi
 [ ! -e "$MOCK_DIR/locked.log" ] || fail "a call held holds.lock: $(cat "$MOCK_DIR/locked.log")"
 echo "smoke-orchy: ok"

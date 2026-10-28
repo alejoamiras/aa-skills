@@ -20,7 +20,7 @@ The real files live **here**; `~/.claude/skills/<name>` and `~/.agents/skills/<n
 | [`kimi`](skills/kimi/) | Second-opinion consults via the Kimi Code CLI (Moonshot K3/K2.x) — codex-style harness with a worktree-change tripwire (kimi has no read-only sandbox) |
 | [`start-orchy`](skills/start-orchy/) | Runs a repository's whole backlog as an unattended program from its root folder: issues triaged into lanes, one headless lead per lane arc on the owner's other `claude-usage` accounts (one worktree each), merges on a mechanical policy, every product decision on a signed decision page with pictures, a 35-minute tick until done. Claude Code driver only |
 | [`pause-orchy`](skills/pause-orchy/) | Hands a start-orchy program's orchestrator seat over before moving it to another `claude-usage` account: stops the loop and the Monitor, writes the handover line and unlocks, while leads and watchers keep running for the next session to adopt |
-| [`my-stack`](skills/my-stack/) | Project scaffolding: Bun, Biome, CI/CD conventions, supply-chain hardening |
+| [`my-stack`](skills/my-stack/) | Project scaffolding: Bun, Biome, CI/CD conventions, supply-chain hardening, branch and release shapes |
 | [`run-isolation`](skills/run-isolation/) | Make a repo's local services/tests parallel-safe across many agents — shared `~/.agents` port registry, process-group teardown |
 | [`wallet-sdk`](skills/wallet-sdk/) | `@aztec/wallet-sdk` integration patterns for dApp frontends + wallet extensions |
 
