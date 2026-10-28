@@ -31,6 +31,8 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   ask close-lane <slug>        after teardown: each ask laned there is done (delivered, with its PR) or reopened, from the reports' ASKS: lines
 #   waiting add <ref> <text> | done <ref> | list [--json]   what waits on the owner, one item per ref (pr:N issue:N page:N
 #                                ask:askN lane:<slug> other:<slug>); add replaces the text and keeps since; orchy.waiting/1 with --json
+#   hold add <ref> <all|trunk> | done <ref> | list [--json]   pause the program for a peer or a release freeze, one hold per
+#                                waiting ref: all refuses worktrees, leads and acts and holds every merge; trunk holds trunk merges
 #   wt-new <slug>...             create worktrees from origin/<trunk> and install deps; sequential; refuses an existing slug
 #   launch [--light] <key> <slug> <account|auto>       start a headless lead on prompts/<key>.md inside the lane worktree; only the
 #                                seat holder launches, on an account the policy allows (auto: the one whose headroom expires soonest)
@@ -87,7 +89,7 @@ for d in "${ds[@]}"; do [ ! -L "$d" ] && [ -O "$d" ] || { echo "orchy: $d must b
 f=$({ find "$H" -maxdepth 2 ! -user "$EUID"; [ $under = 0 ] || find "$CAP" -maxdepth 1 ! -user "$EUID"; } 2>/dev/null | head -1)
 [ -z "$f" ] || { echo "orchy: $f belongs to another user; refusing a home someone else could write" >&2; exit 1; }
 # Readers keep the ownership checks but create nothing, so a poller never changes the home it reads.
-ro=0; case "$cmd" in state|config|local|session-id|receipt|accounts|grants) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting) case "${1:-}" in list) ro=1;; esac;; esac
+ro=0; case "$cmd" in state|config|local|session-id|receipt|accounts|grants) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting|hold) case "${1:-}" in list) ro=1;; esac;; esac
 if [ $ro = 0 ]; then
   mkdir -p "$H"/{briefs,prompts,reports,leads,watch,wt,scratch,inbox,page/shots,page/build}
   chmod 700 "$H"; [ $under = 1 ] && chmod 700 "$CAP"
@@ -415,6 +417,21 @@ waiting_read() { # orchy.waiting/1 on stdout, a missing file as empty; a symlink
       and ([.waiting[].ref] | length == (unique | length)))
     | {schema, waiting: [.waiting[] | {ref, text, since}]}' "$WAITING" 2>/dev/null || { echo "refused: $WAITING is not orchy.waiting/1" >&2; return 1; }
 }
+HOLDS="$H/holds.json"; HOLDS_LOCK="$H/holds.lock"
+holds_read() { # orchy.holds/1 on stdout, a missing file as empty; a symlinked, non-regular or malformed one refuses
+  if [ -L "$HOLDS" ] || { [ -e "$HOLDS" ] && [ ! -f "$HOLDS" ]; }; then echo "refused: $HOLDS must be a regular file, not a symlink" >&2; return 1; fi
+  [ -e "$HOLDS" ] || { echo '{"schema":"orchy.holds/1","holds":[]}'; return 0; }
+  # jq's ^ and $ match at line ends, so a ref with a newline is refused before the grammar
+  jq -sce --arg re "$WREF" 'select(length == 1) | .[0] | select(.schema == "orchy.holds/1" and (.holds | type) == "array"
+      and all(.holds[]; type == "object" and ([.ref, .scope, .since] | map(type)) == ["string", "string", "string"]
+        and (.ref | contains("\n") | not) and (.ref | test($re)) and (.scope == "all" or .scope == "trunk") and (.since | try fromdateiso8601 catch null) != null)
+      and ([.holds[].ref] | length == (unique | length)))
+    | {schema, holds: [.holds[] | {ref, scope, since}]}' "$HOLDS" 2>/dev/null || { echo "refused: $HOLDS is not orchy.holds/1" >&2; return 1; }
+}
+held() { # held all|trunk: the ref of the oldest hold that stops this scope (an all hold stops both), else nothing; exit 1 when unreadable
+  local h; h=$(holds_read) || return 1
+  jq -r --arg s "$1" '[.holds[] | select(.scope == "all" or .scope == $s)] | first | .ref // empty' <<<"$h"; }
+hold_guard() { local r; r=$(held all) || exit 1; [ -z "$r" ] || { echo "refused: $r holds the program (ORCHY hold list)" >&2; exit 1; }; }
 waiting_text_ok() { # one line of 1-160 code points; Python, since jq silently replaces invalid UTF-8
   printf '%s' "$1" | python3 -I -c '
 import sys
@@ -688,8 +705,32 @@ waiting)
       ev "waiting.$sub" ref="$r"; echo "waiting $sub $r" ) 8>>"$H/waiting.lock";;
   *) echo "usage: waiting add <ref> <text> | done <ref> | list [--json]" >&2; exit 1;;
   esac;;
+hold)
+  sub=${1:-}; shift || true
+  case "$sub" in
+  list)
+    h=$(holds_read) || exit 1
+    if [ "${1:-}" = --json ]; then printf '%s\n' "$h"; else jq -r 'if .holds == [] then "no holds" else .holds[] | "\(.ref)  \(.scope)  since \(.since)" end' <<<"$h"; fi;;
+  add|done)
+    need flock; r=${1:-}; sc=${2:-}
+    [[ "$r" =~ $WREF ]] || { echo "refused: a ref is pr:<n>, issue:<n>, page:<n>, ask:<askN>, lane:<slug> or other:<slug>" >&2; exit 1; }
+    case "$sub $#" in "add 2") [[ "$sc" =~ ^(all|trunk)$ ]] || { echo "refused: a hold's scope is all or trunk" >&2; exit 1; };; "done 1") ;;
+      *) echo "usage: hold add <ref> <all|trunk> | done <ref>" >&2; exit 1;; esac
+    # exclusive against the shared span of every merge and act call: add returns only after the calls already past their check
+    ( flock -w 300 7 || { echo "refused: holds.lock is busy for 300 s" >&2; exit 1; }
+      h=$(holds_read) || exit 1
+      if [ "$sub" = add ]; then
+        h=$(jq -c --arg r "$r" --arg s "$sc" --arg at "$(now)" '.holds |= if any(.[]; .ref == $r) then map(if .ref == $r then .scope = $s else . end) else . + [{ref: $r, scope: $s, since: $at}] end' <<<"$h") || exit 1
+      else
+        jq -e --arg r "$r" 'any(.holds[]; .ref == $r)' <<<"$h" >/dev/null || { echo "refused: no hold on $r" >&2; exit 1; }
+        h=$(jq -c --arg r "$r" '.holds |= map(select(.ref != $r))' <<<"$h") || exit 1
+      fi
+      if ! tmp=$(mktemp "$H/.holds.XXXXXX") || ! printf '%s\n' "$h" > "$tmp" || ! mv -f "$tmp" "$HOLDS"; then rm -f "${tmp:-}"; echo "refused: cannot write $HOLDS" >&2; exit 1; fi
+      echo "hold $sub $r${sc:+ $sc}" ) 7>>"$HOLDS_LOCK";;
+  *) echo "usage: hold add <ref> <all|trunk> | done <ref> | list [--json]" >&2; exit 1;;
+  esac;;
 wt-new)
-  need agent-worktree; install=$(cfg '.install // empty'); rc=0
+  hold_guard; need agent-worktree; install=$(cfg '.install // empty'); rc=0
   git -C "$ROOT" fetch -q origin "$TRUNK" || { echo "fetch failed"; exit 1; }
   for s in "$@"; do
     out="$H/wt/$s.out"; w="$WT_ROOT/$s"
@@ -711,7 +752,7 @@ launch|resume)
   # a dot-led key's .started file would be invisible to every *.started glob, so to the cap and to liveness
   [[ "$k" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ && "$w" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || { echo "refused: key and slug are [A-Za-z0-9._-], not starting with a dot or a dash" >&2; exit 1; }
   [ -n "$a" ] || { echo "usage: $cmd [--light] <key> <slug> <account|auto> ..." >&2; exit 1; }
-  cap_root_ok || exit 1; seat_held || exit 1
+  cap_root_ok || exit 1; hold_guard; seat_held || exit 1
   [ "$cmd" = resume ] && [ "$a" = auto ] && { echo "refused: a resume runs on its session's own account; name it" >&2; exit 1; }
   v=$(acct_view) || exit 1
   jq -e .known <<<"$v" >/dev/null || { echo "refused: this session runs on $(jq -r .orchestrator <<<"$v"), which is not on the claude-usage roster, so no lead can be kept off it" >&2; exit 1; }
@@ -865,6 +906,7 @@ snapshot)
     "page \(.no) \(.name): " + (if .added_at then (($now - (.added_at | fromdateiso8601)) | "waiting \(. / 86400 | floor)d\(. % 86400 / 3600 | floor)h") else "age unknown" end)' "$H/page/decisions.json" 2>/dev/null
   echo "-- waiting"; "$0" waiting list 2>&1
   echo "-- grants"; "$0" grants 2>&1
+  echo "-- holds"; "$0" hold list 2>&1
   # launch reads only the cached snapshot, so the tick refreshes it: a reading over 2 h old allows light leads only
   echo "-- headroom"; claude-usage refresh >/dev/null 2>&1; "$0" accounts 2>&1 | head -20;;
 accounts)
@@ -1051,7 +1093,7 @@ scan)
   [ -z "$why" ] && { echo "QUICK: within bounds"; exit 0; }
   echo "QUICK: past the bounds: $why"; exit 3;;
 watch-merge)
-  need gh; N=${1:-}; PIN=${2:-}; ACT=""; BASE=$TRUNK
+  need gh; need timeout; N=${1:-}; PIN=${2:-}; ACT=""; BASE=$TRUNK
   if [ "${3:-}" = --act ]; then   # armed by act merge: its base's checks and method, no report, no teardown, the authority re-read before the call
     method=${5:-}; AUTH=${6:-}; AASK=${7:-}; LANE=${8:--}
     ACT=$(act_norm merge "$N" "$PIN" "${4:-}" "$method" 2>/dev/null) && [[ "$AUTH" =~ ^(go|ok|grant)$ && "$AASK" =~ ^ask[0-9]+$ ]] \
@@ -1108,56 +1150,76 @@ watch-merge)
   fi
   # the pin binds the head, not the base: the merge must land on this base or a descendant of it
   B0=$(gh api "repos/$REPO/commits/$BASE" --jq .sha 2>/dev/null) && sha_ok "$B0" || { echo "REFUSED: cannot read $BASE's head"; exit 4; }
-  m=""; ok=0; missing_rounds=0; api_fail=0
-  for i in $(seq 1 "$rounds"); do
-    st=$(pr_state) || { api_fail=$((api_fail+1)); [ "$api_fail" = 10 ] && echo "$(date -u +%H:%MZ) API FAILURE: gh pr view failed 10 rounds running"; sleep "$WS"; continue; }; read -r state draft base head _ <<<"$st"
-    [ "$state" = OPEN ] || { echo "#$N is $state; watcher stopped"; exit 4; }
-    [ "$head" = "$PIN" ] || { echo "HEAD MOVED to $head (scanned $PIN); rescan before merging"; exit 2; }
-    runs=$(checks "$head") || { api_fail=$((api_fail+1)); [ "$api_fail" = 10 ] && echo "$(date -u +%H:%MZ) API FAILURE: check-runs unreadable 10 rounds running"; sleep "$WS"; continue; }; api_fail=0; ok=0; bad=""; absent=""
-    for name in "${REQ[@]}"; do
-      line=$(awk -F'\t' -v n="$name" '$1==n' <<<"$runs" | tail -1)
-      case "$line" in "") absent="$absent $name";; *$'\t'completed$'\t'success) ok=$((ok+1));; *$'\t'completed$'\t'failure|*$'\t'completed$'\t'cancelled|*$'\t'completed$'\t'timed_out) bad="$bad $name";; esac
+  HS=all; [ "$BASE" = "$TRUNK" ] && HS=trunk   # a trunk hold stops only merges into the trunk
+  i=0; said_held=""; merged=0; claimed=0
+  while :; do   # polling, then the merge step, which comes back here when a hold landed in between
+    m=""; ok=0; missing_rounds=0; api_fail=0
+    while [ "$i" -lt "$rounds" ]; do i=$((i+1))
+      st=$(pr_state) || { api_fail=$((api_fail+1)); [ "$api_fail" = 10 ] && echo "$(date -u +%H:%MZ) API FAILURE: gh pr view failed 10 rounds running"; sleep "$WS"; continue; }; read -r state draft base head _ <<<"$st"
+      [ "$state" = OPEN ] || { echo "#$N is $state; watcher stopped"; exit 4; }
+      [ "$head" = "$PIN" ] || { echo "HEAD MOVED to $head (scanned $PIN); rescan before merging"; exit 2; }
+      runs=$(checks "$head") || { api_fail=$((api_fail+1)); [ "$api_fail" = 10 ] && echo "$(date -u +%H:%MZ) API FAILURE: check-runs unreadable 10 rounds running"; sleep "$WS"; continue; }; api_fail=0; ok=0; bad=""; absent=""
+      for name in "${REQ[@]}"; do
+        line=$(awk -F'\t' -v n="$name" '$1==n' <<<"$runs" | tail -1)
+        case "$line" in "") absent="$absent $name";; *$'\t'completed$'\t'success) ok=$((ok+1));; *$'\t'completed$'\t'failure|*$'\t'completed$'\t'cancelled|*$'\t'completed$'\t'timed_out) bad="$bad $name";; esac
+      done
+      # the table is indented: a check name is untrusted and may carry a newline, and no line of it may start a marker
+      [ -n "$bad" ] && { echo "$(date -u +%H:%MZ) REQUIRED FAILED:$bad"; printf '  %s\n' "${runs//$'\n'/$'\n  '}"; exit 1; }
+      if [ -n "$absent" ]; then missing_rounds=$((missing_rounds+1)); [ "$missing_rounds" = 10 ] && echo "$(date -u +%H:%MZ) MISSING REQUIRED CHECK (no run or status after 10 rounds):$absent; a renamed check waits here until the timeout"; else missing_rounds=0; fi
+      # a hold waits and never ends the watcher; an unreadable holds.json holds too
+      hr=$(held "$HS") || hr="holds.json, unreadable"
+      if [ -n "$hr" ]; then [ "$hr" = "$said_held" ] || echo "$(date -u +%H:%MZ) HELD: $hr; waiting"; said_held=$hr; sleep "$WS"; continue; fi
+      said_held=""
+      if [ "$ok" = "${#REQ[@]}" ] && report_done && trunk_ok; then
+        read -r state draft base head mergeable mstate <<<"$(pr_state)"; m="$mergeable $mstate"
+        [ "$m" = "MERGEABLE CLEAN" ] && break
+        # BEHIND (a strict base) never clears while the head is pinned: the base has to be merged in, and the PR rescanned
+        case "$m" in CONFLICTING*|*DIRTY) echo "$(date -u +%H:%MZ) DIRTY: $m"; exit 5;; *BEHIND) echo "$(date -u +%H:%MZ) DIRTY: $m; bring the base in first"; exit 5;; esac
+      fi
+      sleep "$WS"
     done
-    # the table is indented: a check name is untrusted and may carry a newline, and no line of it may start a marker
-    [ -n "$bad" ] && { echo "$(date -u +%H:%MZ) REQUIRED FAILED:$bad"; printf '  %s\n' "${runs//$'\n'/$'\n  '}"; exit 1; }
-    if [ -n "$absent" ]; then missing_rounds=$((missing_rounds+1)); [ "$missing_rounds" = 10 ] && echo "$(date -u +%H:%MZ) MISSING REQUIRED CHECK (no run or status after 10 rounds):$absent; a renamed check waits here until the timeout"; else missing_rounds=0; fi
-    if [ "$ok" = "${#REQ[@]}" ] && report_done && trunk_ok; then
-      read -r state draft base head mergeable mstate <<<"$(pr_state)"; m="$mergeable $mstate"
-      [ "$m" = "MERGEABLE CLEAN" ] && break
-      # BEHIND (a strict base) never clears while the head is pinned: the base has to be merged in, and the PR rescanned
-      case "$m" in CONFLICTING*|*DIRTY) echo "$(date -u +%H:%MZ) DIRTY: $m"; exit 5;; *BEHIND) echo "$(date -u +%H:%MZ) DIRTY: $m; bring the base in first"; exit 5;; esac
-    fi
-    sleep "$WS"
-  done
-  echo "$(date -u +%H:%MZ) required ok=$ok/${#REQ[@]} report_done=$(report_done && echo yes || echo no) state: $m"
-  [ "$m" = "MERGEABLE CLEAN" ] || { echo "TIMEOUT; not merged"; exit 3; }
-  merged=0; for try in 1 2 3; do
-    [ "$(cfg '.mode // empty')" = triage ] && { echo "REFUSED: orchy.json mode is triage; not merged"; exit 4; }
-    # every try: gh merges into whatever base the PR names then, and a PR can be retargeted during a retry's wait
-    read -r state draft base head _ <<<"$(pr_state)"
-    [ "$state" = OPEN ] && [ "$draft" = false ] && [ "$base" = "$BASE" ] && [ "$head" = "$PIN" ] || { echo "REFUSED at merge time: state=$state draft=$draft base=$base head=$head"; exit 4; }
-    [ "$try" = 1 ] || trunk_ok || { echo "TRUNK RED at merge time; not merged"; exit 7; }
-    case $(gh api "repos/$REPO/compare/$B0...$BASE" --jq .status 2>/dev/null) in
-      ahead|identical) ;;
-      "") echo "REFUSED at merge time: cannot read $BASE's history"; exit 4;;
-      *) echo "HEAD MOVED: $BASE history was rewritten since arming"; exit 2;;
-    esac
-    # an act spends its authority once, before its first call: a retry on a moved base is the same attempt
-    if [ -n "$ACT" ] && [ "$try" = 1 ]; then
-      [ "$AUTH" != grant ] || grant_pr_ok "$N" || { echo "REFUSED at merge time: #$N is no longer Dependabot's own"; exit 4; }
-      claim "$AUTH" "$AASK" "$ACT" "$LANE" 2>/dev/null || { echo "REFUSED at merge time: $ACT is no longer authorized"; exit 4; }
-    elif [ -n "$ACT" ]; then
-      unrevoked "$AUTH" "$AASK" "$ACT" "$LANE" || { echo "REFUSED at merge time: $ACT was revoked before its retry"; exit 4; }
-    fi
-    margs=("--$method"); [ -n "$ACT" ] || margs+=(--delete-branch)   # an act's head may be the trunk itself
-    out=$(gh pr merge "$N" --repo "$REPO" "${margs[@]}" --match-head-commit "$PIN" 2>&1 | tail -1); echo "$out"
-    for _ in 1 2 3; do sleep $((WS/10)); s=$(gh pr view "$N" --repo "$REPO" --json state --jq .state 2>/dev/null) && break; done
-    [ -n "$s" ] || { echo "#$N state unreadable after the merge call; check it by hand"; exit 6; }
-    [ "$s" = MERGED ] && { merged=1; break; }
-    echo "$out" | grep -q "Base branch was modified" || break; sleep $((WS/2))
+    echo "$(date -u +%H:%MZ) required ok=$ok/${#REQ[@]} report_done=$(report_done && echo yes || echo no) state: $m"
+    [ "$m" = "MERGEABLE CLEAN" ] || { echo "TIMEOUT; not merged"; exit 3; }
+    for try in 1 2 3; do
+      [ "$(cfg '.mode // empty')" = triage ] && { echo "REFUSED: orchy.json mode is triage; not merged"; exit 4; }
+      # every try: gh merges into whatever base the PR names then, and a PR can be retargeted during a retry's wait
+      read -r state draft base head _ <<<"$(pr_state)"
+      [ "$state" = OPEN ] && [ "$draft" = false ] && [ "$base" = "$BASE" ] && [ "$head" = "$PIN" ] || { echo "REFUSED at merge time: state=$state draft=$draft base=$base head=$head"; exit 4; }
+      [ "$try" = 1 ] || trunk_ok || { echo "TRUNK RED at merge time; not merged"; exit 7; }
+      case $(gh api "repos/$REPO/compare/$B0...$BASE" --jq .status 2>/dev/null) in
+        ahead|identical) ;;
+        "") echo "REFUSED at merge time: cannot read $BASE's history"; exit 4;;
+        *) echo "HEAD MOVED: $BASE history was rewritten since arming"; exit 2;;
+      esac
+      margs=("--$method"); [ -n "$ACT" ] || margs+=(--delete-branch)   # an act's head may be the trunk itself
+      # holds.lock, shared, spans the hold check, the claim, the call and its outcome line; the calls run without the descriptor
+      ( flock -s -w 300 7 || { echo "REFUSED at merge time: holds.lock is busy for 300 s"; exit 4; }
+        hr=$(held "$HS") || hr="holds.json, unreadable"; [ -z "$hr" ] || exit 10
+        # an act spends its authority once, before its first call: a retry, on a moved base or after a hold, is the same attempt
+        if [ -n "$ACT" ] && [ "$claimed" = 0 ]; then
+          [ "$AUTH" != grant ] || (exec 7>&-; grant_pr_ok "$N") || { echo "REFUSED at merge time: #$N is no longer Dependabot's own"; exit 4; }
+          claim "$AUTH" "$AASK" "$ACT" "$LANE" 2>/dev/null || { echo "REFUSED at merge time: $ACT is no longer authorized"; exit 4; }
+        elif [ -n "$ACT" ]; then
+          unrevoked "$AUTH" "$AASK" "$ACT" "$LANE" || { echo "REFUSED at merge time: $ACT was revoked before its retry"; exit 4; }
+        fi
+        out=$(exec 7>&-; timeout 120 gh pr merge "$N" --repo "$REPO" "${margs[@]}" --match-head-commit "$PIN" 2>&1 | tail -1); echo "$out"
+        for _ in 1 2 3; do sleep $((WS/10)); s=$(exec 7>&-; gh pr view "$N" --repo "$REPO" --json state --jq .state 2>/dev/null) && break; done
+        [ -n "$s" ] || { echo "#$N state unreadable after the merge call; check it by hand"; exit 6; }
+        if [ "$s" = MERGED ]; then
+          (exec 7>&-; gh pr view "$N" --repo "$REPO" --json state,mergeCommit --jq '"#'"$N"' \(.state) \(.mergeCommit.oid)"' 2>/dev/null) || echo "#$N MERGED"; exit 0
+        fi
+        grep -q "Base branch was modified" <<<"$out" && exit 11; exit 12 ) 7>>"$HOLDS_LOCK"
+      rc=$?; case $rc in
+        0) merged=1; break;;
+        10) continue 2;;   # a hold landed after the last poll: back to polling, which says HELD
+        11) claimed=1; sleep $((WS/2));;
+        12) break;;
+        *) exit "$rc";;
+      esac
+    done
+    break
   done
   [ "$merged" = 1 ] || { echo "NOT MERGED; check #$N by hand"; exit 6; }
-  gh pr view "$N" --repo "$REPO" --json state,mergeCommit --jq '"#'"$N"' \(.state) \(.mergeCommit.oid)"' 2>/dev/null || echo "#$N MERGED"
   [ -z "$ACT" ] || exit 0
   [ "$ARCH" = - ] && { echo "--- no plan to archive: the orchestrator tears $LANE down"; exit 0; }
   echo "--- teardown $LANE once the archived plan is on $TRUNK"
@@ -1190,14 +1252,16 @@ act)
       ask=$(grant_ask "$(act_scope "$X")") || exit 1; auth=grant; lbl=grant
       authorized grant "$ask" "$X" || no "$X was spent once, and a grant never covers it again";;
   esac
-  call() { # call <api-path> <json-body>: the claim, then one POST; a timeout is AMBIGUOUS and never retried
-    claim "$auth" "$ask" "$X" "$lane" || exit 1
-    local ef rc; ef=$(mktemp "$H/scratch/act.XXXXXX"); CALL_OUT=$(timeout 120 gh api "$1" -X POST --input - <<<"$2" 2>"$ef"); rc=$?
-    [ "$rc" != 124 ] || { rm -f "$ef"; echo "AMBIGUOUS: $X may have happened; it is spent; check by hand, never retry"; exit 6; }
-    [ "$rc" = 0 ] || grep -qE 'HTTP 4[0-9]{2}([^0-9]|$)' "$ef" \
-      || { echo "AMBIGUOUS: $X may have happened ($(tail -n 1 "$ef" | cut -c1-160)); it is spent; check by hand, never retry"; rm -f "$ef"; exit 6; }
-    [ "$rc" = 0 ] || { echo "refused: GitHub refused $X ($(tail -n 1 "$ef" | cut -c1-160)); it is spent" >&2; rm -f "$ef"; exit 1; }
-    rm -f "$ef"; }
+  call() { # call <api-path> <json-body>: the hold check, the claim and one POST; only an HTTP 4xx is a refusal, never retried
+    local of ef rc; of=$(mktemp "$H/scratch/act.XXXXXX") && ef=$(mktemp "$H/scratch/act.XXXXXX") || no "cannot write $H/scratch"
+    # holds.lock shared spans the check and the call, which runs without the descriptor: a hold added meanwhile waits for it
+    ( flock -s -w 300 7 || { echo "refused: holds.lock is busy for 300 s" >&2; exit 1; }
+      hold_guard; claim "$auth" "$ask" "$X" "$lane" || exit 1
+      timeout 120 gh api "$1" -X POST --input - <<<"$2" >"$of" 2>"$ef" 7>&-; rc=$?; m=$(tail -n 1 "$ef" | cut -c1-160)
+      [ "$rc" = 0 ] && exit 0
+      [ "$rc" != 124 ] && grep -qE 'HTTP 4[0-9]{2}([^0-9]|$)' "$ef" && { echo "refused: GitHub refused $X ($m); it is spent" >&2; exit 1; }
+      echo "AMBIGUOUS: $X may have happened${m:+ ($m)}; it is spent; check by hand, never retry"; exit 6 ) 7>>"$HOLDS_LOCK"
+    rc=$?; CALL_OUT=$(cat "$of"); rm -f "$of" "$ef"; [ "$rc" = 0 ] || exit "$rc"; }
   case $kind in
   merge)
     N=${af[1]}; sha=${af[2]}; base=${af[3]}; m=${af[4]}
@@ -1282,19 +1346,21 @@ disarm)
   done;;
 teardown)
   need gh; need agent-worktree; s=$1; W="$WT_ROOT/$s"; q="$(basename "$ROOT")/$s"
-  [ -d "$W" ] || { echo "$s: no worktree dir"; (cd "$ROOT" && agent-worktree done "$q" --forget 2>&1 | tail -1); exit 0; }
+  # a release freeze is the lane's own hold: it ends with the lane
+  end_hold() { holds_read 2>/dev/null | jq -e --arg r "lane:$s" 'any(.holds[]; .ref == $r)' >/dev/null && "$0" hold "done" "lane:$s"; return 0; }
+  [ -d "$W" ] || { echo "$s: no worktree dir"; (cd "$ROOT" && agent-worktree done "$q" --forget 2>&1 | tail -1); end_hold; exit 0; }
   # a lead belongs to the lane whose worktree it runs in (launch starts it there), whatever its key
   wr=$(realpath -m "$W")
   lead_rows | while read -r k _ _ p; do c=$(readlink "/proc/$p/cwd" 2>/dev/null) || continue; { [ "$c" = "$wr" ] || [ "${c#"$wr"/}" != "$c" ]; } && echo "$k"; done | grep -q . && { echo "$s: a lead of this lane is alive; refusing"; exit 4; }
   b=$(git -C "$W" rev-parse --abbrev-ref HEAD); head=$(git -C "$W" rev-parse HEAD); dirty=$(git -C "$W" status --short | wc -l)
   [ "$dirty" = "0" ] || { echo "$s: $dirty uncommitted files; refusing"; exit 3; }
-  if out=$(cd "$ROOT" && agent-worktree done "$q" --merged --trunk "$TRUNK" 2>&1); then echo "$out" | tail -2; exit 0; fi
+  if out=$(cd "$ROOT" && agent-worktree done "$q" --merged --trunk "$TRUNK" 2>&1); then echo "$out" | tail -2; end_hold; exit 0; fi
   echo "$out" | grep -qi 'refus' || { echo "$s: agent-worktree failed: $(echo "$out" | tail -1)"; exit 5; }
   # the squash proof can fail after a later PR rewrote a file the squash carried; a HEAD that IS a merged PR's head is proof enough, when the config allows a hand removal
   [ "$(cfg '.teardown.hand_remove // false')" = true ] || { echo "$out" | tail -2; echo "$s: hand removal is off (teardown.hand_remove); relay the refusal"; exit 2; }
   pr=$(gh pr list --repo "$REPO" --head "$b" --state merged --json number,headRefOid,baseRefName --jq ".[] | select(.headRefOid==\"$head\" and .baseRefName==\"$TRUNK\") | .number" | head -1)
   [ -n "$pr" ] || { echo "$s: HEAD $head is not the head of a PR merged into $TRUNK from $b; refusing"; exit 2; }
-  (cd "$ROOT" && git worktree remove --force "$W" && git branch -D "$b" >/dev/null && agent-worktree done "$q" --forget >/dev/null 2>&1; git worktree prune); echo "$s: hand-removed (branch $b at $head = merged PR #$pr)";;
+  (cd "$ROOT" && git worktree remove --force "$W" && git branch -D "$b" >/dev/null && agent-worktree done "$q" --forget >/dev/null 2>&1; git worktree prune); echo "$s: hand-removed (branch $b at $head = merged PR #$pr)"; end_hold;;
 receipt)
   js=0; off=0; want=""; for o in "$@"; do case "$o" in --json) js=1;; --offline) off=1;; *) want=$o;; esac; done
   [ $off = 1 ] || need gh
