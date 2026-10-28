@@ -105,4 +105,6 @@ A finding becomes a change only once its path is written (initial conditions, ac
 - A private repository on a free plan cannot have a ruleset, so only orchy's merge policy enforces its recorded checks; anyone with push rights can land on `main` unchecked.
 - A deployment approval names the run and its environments, not the attempt: a re-run that reaches the gate between `act approve`'s check and its call is approved under the same authority, at the same commit with the same inputs.
 - A dispatch's ref that moves between `act dispatch`'s check and its call runs the workflow at the new head.
+- A revoke that lands after an act's claim does not stop that act's call: the claim is the point of no return.
+- A go's approval binds a dispatch's run by its workflow, commit and start time, not its run id: another writer's dispatch of the same workflow at the same commit, after orchy's, is indistinguishable from it.
 - The close-out guard reads open PRs before taking the spawn lock: a close-out lead that opens its PR and exits inside that window is seen by neither check, and a second close-out can start. Closing it needs a network call under the lock.

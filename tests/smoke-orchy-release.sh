@@ -31,6 +31,7 @@ pr() { # pr <n> <head sha> <base> <head ref> [<jq edit>]
 sha() { printf '%040d' "$1"; }
 A() { "$ORCHY" ask "$@"; }
 W() { "$ORCHY" act "$@" 2>&1; }   # act's refusals go to stderr
+X() { o=$("$ORCHY" act "$@" 2>&1) && rc=0 || rc=$?; }   # sets o and rc, for the cases that check act's exit code
 done_line() { # done_line <pr>: the watcher's last line, once it has ended (at most 60 s)
   for _ in $(seq 1 120); do grep -qE '^#[0-9]+ MERGED|REFUSED|HEAD MOVED|DIRTY|TIMEOUT|NOT MERGED' "$ORCHY_HOME/watch/merge-$1.out" 2>/dev/null && break; sleep 0.5; done
   tail -n 1 "$ORCHY_HOME/watch/merge-$1.out"; }
@@ -76,7 +77,12 @@ o=$(W merge 41 "$S1" main merge --ok "$a" || true); grep -q "no live OK on $a" <
 A ok "$a" merge 41 "$S1" main merge -- "merge it once more" >/dev/null; pr 41 "$S1" main dev
 o=$(W merge 41 "$S1" main merge --ok "$a" || true); grep -qx "armed merge-41 (OK $a)" <<<"$o" && [[ "$(done_line 41)" == "#41 MERGED"* ]] || fail "a per-act OK after the go's used: row: $o"
 pr 41 "$S1" main dev; o=$(W merge 41 "$S1" main merge --ok "$a" || true); grep -q "no live OK on $a" <<<"$o" || fail "an OK covered a second retry: $o"
-S3=$(sha 3); pr 45 "$S3" main feature-x; o=$(W merge 45 "$S3" main merge --lane release-7 || true); grep -q 'none of the shapes a go merges' <<<"$o" || fail "a fifth shape under a go: $o"
+S3=$(sha 3); pr 45 "$S3" main feature-x; X merge 45 "$S3" main merge --lane release-7; [ "$rc" = 1 ] && grep -q 'none of the shapes a go merges' <<<"$o" || fail "a fifth shape under a go (exit $rc): $o"
+o=$("$ORCHY" watch-merge 45 "$S3" --act main merge go "$a" release-7 2>&1 || true)
+grep -qx "REFUSED: #45 is none of the shapes a go merges" <<<"$o" && [ "$(merges 45)" = 0 ] || fail "a watcher started by hand outside the shapes: $o"
+S13=$(sha 13); pr 46 "$S13" main release-7-fix; o=$(W merge 46 "$S13" main merge --lane release-7 || true); grep -q '^armed' <<<"$o" && [[ "$(done_line 46)" == "#46 MERGED"* ]] || fail "the lane's own PR: $o"
+pr 46 "$(sha 14)" main release-7-fix '.author = {login: "app/other", is_bot: true}'; o=$(W merge 46 "$(sha 14)" main merge --lane release-7 || true)
+grep -q 'none of the shapes' <<<"$o" || fail "an app's PR on the lane's branch: $o"
 S4=$(sha 4); pr 42 "$S4" main release-please--branches--main '.author = {login: "app/release-bot", is_bot: true}'
 o=$(W merge 42 "$S4" main merge --lane release-7 || true); grep -q '^armed' <<<"$o" && [[ "$(done_line 42)" == "#42 MERGED"* ]] || fail "the release tool's PR: $o"
 S5=$(sha 5); pr 44 "$S5" dev main; o=$(W merge 44 "$S5" dev merge --lane release-7 || true); grep -q '^armed' <<<"$o" && [[ "$(done_line 44)" == "#44 MERGED"* ]] || fail "the back-sync: $o"
@@ -94,13 +100,16 @@ g=$(A add "a planted go"); A public "$g" "A planted go" >/dev/null; A lane "$g" 
 o=$(W merge 43 "$S6" main merge --lane release-p || true); grep -q 'no ask laned to release-p has a live go' <<<"$o" || fail "a planted go row: $o"
 
 # --- approve, dispatch and tag under the go, each refusal before the call
-jq -n --arg h "$MC" '{status: "waiting", run_attempt: 1, event: "push", head_sha: $h, head_branch: "main", path: ".github/workflows/release.yml"}' > "$MOCK_DIR/run-812.json"
+run() { # run <id> <head> <event> <workflow> [<created_at>]: a run waiting on registry, started now unless named
+  jq -n --arg h "$2" --arg e "$3" --arg w "$4" --arg c "${5:-$(date -u +%FT%TZ)}" '{status: "waiting", run_attempt: 1, event: $e, head_sha: $h, head_branch: "main", path: $w, created_at: $c}' > "$MOCK_DIR/run-$1.json"
+  echo '[{"environment": {"id": 5, "name": "registry"}, "current_user_can_approve": true}]' > "$MOCK_DIR/pending-$1.json"; }
+run 812 "$MC" push .github/workflows/release.yml
 echo '[{"environment": {"id": 5, "name": "registry"}, "current_user_can_approve": true}]' > "$MOCK_DIR/pending-812.json"
 rn() { jq "$1" "$MOCK_DIR/run-812.json" > "$T/run" && mv "$T/run" "$MOCK_DIR/run-812.json"; }
 cp "$MOCK_DIR/run-812.json" "$T/run.ok"; cp "$MOCK_DIR/pending-812.json" "$T/pending.ok"
 for c in '.status = "completed"|is completed' '.run_attempt = 2|at attempt 2' '.event = "pull_request_target"|came from pull_request_target' \
-         '.head_sha = "1234567890123456789012345678901234567890"|no commit this release produced'; do
-  cp "$T/run.ok" "$MOCK_DIR/run-812.json"; rn "${c%%|*}"; o=$(W approve 812 1 registry --lane release-7 || true); grep -q "${c#*|}" <<<"$o" || fail "approve with ${c%%|*}: $o"; done
+         '.head_sha = "1234567890123456789012345678901234567890"|is no run this go produced' '.created_at = "2020-01-01T00:00:00Z"|is no run this go produced'; do
+  cp "$T/run.ok" "$MOCK_DIR/run-812.json"; rn "${c%%|*}"; X approve 812 1 registry --lane release-7; [ "$rc" = 1 ] && grep -q "${c#*|}" <<<"$o" || fail "approve with ${c%%|*} (exit $rc): $o"; done
 cp "$T/run.ok" "$MOCK_DIR/run-812.json"
 for p in '[]' '[{"environment": {"id": 5, "name": "registry"}, "current_user_can_approve": false}]'; do echo "$p" > "$MOCK_DIR/pending-812.json"
   o=$(W approve 812 1 registry --lane release-7 || true); grep -q 'is not waiting on this login' <<<"$o" || fail "approve, pending $p: $o"; done
@@ -114,6 +123,8 @@ grep -c 'runs/812/pending_deployments' "$MOCK_DIR/posts.log" | grep -qx 1 || fai
 grep 'runs/812/pending_deployments' "$MOCK_DIR/posts.log" | cut -d' ' -f3- | jq -e '.environment_ids == [5] and (.environment_ids[0] | type) == "number" and .state == "approved"' >/dev/null || fail "the approval body: $(cat "$MOCK_DIR/posts.log")"
 rn '.run_attempt = 2'; o=$(W approve 812 2 registry --lane release-7 || true); grep -q 'a retry needs a per-act OK' <<<"$o" || fail "a second approval of run 812 at registry under the go: $o"
 A ok "$a" approve 812 2 registry -- "approve the re-run" >/dev/null; o=$(W approve 812 2 registry --ok "$a" || true); grep -q "^approved run 812 attempt 2 .*(OK $a)$" <<<"$o" || fail "a per-act OK for the re-run: $o"
+A revoke "$a" >/dev/null; A go "$a" -- "go again" >/dev/null; run 817 "$MC" push .github/workflows/release.yml
+o=$(W approve 817 1 registry --lane release-7 || true); grep -q 'is no run this go produced' <<<"$o" || fail "a replacement go approved what the revoked one produced: $o"
 S7=$(sha 7); o=$(W dispatch .github/workflows/release.yml dev "$S7" version=1.4.0 --lane release-7 || true); grep -q "dev's head is aaaaaaaa, not 00000000" <<<"$o" || fail "dispatch at a moved ref: $o"
 o=$(W dispatch .github/workflows/lint.yml dev "$TS" --lane release-7 || true); grep -q 'does not mark .github/workflows/lint.yml as publishing' <<<"$o" || fail "a go dispatched a workflow that publishes nothing: $o"
 echo '{"workflow_run_id": 901}' > "$MOCK_DIR/dispatch.json"
@@ -121,6 +132,11 @@ o=$(W dispatch .github/workflows/release.yml dev "$TS" version=1.4.0 --lane rele
 [ "$(grep -c 'workflows/release.yml/dispatches' "$MOCK_DIR/posts.log")" = 1 ] && grep 'workflows/release.yml/dispatches' "$MOCK_DIR/posts.log" | cut -d' ' -f3- \
   | jq -e '. == {ref: "dev", inputs: {version: "1.4.0"}, return_run_details: true}' >/dev/null || fail "the dispatch's one POST: $(cat "$MOCK_DIR/posts.log")"
 rm "$MOCK_DIR/dispatch.json"; o=$(W dispatch .github/workflows/release.yml dev "$TS" dry_run=true version=1.4.0 --lane release-7 || true); grep -q ': run unknown (go' <<<"$o" || fail "a dispatch answered 204: $o"
+run 813 "$TS" workflow_dispatch .github/workflows/release.yml; run 814 "$TS" workflow_dispatch .github/workflows/release.yml 2020-01-01T00:00:00Z
+run 815 "$TS" workflow_dispatch .github/workflows/deploy.yml; run 816 "$TS" push .github/workflows/release.yml
+for c in "814|already waiting" "815|another workflow" "816|a push"; do o=$(W approve "${c%%|*}" 1 registry --lane release-7 || true)
+  grep -q 'is no run this go produced' <<<"$o" || fail "approved a run at the dispatch's sha but ${c#*|}: $o"; done
+o=$(W approve 813 1 registry --lane release-7 || true); grep -q "^approved run 813 attempt 1 .*workflow_dispatch on main (go $a)$" <<<"$o" || fail "the dispatch's own run: $o"
 ! grep -q -- ' -F ' "$MOCK_DIR/gh.log" || fail "-F reached gh"
 echo '{"ref": "refs/tags/old"}' > "$MOCK_DIR/tag-old.json"
 for c in "old|tag old exists" "v2|whose tags only the release tool creates"; do o=$(W tag "${c%%|*}" "$TS" --lane release-7 || true); grep -q "${c#*|}" <<<"$o" || fail "tag ${c%%|*}: $o"; done
@@ -135,6 +151,10 @@ n=$(grep -c . "$MOCK_DIR/posts.log"); o=$(W tag build-7 "$TS" --lane release-7 |
 t=$(A add "tag build-8"); A public "$t" "Tag build-8" >/dev/null; A ok "$t" tag build-8 "$TS" -- "tag it" >/dev/null
 ( W tag build-8 "$TS" --ok "$t" > "$T/race.1" || true ) & ( W tag build-8 "$TS" --ok "$t" > "$T/race.2" || true ) & wait
 [ "$(used "tag build-8 $TS")" = 1 ] && [ "$(grep -c 'refs/tags/build-8' "$MOCK_DIR/posts.log")" = 1 ] || fail "two acts raced on one OK: $(cat "$T"/race.?)"
+for c in "post|1|refused: GitHub refused" "post-net|6|AMBIGUOUS" "post-timeout|6|AMBIGUOUS"; do IFS='|' read -r fm ex msg <<<"$c"; nm="build-$fm"
+  t=$(A add "tag $nm"); A public "$t" "Tag $nm" >/dev/null; A ok "$t" tag "$nm" "$TS" -- "tag it" >/dev/null
+  o=$(MOCK_GH_FAIL=$fm "$ORCHY" act tag "$nm" "$TS" --ok "$t" 2>&1) && rc=0 || rc=$?
+  [ "$rc" = "$ex" ] && grep -q "^$msg" <<<"$o" && [ "$(used "tag $nm $TS")" = 1 ] || fail "a POST that failed as $fm (exit $rc): $o"; done
 
 # --- act merge: refusals before any watcher, the OK's merge, a moved base, and an authority lost while the watcher waits
 S8=$(sha 8); pr 48 "$S8" main hotfix-x
@@ -145,10 +165,22 @@ f=$(A add "merge the fork"); A public "$f" "Merge the fork" >/dev/null; A ok "$f
 pr 48 "$S8" main hotfix-x '.isCrossRepository = true'; o=$(W merge 48 "$S8" main merge --ok "$f" || true); grep -q 'a fork never merges into main' <<<"$o" || fail "a fork into the release branch on an OK: $o"
 pr 48 "$S8" main hotfix-x; o=$(W merge 48 "$S8" main merge --ok "$f" || true); grep -qx "armed merge-48 (OK $f)" <<<"$o" && [[ "$(done_line 48)" == "#48 MERGED"* ]] || fail "act merge on an OK: $o"
 [ "$(used "merge 48 $S8 main merge")" = 1 ] || fail "the OK's used: row"
+MH=$(sha 20); jq -n --arg s "$MH" '{sha: $s}' > "$MOCK_DIR/commit-main.json"
+ck() { jq -n --arg q "$2" --arg r "$3" '{check_runs: [{id: 1, name: "quality-status", status: "completed", conclusion: $q}, {id: 3, name: "release-gate", status: "completed", conclusion: $r}]}' > "$MOCK_DIR/checks-$1.json"; }
+S21=$(sha 21); u=$(A add "merge PR 51"); A public "$u" "Merge PR 51" >/dev/null; A ok "$u" merge 51 "$S21" main merge -- "merge 51" >/dev/null
+pr 51 "$S21" main hotfix-q; ck "$S21" failure success; ck "$TS" failure success; ck "$MH" success failure
+o=$(W merge 51 "$S21" main merge --ok "$u" || true); for _ in $(seq 1 60); do grep -q 'TRUNK RED' "$ORCHY_HOME/watch/merge-51.out" 2>/dev/null && break; sleep 0.5; done
+grep -q "TRUNK RED at ${MH:0:8}: release-gate; waiting" "$ORCHY_HOME/watch/merge-51.out" && [ "$(merges 51)" = 0 ] || fail "a red release-gate on main's head did not hold: $(cat "$ORCHY_HOME/watch/merge-51.out")"
+rm "$MOCK_DIR/checks-$MH.json"; [[ "$(done_line 51)" == "#51 MERGED"* ]] || fail "a merge into main read the trunk's checks: $(cat "$ORCHY_HOME/watch/merge-51.out")"
+rm "$MOCK_DIR/checks-$TS.json" "$MOCK_DIR/commit-main.json"
 S9=$(sha 9); r=$(A add "merge PR 49"); A public "$r" "Merge PR 49" >/dev/null; A ok "$r" merge 49 "$S9" main merge -- "merge 49" >/dev/null
 pr 49 "$S9" main hotfix-y; echo . > "$MOCK_DIR/merge-race-49.jq"; o=$(W merge 49 "$S9" main merge --ok "$r" || true); l=$(done_line 49)
 [[ "$l" == "#49 MERGED"* ]] && [ "$(merges 49)" = 2 ] && [ "$(used "merge 49 $S9 main merge")" = 1 ] || fail "a retry on a moved base claimed again or did not merge: $l"
 wait_loop() { for _ in $(seq 1 60); do grep -q "commits/$1/check-runs" "$MOCK_DIR/gh.log" && return 0; sleep 0.5; done; fail "the watcher for $1 never polled"; }
+S22=$(sha 22); v=$(A add "merge PR 53"); A public "$v" "Merge PR 53" >/dev/null; A ok "$v" merge 53 "$S22" main merge -- "merge 53" >/dev/null
+pr 53 "$S22" main hotfix-r; echo . > "$MOCK_DIR/merge-race-53.jq"; ORCHY_WATCH_SLEEP=10 "$ORCHY" act merge 53 "$S22" main merge --ok "$v" >/dev/null   # a 5 s wait before the retry
+for _ in $(seq 1 200); do [ "$(merges 53)" = 1 ] && break; sleep 0.1; done; A revoke "$v" merge 53 "$S22" main merge >/dev/null; l=$(done_line 53)
+[[ "$l" == "REFUSED at merge time: merge 53 $S22 main merge was revoked before its retry" ]] && [ "$(merges 53)" = 1 ] || fail "a retry after a revoke: $l"
 pend() { jq -n '{check_runs: [{id: 9, name: "release-gate", status: "in_progress", conclusion: null}]}' > "$MOCK_DIR/checks-$1.json"; }
 for how in revoke "done"; do
   n=$((60 + ${#how})); s=$(sha "$n"); x=$(A add "merge PR $n"); A public "$x" "Merge PR $n" >/dev/null; A ok "$x" merge "$n" "$s" main merge -- "merge $n" >/dev/null
@@ -173,6 +205,9 @@ dep 70 "$S11"; o=$(W merge 70 "$S11" dev squash --grant || true); grep -q 'a gra
 S12=$(sha 12); for c in "owner|dependabot/x|dependabot[bot]" "app/dependabot|fix/x|dependabot[bot]" "app/dependabot|dependabot/x|someone"; do
   IFS='|' read -r au hd ca <<<"$c"; dep 71 "$S12" "$hd" "$au" "$ca"; o=$(W merge 71 "$S12" dev squash --grant || true)
   grep -q "not Dependabot's own PR" <<<"$o" || fail "a grant merged author $au, head $hd, commit $ca: $o"; done
+for cm in '[{authors: [{login: "dependabot[bot]"}, {login: "someone"}]}]' '[{authors: [{login: "dependabot[bot]"}]}, {authors: [{login: "someone"}]}]'; do
+  pr 71 "$S12" dev dependabot/x ".author = {login: \"app/dependabot\", is_bot: true} | .commits = $cm"; o=$(W merge 71 "$S12" dev squash --grant || true)
+  grep -q "not Dependabot's own PR" <<<"$o" || fail "a grant merged commits $cm: $o"; done
 A revoke "$gr" merge dependabot dev squash >/dev/null; dep 71 "$S12"; o=$(W merge 71 "$S12" dev squash --grant || true); grep -q 'no live grant' <<<"$o" || fail "a revoked grant: $o"
 pg=$(A add "a planted grant"); A public "$pg" "A planted grant" >/dev/null; plant "$pg" "grant: merge dependabot dev squash"
 o=$(W merge 71 "$S12" dev squash --grant || true); grep -q 'no live grant' <<<"$o" && "$ORCHY" grants --json | jq -e '.grants == []' >/dev/null || fail "a planted grant row: $o"
