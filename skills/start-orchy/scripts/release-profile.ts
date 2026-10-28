@@ -89,7 +89,7 @@ export function branchMatches(patterns: string[], b: string): boolean {
       const key = i * (m + 1) + j;
       if (memo[key]) return memo[key] === 1;
       const k = toks[i], nx = toks[i + 1];
-      const r = k.t === "**" ? go(i + 1, j) || (j < m && go(i, j + 1)) || (nx?.t === "c" && nx.v === "/" && !nx.q && go(i + 2, j))
+      const r = k.t === "**" ? go(i + 1, j) || (j < m && go(i, j + 1)) || (nx?.t === "c" && nx.v === "/" && !nx.q && (j === 0 || b[j - 1] === "/") && go(i + 2, j))
         : k.t === "*" ? go(i + 1, j) || (j < m && b[j] !== "/" && go(i, j + 1))
         : k.q === "?" ? go(i + 1, j) || (one(k, j) && go(i + 1, j + 1))
         : k.q === "+" ? one(k, j) && (go(i + 1, j + 1) || go(i, j + 1))
@@ -177,16 +177,17 @@ export function readWorkflow(path: string, text: string): Read | { error: string
  *  other fault rejects the whole block, so a half-valid block never fills a fact. */
 function parseBlock(md: string): { block?: Block; ignored: string[]; error?: string } {
   let fence = "", section = false, closed = false, lines: string[] | null = null;
-  for (const line of md.split(/\r?\n/)) {
+  for (const line of md.split(/\r\n|\r|\n/)) {
     if (fence) {   // CommonMark: a line of the fence's character, at least as long, and nothing else closes it
-      const c = /^ {0,3}(`+|~+)\s*$/.exec(line);
+      const c = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
       if (c && c[1][0] === fence[0] && c[1].length >= fence.length) { if (lines) { closed = true; break; } fence = ""; }
       else lines?.push(line);
       continue;
     }
-    const f = /^ {0,3}(`{3,}|~{3,})\s*(\S*)/.exec(line);   // the info string's first word is its language
-    if (f && !(f[1][0] === "`" && f[2].includes("`"))) { fence = f[1]; if (section && f[2] === "json") lines = []; continue; }
-    if (/^ {0,3}#{1,2}\s/.test(line)) { if (section) break; section = /^ {0,3}## Release profile\s*$/.test(line); }
+    // a backtick fence's info string holds no backtick anywhere; its first word is the language
+    const f = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line), info = f?.[2].replace(/^[ \t]+|[ \t]+$/g, "") ?? "";
+    if (f && !(f[1][0] === "`" && info.includes("`"))) { fence = f[1]; if (section && info.split(/[ \t]/)[0] === "json") lines = []; continue; }
+    if (/^ {0,3}#{1,2}(?:[ \t]|$)/.test(line)) { if (section) break; section = /^ {0,3}## Release profile[ \t]*$/.test(line); }
   }
   if (!lines) return { ignored: [] };
   if (!closed) return { ignored: [], error: "its json fence never closes" };
@@ -324,18 +325,20 @@ async function derive(repo: string): Promise<{ profile: Obj & { unknown: string[
     // a list or count of another type is unread, never empty or zero: either would let a merge.branches entry be written
     const ctx = (cs: unknown) => Array.isArray(cs) ? cs.map(c => own(c, "context")) : null;
     const lists = [...of("required_status_checks").map(p => ctx(own(p, "required_status_checks"))),
-      rsc === undefined ? [] : Array.isArray(own(rsc, "contexts")) ? [...(own(rsc, "contexts") as unknown[]), ...(ctx(own(rsc, "checks")) ?? [])] : null];
+      rsc === undefined ? [] : Array.isArray(own(rsc, "contexts")) && (own(rsc, "checks") === undefined || ctx(own(rsc, "checks")))
+        ? [...(own(rsc, "contexts") as unknown[]), ...(ctx(own(rsc, "checks")) ?? [])] : null];
     let checks = both ? (lists.includes(null) ? (U.push(`checks ${b}: a check list is not a list`), null) : lists.flat()) : null;
     if (checks && !checks.every(textOk)) { checks = null; U.push(`checks ${b}: a name is not a short string`); }
     // a required code-owner review or approval of the last push blocks a merge as a count of one does
-    const count = (p: unknown, owners: string) => { const n = own(p, "required_approving_review_count");
-      return Number.isSafeInteger(n) && (n as number) >= 0
-        ? Math.max(n as number, own(p, owners) === true || own(p, "require_last_push_approval") === true ? 1 : 0) : null; };
+    const flag = (p: unknown, k: string) => { const v = own(p, k); return v === undefined ? false : typeof v === "boolean" ? v : null; };
+    const count = (p: unknown, owners: string) => { const n = own(p, "required_approving_review_count"), o = flag(p, owners), l = flag(p, "require_last_push_approval");
+      return Number.isSafeInteger(n) && (n as number) >= 0 && o !== null && l !== null ? Math.max(n as number, o || l ? 1 : 0) : null; };
     const counts = [...of("pull_request").map(p => count(p, "require_code_owner_review")), rv === undefined ? 0 : count(rv, "require_code_owner_reviews")];
-    const reviews = !both ? null : counts.includes(null) ? (U.push(`reviews ${b}: a review count is not a whole number`), null) : Math.max(...(counts as number[]));
+    const reviews = !both ? null : counts.includes(null) ? (U.push(`reviews ${b}: a review count or flag has another type`), null) : Math.max(...(counts as number[]));
     // what both the rulesets and the repository allow; linear history removes merge, whichever source requires it
     let methods = allowed && both ? of("pull_request").map(p => own(p, "allowed_merge_methods"))
-      .reduce<string[]>((m, a) => Array.isArray(a) ? m.filter(x => a.includes(x)) : m, allowed) : null;
+      .reduce<string[] | null>((m, a) => !m ? null : a === undefined ? m : Array.isArray(a) ? m.filter(x => a.includes(x)) : null, allowed) : null;
+    if (allowed && both && !methods) U.push(`methods ${b}: a ruleset's merge methods are not a list`);
     if (methods && linear) methods = methods.filter(m => m !== "merge");
     const crJ = runs && json(runs), crL = own(crJ, "check_runs");
     const cr = Array.isArray(crL) ? page(crL, `check-runs ${b}`, own(crJ, "total_count")) : runs ? unread(`check-runs ${b}`, runs) : null;

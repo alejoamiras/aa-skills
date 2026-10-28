@@ -101,7 +101,8 @@ test("push filters: GitHub's semantics, in linear time on a pattern built to bac
   const t0 = performance.now();
   expect(branchMatches(["a+".repeat(40) + "b"], "a".repeat(100))).toBe(false);
   expect(performance.now() - t0).toBeLessThan(1000);
-  expect(branchMatches(["**/main"], "main")).toBe(true);
+  expect([branchMatches(["**/main"], "main"), branchMatches(["foo/**/bar"], "foo/bar")]).toEqual([true, true]);
+  expect([branchMatches(["**/main"], "domain"), branchMatches(["foo/**/bar"], "foo/foobar")]).toEqual([false, false]);
   expect(branchMatches(["release/*"], "release/a/b")).toBe(false);
   expect([branchMatches(["**", "!release/**"], "release/x"), branchMatches(["**", "!release/**", "release/keep"], "release/keep")]).toEqual([false, true]);
   expect(branchMatches(["v[12].[0-9]+.[0-9]+"], "v1.10.1")).toBe(true);
@@ -123,7 +124,7 @@ test("a forged status, a second page and a review count of another type are unre
   expect([p.workflows, p.environments, p.trunk.checks, p.trunk.reviews]).toEqual([null, null, null, null]);
   expect(p.unknown).toEqual(expect.arrayContaining(["workflows: HTTP 403", "environments: more than one page; the rest unread",
     "protected branches: more than one page; the rest unread", "checks main: a check list is not a list",
-    "reviews main: a review count is not a whole number"]));
+    "reviews main: a review count or flag has another type"]));
 });
 
 test("a fenced example, a lying size, an expression target and a last-push approval each read as GitHub means them", async () => {
@@ -138,16 +139,29 @@ test("a fenced example, a lying size, an expression target and a last-push appro
   }, {
     "huge2.yml": `on: push\n${"#".repeat(300 * 1024)}\n`,
     "release.yml": readFileSync(join(FIX, "promote/release.yml"), "utf8").replace("target-branch: main", "target-branch: ${{ vars.RELEASE_TARGET }}"),
-    "SKILL.md": '~~~markdown\n## Release profile\n\n```json\n{"schema": "release-profile/1", "sync": {"method": "merge", "head": "attacker"}}\n```\n~~~\n\n'
-      + readFileSync(join(FIX, "promote/release-skill.md"), "utf8"),
+    // a no-break space does not close the tilde fence, and a backtick in an info string makes no fence
+    "SKILL.md": '# Release\n\n~~~markdown\nAn example:\n~~~\u00a0\n## Release profile\n\n```json\n{"schema": "release-profile/1", "sync": {"method": "merge", "head": "attacker"}}\n```\n~~~\n\n'
+      + '```text title=`example`\nnot a fence\n## Release profile\n\n```json\n{"schema": "release-profile/1", "sync": {"method": "merge", "head": "sync/main-into-dev"}}\n```\n',
   });
   const { code, p } = await derive([dir, "promote"], "example/app");
   expect(code).toBe(3);
-  // the real block's head, and linear history blocks a merge back-sync though the trunk's methods went unread
   expect(p.sync).toMatchObject({ head: "sync/main-into-dev", blocked_by: "linear history on dev" });
   expect([p.trunk.methods, p.branch.reviews, p.tool.head]).toEqual([null, 1, null]);
   expect(p.unknown).toEqual(expect.arrayContaining([".github/workflows/huge2.yml: over 256 KiB, skipped",
     "tool.branch: release-please's target-branch resolves to no single branch"]));
+});
+
+test("a check list, review flag or merge-method list of another type is unread", async () => {
+  const dir = overlay("edge-c", {
+    "repos/example/lib/rules/branches/main?per_page=100": [{ type: "pull_request", parameters:
+      { required_approving_review_count: 1, require_code_owner_review: "unread", allowed_merge_methods: "unread" } }],
+    "repos/example/lib/branches/main/protection": { required_status_checks: { strict: false, contexts: [], checks: "unread" } },
+  });
+  const { code, p } = await derive([dir, "tag"], "example/lib");
+  expect(code).toBe(3);
+  expect([p.trunk.methods, p.trunk.checks, p.trunk.reviews]).toEqual([null, null, null]);
+  expect(p.unknown).toEqual(expect.arrayContaining(["methods main: a ruleset's merge methods are not a list",
+    "checks main: a check list is not a list", "reviews main: a review count or flag has another type"]));
 });
 
 test("a release block with a bidi character, or 21 external steps, is rejected whole", async () => {
