@@ -5,7 +5,7 @@
     "heavy": 2,
     "light": 3,
     "load_max": 144,
-    "week_floor_pct": 70
+    "week_floor_pct": 25
   },
   "errors": [],
   "inbox": [],

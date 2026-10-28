@@ -1,0 +1,7 @@
+{
+  "schema": "orchy.accounts/1",
+  "never": [],
+  "heavy_floor_pct": 25,
+  "heavy_per_account": 2,
+  "light_per_account": 3
+}

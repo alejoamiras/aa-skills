@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
 # claude-usage mock: `run` is a lead (argv logged to $MOCK_DIR/cu.log, banner on stderr like the real one, init event,
-# a session-leader grandchild like a Bash-tool shell, alive for $MOCK_LEAD_SECS, then a result event); anything else prints a headroom table
-[ "${1:-}" = run ] || { echo "account  5h  week"; exit 0; }
+# a session-leader grandchild like a Bash-tool shell, alive for $MOCK_LEAD_SECS, then a result event); `list`, `current` and
+# `--json --cached` read fixtures in ${MOCK_CU:-$MOCK_DIR/cu} (list.txt, current.txt, rows.json; no rows.json is no snapshot);
+# `refresh` is logged to $MOCK_DIR/refresh.log; anything else prints a headroom table
+C=${MOCK_CU:-$MOCK_DIR/cu}
+case "${1:-}" in
+list) cat "$C/list.txt"; exit;;
+current) c=$(cat "$C/current.txt" 2>/dev/null || echo main); echo "$c"; [ "$c" != "?" ]; exit;;
+--json) [ "${2:-}" = --cached ] || { echo "MOCK claude-usage: a live --json probe" >&2; exit 1; }
+  [ -f "$C/rows.json" ] || { echo "no snapshot yet: run claude-usage refresh" >&2; exit 1; }; cat "$C/rows.json"; exit;;
+refresh) echo refresh >> "$MOCK_DIR/refresh.log"; exit 0;;
+run) ;;
+*) echo "account  5h  week"; exit 0;;
+esac
 printf '%q ' "$@" >> "$MOCK_DIR/cu.log"; echo >> "$MOCK_DIR/cu.log"
 echo "claude-usage: $2 — 80% left" >&2
 echo '{"type":"system","subtype":"init","session_id":"'"${MOCK_SESSION:-00000000-0000-4000-8000-000000000001}"'"}'

@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016  # jq programs are single-quoted on purpose: their $vars are jq's
 # orchy: the backlog-program orchestrator's shell half. One entry point, subcommands below.
-# State lives in $ORCHY_HOME (default ~/.cache/orchy/<owner>-<repo>): orchy.json (policy), local.json (accounts, caps),
-# briefs, prompts, reports, leads, watch, wt, page. Nothing in the repo.
+# State lives in $ORCHY_HOME (default ~/.cache/orchy/<owner>-<repo>): orchy.json (policy), local.json (ban, load_max),
+# briefs, prompts, reports, leads, watch, wt, page. Nothing in the repo. Which accounts leads run on is one machine-wide
+# policy for every program: ~/.agents/orchy/accounts.json (ORCHY_ACCOUNTS).
 set -u
 usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 # Subcommands
 #   home                         print ORCHY_HOME
 #   config <jq-expr>             read $ORCHY_HOME/orchy.json ('.trunk', '.merge.required_checks[]')
-#   local <jq-expr>              read $ORCHY_HOME/local.json (accounts, caps)
+#   local <jq-expr>              read $ORCHY_HOME/local.json (prompt_ban, load_max, session_url)
 #   lock | unlock                claim this repo's orchestrator seat (refuses while another session holds it)
 #   render [--keep K,...] <template> K=V ...   substitute <K> tokens to stdout; exit 1 on a token left over that --keep does not name
-#   check-text <file>...         refuse a file carrying a banned string (local.json prompt_ban: roster names, page ids)
+#   check-text <file>...         refuse a file carrying a banned string (local.json prompt_ban, and every claude-usage roster name)
 #   check-private <file>...      refuse a file that copies six consecutive words of the owner's verbatim words in the ask ledger
 #   check-public [--no-sensitive] <file>   check-private, then the leak and sensitive patterns and gitleaks; any check error refuses
 #   ask add <text>               capture the owner's words verbatim; prints the new id (askN)
@@ -23,8 +24,12 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   waiting add <ref> <text> | done <ref> | list [--json]   what waits on the owner, one item per ref (pr:N issue:N page:N
 #                                ask:askN lane:<slug> other:<slug>); add replaces the text and keeps since; orchy.waiting/1 with --json
 #   wt-new <slug>...             create worktrees from origin/<trunk> and install deps; sequential; refuses an existing slug
-#   launch [--light] <key> <slug> <account>            start a headless lead on prompts/<key>.md inside the lane worktree
-#   resume [--light] <key> <slug> <account> <session>  resume a lead's session with prompts/<key>.md
+#   launch [--light] <key> <slug> <account|auto>       start a headless lead on prompts/<key>.md inside the lane worktree; only the
+#                                seat holder launches, on an account the policy allows (auto: the one whose headroom expires soonest)
+#   resume [--light] <key> <slug> <account> <session>  resume a lead's session with prompts/<key>.md, on that session's account
+#                                (both take --force-cap, on the owner's word only: it passes the caps and the heavy floor)
+#   accounts [--json]            per roster account: week and session left, the weekly reset, and heavy, light or no with the
+#                                reason (orchy.headroom/1 with --json); the account this shell's session runs on is marked
 #   stop <key>                   end a live lead and every process it started
 #   say <key> <text>             queue a steering note; a live lead gets it after its next tool call (inbox-hook.sh)
 #   session-id <key>             the session id of a lead's latest run
@@ -54,6 +59,7 @@ ORCHY_HOME=$(realpath -sm "${ORCHY_HOME:-$CAP/$slug}")
 H="$ORCHY_HOME"; CFG="$H/orchy.json"; LOCAL="$H/local.json"
 # The owner's verbatim words live outside $H, where leads write their reports and would find them.
 ASKS_DIR=$(realpath -sm "${ORCHY_ASKS_DIR:-$HOME/.agents/orchy/asks}"); LEDGER="$ASKS_DIR/$slug.jsonl"
+ACCOUNTS=$(realpath -sm "${ORCHY_ACCOUNTS:-$HOME/.agents/orchy/accounts.json}")
 OVERLAP="$(dirname "$(realpath "$0")")/overlap.sh"
 cmd=${1:-help}; shift || true
 case "$cmd" in help|-h|--help) usage 0;; home) echo "$H"; exit 0;; esac
@@ -70,7 +76,7 @@ for d in "${ds[@]}"; do [ ! -L "$d" ] && [ -O "$d" ] || { echo "orchy: $d must b
 f=$({ find "$H" -maxdepth 2 ! -user "$EUID"; [ $under = 0 ] || find "$CAP" -maxdepth 1 ! -user "$EUID"; } 2>/dev/null | head -1)
 [ -z "$f" ] || { echo "orchy: $f belongs to another user; refusing a home someone else could write" >&2; exit 1; }
 # Readers keep the ownership checks but create nothing, so a poller never changes the home it reads.
-ro=0; case "$cmd" in state|config|local|session-id|receipt) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting) case "${1:-}" in list) ro=1;; esac;; esac
+ro=0; case "$cmd" in state|config|local|session-id|receipt|accounts) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting) case "${1:-}" in list) ro=1;; esac;; esac
 if [ $ro = 0 ]; then
   mkdir -p "$H"/{briefs,prompts,reports,leads,watch,wt,scratch,inbox,page/shots,page/build}
   chmod 700 "$H"; [ $under = 1 ] && chmod 700 "$CAP"
@@ -112,10 +118,67 @@ newest_proc() { # newest_proc <pid> <ps -eo pid=,ppid=,etimes=,args= rows>: "<ag
           best=""; for (x in s) if (x != r && (best == "" || et[x] < et[best])) best=x
           if (best != "") printf "%d\t%s", et[best], substr(cmd[best], 1, 80) }' <<<"$2"
 }
-refuse_account() {
-  local a=$1; [ -n "$a" ] || { echo "refused: empty account" >&2; return 1; }
-  if [ -f "$LOCAL" ] && jq -e --arg a "$a" '.accounts.never // [] | index($a)' "$LOCAL" >/dev/null; then echo "refused: $a is on accounts.never" >&2; return 1; fi
-  if [ -f "$LOCAL" ] && [ "$(jq -r '.accounts.use // [] | length' "$LOCAL")" != "0" ] && ! jq -e --arg a "$a" '.accounts.use | index($a)' "$LOCAL" >/dev/null; then echo "refused: $a is not on accounts.use" >&2; return 1; fi
+# A home's accounts.use, caps and min_week_left_pct are retired by the machine-wide policy; its accounts.never still holds.
+policy() { # orchy.accounts/1 with its defaults filled in; a missing file is the defaults, a symlinked, foreign or malformed one refuses
+  local f=$ACCOUNTS j='{}'
+  if [ -L "$f" ] || { [ -e "$f" ] && { [ ! -f "$f" ] || [ ! -O "$f" ]; }; }; then echo "refused: $f must be a regular file owned by $(id -un), not a symlink" >&2; return 1; fi
+  if [ -e "$f" ]; then j=$(cat "$f") || { echo "refused: cannot read $f" >&2; return 1; }; fi
+  # a present key is checked as written (`//` reads false and null as absent); \z, since $ also matches before a final newline
+  jq -sce 'def opt($k; f): (has($k) | not) or (.[$k] | f); def whole: type == "number" and . == floor and . >= 0;
+    select(length == 1) | .[0] | select(type == "object" and (keys - ["schema", "never", "heavy_floor_pct", "heavy_per_account", "light_per_account"]) == []
+      and opt("schema"; . == "orchy.accounts/1")
+      and opt("never"; type == "array" and length <= 64 and all(.[]; type == "string" and test("\\A[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}\\z")))
+      and opt("heavy_floor_pct"; whole and . <= 100) and opt("heavy_per_account"; whole and . <= 9) and opt("light_per_account"; whole and . <= 9))
+    | {schema: "orchy.accounts/1", never: (.never // []), heavy_floor_pct: (.heavy_floor_pct // 25),
+       heavy_per_account: (.heavy_per_account // 2), light_per_account: (.light_per_account // 3)}' <<<"$j" 2>/dev/null \
+    || { echo "refused: $f is not orchy.accounts/1 (never: names; heavy_floor_pct: 0-100; heavy_per_account, light_per_account: 0-9)" >&2; return 1; }
+}
+roster() { # "<key> <label>" per roster account, never the ~/.claude slot: `run =` takes a directory key, the cached rows carry labels
+  local out; out=$(claude-usage list 2>/dev/null) || { echo "refused: claude-usage list failed, so the roster is unknown" >&2; return 1; }
+  awk '{ k = $2; sub(/.*\//, "", k) } $1 != "main" && k != "main" && $1 ~ /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/ && k ~ /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/ { print k, $1 }' <<<"$out"
+}
+roster_re() { # every roster key and label as one literal alternation, matched only as a whole name
+  local r; r=$(roster) || return 1
+  r=$(tr ' ' '\n' <<<"$r" | grep -v '^$' | sort -u | sed 's/[.]/\\./g' | paste -sd'|' -)
+  [ -z "$r" ] || printf '(^|[^A-Za-z0-9_])(%s)($|[^A-Za-z0-9_])' "$r"
+}
+acct_view() { # {policy, orchestrator, known, accounts}: one row per roster account, best first, with its verdict (heavy, light, no) and why
+  local pol ro rows cur never=
+  pol=$(policy) || return 1; ro=$(roster) || return 1
+  rows=$(claude-usage --json --cached 2>/dev/null) && jq -e 'type == "array"' <<<"$rows" >/dev/null 2>&1 \
+    || { echo "refused: no headroom snapshot to read; run claude-usage once" >&2; return 1; }
+  # after the cached read: a snapshot exists, so current never probes
+  cur=$(claude-usage current 2>/dev/null) || { echo "refused: cannot tell which account this session runs on (claude-usage current)" >&2; return 1; }
+  if [ -f "$LOCAL" ]; then never=$(jq -r '.accounts.never // [] | .[] | strings' "$LOCAL") || { echo "refused: cannot read accounts.never in $LOCAL" >&2; return 1; }; fi
+  jq -nc --argjson pol "$pol" --argjson rows "$rows" --arg ro "$ro" --arg cur "$cur" --arg never "$never" --argjson now "$(date +%s)" '
+    def hrs($t): if ($t | type) != "number" then 168 else ([($t - $now) / 3600, 0.5] | max) end;
+    ($ro | split("\n") | map(select(. != "") | split(" ") | {key: .[0], label: .[1]})) as $roster
+    | ($roster | map({(.label): .key}, {(.key): .key}) | add // {}) as $key
+    | ([$pol.never[], ($never | split("\n")[] | select(. != ""))] | map($key[.] // .)) as $nk
+    | ($key[$cur] // $cur) as $me
+    | {policy: $pol, orchestrator: $cur, known: ($me == "main" or ($roster | any(.key == $me))), me: ([$rows[] | objects | select(.account == $cur)] | first),
+       accounts: ([$roster[] | . as $a | ([$rows[] | objects | select(.account == $a.label)] | first) as $r
+        # a reading stands for 2 h, and never past the weekly reset it was taken before
+        | ($r != null and ($r.observed_at | type) == "number" and $now - $r.observed_at <= 7200
+           and (($r.week_resets_at | type) != "number" or $r.week_resets_at > $now)) as $fresh
+        # a spent bucket stays spent until its own reset, so a 0 refuses however old its reading; --force-cap passes only the floor
+        | (if ($nk | index($a.key)) != null then ["no", "on a never-list"]
+           elif $a.key == $me then ["no", "the orchestrator runs on it"]
+           elif $r == null then ["light", "no reading in the snapshot"]
+           elif ($r.note // "") != "" then ["no", "claude-usage notes \($r.note)"]
+           elif $r.week_left_pct == 0 and (($r.week_resets_at | type) != "number" or $r.week_resets_at > $now) then ["no", "its week is spent"]
+           elif $r.session_left_pct == 0 and (($r.session_resets_at | type) != "number" or $r.session_resets_at > $now) then ["no", "its session is spent"]
+           elif ($fresh | not) then ["light", (if ($r.week_resets_at | type) == "number" and $r.week_resets_at <= $now
+               then "its week reset after the reading" else "the reading is over 2 h old" end)]
+           elif ($r.week_left_pct | type) != "number" then ["light", "its week headroom is unknown"]
+           elif ($r.session_left_pct | type) != "number" then ["light", "its session headroom is unknown"]
+           elif $r.week_left_pct < $pol.heavy_floor_pct then ["light", "week \($r.week_left_pct)% is under the \($pol.heavy_floor_pct)% floor", true]
+           else ["heavy", "week \($r.week_left_pct)% left"] end) as [$v, $why, $floor]
+        | {key: $a.key, label: $a.label, verdict: $v, why: $why, floor: ($floor // false), week_left_pct: $r.week_left_pct, session_left_pct: $r.session_left_pct,
+           week_resets_at: $r.week_resets_at, observed_at: $r.observed_at,
+           # the headroom that expires soonest goes first: week left per hour to its reset
+           score: (if $v != "no" and $fresh then ($r.week_left_pct // 0) / hrs($r.week_resets_at) else -1 end)}]
+        | sort_by(-.score, .key))}'
 }
 all_rows() { # <acct> <weight> <home>: every live lead of every program under the capacity root
   local f pid st acct t weight
@@ -128,17 +191,21 @@ cap_root_ok() { # the root holds every home and the spawn lock: whoever can rena
   case "$(basename "$H")" in .*) echo "refused: a home named $(basename "$H") is invisible to the capacity count" >&2; return 1;; esac
   [ "$(cd "$(dirname "$H")" && pwd -P)" = "$(cd "$CAP" && pwd -P)" ] || { echo "refused: $H is not directly under the capacity root $CAP (ORCHY_CAPACITY_ROOT); its leads would escape the shared cap" >&2; return 1; }
 }
-refuse_cap() { # refuse_cap <account> <heavy|light>: the strictest cap among this program and the programs already running on the account
-  local a=$1 w=$2 cap c n rows home
-  cap=$(lcl ".accounts.${w}_per_account // empty")
-  rows=$(all_rows | awk -v a="$a" -v w="$w" '$1==a && $2==w')
-  while IFS= read -r home; do
-    c=$(jq -r ".accounts.${w}_per_account // empty" "$home/local.json" 2>/dev/null); [ -n "$c" ] || continue
-    { [ -z "$cap" ] || [ "$c" -lt "$cap" ]; } && cap=$c
-  done < <([ -n "$rows" ] && cut -d' ' -f3- <<<"$rows" | sort -u)
-  [ -n "$cap" ] || return 0
-  n=$(grep -c . <<<"$rows")
-  [ "$n" -lt "$cap" ] || { echo "refused: $a already runs $n $w lead(s) across programs (cap $cap); --force-cap only on the owner's word" >&2; return 1; }
+lead_counts() { # <acct_view json>: {"<key>": {"heavy": n, "light": n}} over every program's live leads; an older .started may name a label
+  local key label ac wt; declare -A K=()
+  while read -r key label; do K[$label]=$key; K[$key]=$key; done < <(jq -r '.accounts[] | "\(.key) \(.label)"' <<<"$1")
+  all_rows | while read -r ac wt _; do printf '%s %s\n' "${K[$ac]:-$ac}" "$wt"; done | jq -Rn '[inputs | split(" ")] | reduce .[] as [$k, $w] ({}; .[$k][$w] += 1)'
+}
+seat_held() { # only the session in the seat spawns, so a session that handed it over, or never took it, cannot
+  local me p st; me=$(session_pid)
+  read -r p st _ < "$H/orchestrator.lock" 2>/dev/null || { echo "refused: no session holds the seat of $REPO; ORCHY lock first" >&2; return 1; }
+  [ "$p" = "$me" ] && [ -n "$st" ] && [ "$st" = "$(pstart "$me")" ] || { echo "refused: this session (pid $me) does not hold the seat of $REPO (pid $p does)" >&2; return 1; }
+}
+drop_main_ban() { # an earlier bootstrap banned the slot label main with the roster, which refuses every mention of a main branch
+  local b n t; [ -f "$LOCAL" ] && b=$(jq -r '.prompt_ban // empty' "$LOCAL" 2>/dev/null) && [ -n "$b" ] || return 0
+  n=$(sed -E 's/\(main\|/(/g; s/\|main\)/)/g; s/\|main\|/|/g' <<<"$b"); [ "$n" != "$b" ] || return 0
+  if t=$(mktemp "$H/.local.XXXXXX") && jq --arg b "$n" '.prompt_ban = $b' "$LOCAL" > "$t" && mv -f "$t" "$LOCAL"; then echo "prompt_ban no longer bans the slot label main"
+  else rm -f "${t:-}"; echo "warning: could not drop main from prompt_ban" >&2; fi
 }
 sha_ok() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
 checks() { # name<TAB>status<TAB>conclusion: the newest check-run per name, then a commit status only for a name no check-run carries; exit 1 on an API failure
@@ -245,9 +312,9 @@ lock)
   # ownership test, and the messaging token is never read.
   sess=${CLAUDE_CODE_SESSION_ID:-${ORCHY_SESSION:--}}; addr=-; [ -n "${CLAUDE_CODE_MESSAGING_SOCKET:-}" ] && addr="uds:$CLAUDE_CODE_MESSAGING_SOCKET"
   for try in 1 2 3; do
-    if ( set -o noclobber; echo "$me $(pstart "$me") $(now) $sess $addr" > "$f" ) 2>/dev/null; then echo "locked $REPO for session pid $me ($sess)"; ev seat.lock session="$sess"; exit 0; fi
+    if ( set -o noclobber; echo "$me $(pstart "$me") $(now) $sess $addr" > "$f" ) 2>/dev/null; then echo "locked $REPO for session pid $me ($sess)"; ev seat.lock session="$sess"; drop_main_ban; exit 0; fi
     read -r p st t hs _ < "$f" 2>/dev/null || { sleep 1; continue; }
-    [ "$p" = "$me" ] && [ "$st" = "$(pstart "$me")" ] && { echo "already locked by this session (pid $me)"; exit 0; }
+    [ "$p" = "$me" ] && [ "$st" = "$(pstart "$me")" ] && { echo "already locked by this session (pid $me)"; drop_main_ban; exit 0; }
     if [ -d "/proc/$p" ] && [ "$(pstart "$p")" = "$st" ]; then echo "refused: another orchestrator holds $REPO (pid $p, session ${hs:--}, since $t)"; exit 2; fi
     # a stale holder: one contender at a time replaces it (the flock dies with its holder), so two contenders cannot unlink each other's fresh lock
     ( flock -w 5 9 || exit 1; read -r p2 st2 _ < "$f" 2>/dev/null; [ "$p2" = "$p" ] && [ "$st2" = "$st" ] && rm -f "$f"; exit 0 ) 9>"$f.takeover" || sleep 1
@@ -281,6 +348,8 @@ PY
 check-text)
   ban=$(lcl '.prompt_ban // empty'); [ -n "$ban" ] || { echo "orchy: local.json has no prompt_ban" >&2; exit 2; }
   grep -qE "$ban" /dev/null 2>/dev/null; [ $? -le 1 ] || { echo "orchy: prompt_ban is not a valid regex" >&2; exit 2; }
+  # the live roster joins the ban, so an account added after the bootstrap is banned too; the slot label main never is
+  rr=$(roster_re) || exit 2; [ -z "$rr" ] || ban="($ban)|$rr"
   rc=0; for f in "$@"; do [ -r "$f" ] || { echo "orchy: cannot read $f" >&2; rc=2; continue; }
     hits=$(grep -nE "$ban" "$f"); [ $? -le 1 ] || { echo "orchy: cannot scan $f" >&2; rc=2; continue; }
     [ -z "$hits" ] || { echo "orchy: $f carries banned text:"; head -5 <<<"$hits" | cut -c1-160; rc=1; }; done; exit $rc;;
@@ -293,6 +362,7 @@ check-public)
   # a policy file that cannot be parsed refuses: an empty pattern would pass everything
   if ! leakre=$(cfg '.scan.leak // empty') || ! ban=$(jq -r '.prompt_ban // empty' "$LOCAL"); then echo "refused: orchy.json or local.json cannot be read" >&2; exit 2; fi
   [ -n "$ban" ] && leakre="${leakre:+($leakre)|}($ban)"
+  rr=$(roster_re) || { echo "refused: the roster cannot be read" >&2; exit 2; }; [ -z "$rr" ] || leakre="${leakre:+($leakre)|}$rr"
   [ -n "$leakre" ] || { echo "refused: neither scan.leak nor prompt_ban is set" >&2; exit 2; }
   # the default pattern only on confirmed absence: -e is also false behind an unsearchable page/
   dj="$H/page/decisions.json"; sre=
@@ -481,10 +551,28 @@ wt-new)
 launch|resume)
   need claude-usage; need flock; weight=heavy; force=0
   while [ "${1:-}" = --light ] || [ "${1:-}" = --force-cap ]; do [ "$1" = --light ] && weight=light; [ "$1" = --force-cap ] && force=1; shift; done
-  k=$1; w=$2; a=$3; sid=${4:-}
+  k=${1:-}; w=${2:-}; a=${3:-}; sid=${4:-}
   # a dot-led key's .started file would be invisible to every *.started glob, so to the cap and to liveness
   [[ "$k" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ && "$w" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || { echo "refused: key and slug are [A-Za-z0-9._-], not starting with a dot or a dash" >&2; exit 1; }
-  refuse_account "$a" || exit 1; cap_root_ok || exit 1
+  [ -n "$a" ] || { echo "usage: $cmd [--light] <key> <slug> <account|auto> ..." >&2; exit 1; }
+  cap_root_ok || exit 1; seat_held || exit 1
+  [ "$cmd" = resume ] && [ "$a" = auto ] && { echo "refused: a resume runs on its session's own account; name it" >&2; exit 1; }
+  v=$(acct_view) || exit 1
+  jq -e .known <<<"$v" >/dev/null || { echo "refused: this session runs on $(jq -r .orchestrator <<<"$v"), which is not on the claude-usage roster, so no lead can be kept off it" >&2; exit 1; }
+  if [ "$a" = auto ]; then
+    cands=$(jq -r --arg w "$weight" --argjson f "$force" '.accounts[] | select(.verdict == "heavy" or (.verdict == "light" and ($w == "light" or ($f == 1 and .floor)))) | .key' <<<"$v")
+    [ -n "$cands" ] || { echo "refused: no account may take a $weight lead now: $(jq -r '[.accounts[] | "\(.label) \(.verdict) (\(.why))"] | join("; ")' <<<"$v")" >&2; exit 1; }
+  else
+    acc=$(jq -c --arg a "$a" 'first(.accounts[] | select(.key == $a or .label == $a)) // empty' <<<"$v")
+    [ -n "$acc" ] || { echo "refused: $a is not on the claude-usage roster" >&2; exit 1; }
+    case "$(jq -r .verdict <<<"$acc")" in
+      no) echo "refused: $a: $(jq -r .why <<<"$acc")" >&2; exit 1;;
+      light) fl=$(jq -r .floor <<<"$acc"); [ "$weight" = light ] || { [ "$force" = 1 ] && [ "$fl" = true ]; } || {
+        echo "refused: $a takes light leads only: $(jq -r .why <<<"$acc"); --light$([ "$fl" = true ] && echo ", or --force-cap on the owner's word")" >&2; exit 1; };;
+    esac
+    cands=$(jq -r .key <<<"$acc")
+  fi
+  capn=$(jq -r ".policy.${weight}_per_account" <<<"$v")
   # Close-outs run one at a time: each merges the trunk's plan index and lessons, and two in flight would each miss the other's.
   if [[ "$k" == *-closeout ]]; then
     open=$(gh pr list --repo "$REPO" --state open --limit 1000 --json headRefName --jq '.[].headRefName' 2>/dev/null) || { echo "refused: cannot list open PRs to serialize close-outs" >&2; exit 1; }
@@ -520,13 +608,22 @@ launch|resume)
   [ -f "$H/page/shots-plan/$k.json" ] && { mkdir -p "$H/page/shots"; dirs+=(--add-dir "$H/page/shots"); }
   hook=$(printf '%q ' bash "$(realpath "$(dirname "$0")")/inbox-hook.sh" "$H/inbox/$k.jsonl"); hook=${hook% }
   jq -n --arg c "$hook" '{hooks: {PostToolUse: [{matcher: "*", hooks: [{type: "command", command: $c}]}]}}' > "$S"
-  # Key check, count, spawn and the .started write are one step, so two programs cannot both take an account's last slot.
+  # Seat and key checks, count, spawn and the .started write are one step: two programs cannot both take an account's last slot,
+  # and a session that lost the seat while this launch waited spawns nothing.
   # Nothing in here touches the network; the lead starts with fd 9 closed, so no descendant ever holds the lock.
   exec 9>"$CAP/.spawn.lock"; flock -w 30 9 || { echo "refused: spawn lock busy for 30 s" >&2; exit 1; }
+  seat_held || exit 1
   if [ -f "$H/leads/$k.started" ]; then read -r pid st _ < "$H/leads/$k.started"; alive "$pid" "$st" && { echo "refused: lead $k is alive (pid $pid)" >&2; exit 1; }; fi
   if [[ "$k" == *-closeout ]]; then other=$(lead_rows | awk -v k="$k" '$1 ~ /-closeout$/ && $1 != k {print $1; exit}')
     [ -z "$other" ] || { echo "refused: close-out lead $other is alive; close-outs run one at a time" >&2; exit 1; }; fi
-  [ "$force" = 1 ] || refuse_cap "$a" "$weight" || exit 1
+  cnt=$(lead_counts "$v"); pick=
+  for c in $cands; do n=$(jq -r --arg c "$c" --arg w "$weight" '.[$c][$w] // 0' <<<"$cnt")
+    if [ "$force" = 1 ] || [ "$n" -lt "$capn" ]; then pick=$c; break; fi; done
+  if [ -z "$pick" ]; then
+    if [ "$a" = auto ]; then echo "refused: every account that may take a $weight lead already runs $capn (the cap); --force-cap only on the owner's word" >&2
+    else echo "refused: $a already runs $n $weight lead(s) across programs (cap $capn); --force-cap only on the owner's word" >&2; fi; exit 1
+  fi
+  a=$pick
   # a killed run may end mid-line: the newline keeps the marker a line of its own
   printf '\n%s\n' "$(jq -nc --arg k "$k" --arg l "$w" --arg c "$cmd" --arg t "$(now)" '{type: "orchy_invocation", key: $k, lane: $l, cmd: $c, at: $t}')" >> "$L"
   # PRINT_BG_WAIT_CEILING=0: a headless turn that yields to a background task ends the session; the brief tells leads to poll inside one tool call instead.
@@ -611,7 +708,18 @@ snapshot)
   echo "-- unsigned pages"; [ -f "$H/page/unsigned.json" ] && jq -r --argjson now "$(date +%s)" --slurpfile u "$H/page/unsigned.json" '.pages[] | select(.no as $n | $u[0] | index($n)) |
     "page \(.no) \(.name): " + (if .added_at then (($now - (.added_at | fromdateiso8601)) | "waiting \(. / 86400 | floor)d\(. % 86400 / 3600 | floor)h") else "age unknown" end)' "$H/page/decisions.json" 2>/dev/null
   echo "-- waiting"; "$0" waiting list 2>&1
-  echo "-- headroom"; claude-usage 2>/dev/null | head -12;;
+  # launch reads only the cached snapshot, so the tick refreshes it: a reading over 2 h old allows light leads only
+  echo "-- headroom"; claude-usage refresh >/dev/null 2>&1; "$0" accounts 2>&1 | head -20;;
+accounts)
+  need claude-usage; v=$(acct_view) || exit 1; c=$(lead_counts "$v")
+  v=$(jq -c --argjson c "$c" '.accounts |= map(. + {heavy_leads: ($c[.key].heavy // 0), light_leads: ($c[.key].light // 0)})' <<<"$v")
+  if [ "${1:-}" = --json ]; then jq -c --arg at "$(now)" '{schema: "orchy.headroom/1", at: $at, policy, orchestrator, accounts}' <<<"$v"; exit 0; fi
+  jq -r --argjson now "$(date +%s)" 'def reading: "week \(.week_left_pct // "?")% session \(.session_left_pct // "?")%"
+      + (if (.week_resets_at | type) != "number" then "" elif .week_resets_at > $now then " resets in \((.week_resets_at - $now) / 3600 | floor)h" else " reset passed" end);
+    .policy as $p
+    | "policy: heavy leads need \($p.heavy_floor_pct)% of the week left, light ones any; \($p.heavy_per_account) heavy and \($p.light_per_account) light per account",
+      "orchestrator: \(.orchestrator)  \(.me // {} | reading)",
+      (.accounts[] | "\(.label)\(if .key != .label then " (\(.key))" else "" end)  \(.verdict)  \(reading)  leads \(.heavy_leads) heavy \(.light_leads) light  \(.why)")' <<<"$v";;
 state)
   # orchy.state/1 for a poller: local facts only (no gh, usage or network call) and nothing written. The seat and the
   # pages are left to the reader, who parses those files directly. An unreadable source is null and named in errors.
@@ -690,8 +798,10 @@ PY
       /^worktree / { if (p != "") out(); p = substr($0, 10); b = ""; h = "" } /^HEAD / { h = $2 } /^branch / { b = substr($2, 12) } END { if (p != "") out() }' <<<"$wl" |
       jq -Rsc 'split("\n") | map(select(. != "") | split("\t") | {slug: .[0], branch: (if .[1] == "" then null else .[1] end), head: .[2]})')
   else errs+=(worktrees); fi
-  caps=null; [ -f "$LOCAL" ] && { caps=$(jq -c '{week_floor_pct: .accounts.min_week_left_pct, heavy: .accounts.heavy_per_account, light: .accounts.light_per_account, load_max}
-      | map_values(if type == "number" then . else null end)' "$LOCAL" 2>/dev/null) || { caps=null; errs+=(caps); }; }
+  caps=null; lj='{}'; if pol=$(policy 2>/dev/null) && { [ ! -f "$LOCAL" ] || lj=$(cat "$LOCAL"); }; then
+    caps=$(jq -c --argjson p "$pol" '{week_floor_pct: $p.heavy_floor_pct, heavy: $p.heavy_per_account, light: $p.light_per_account,
+      load_max: (.load_max | if type == "number" then . else null end)}' <<<"$lj" 2>/dev/null) || { caps=null; errs+=(caps); }
+  else errs+=(caps); fi
   j() { printf '%s' "${1:-null}"; }   # each source travels as a file: a large array would overflow one argv string
   jq -nc --arg repo "$REPO" --arg at "$(now)" --slurpfile leads <(j "$leads") --slurpfile rep <(j "$rep") --slurpfile watchers <(j "$watchers") \
     --slurpfile inbox <(j "$inbox") --slurpfile asks <(j "$asks") --slurpfile waiting <(j "$waiting") --slurpfile triaged <(j "$triaged") --slurpfile wts <(j "$wts") --argjson caps "${caps:-null}" \
@@ -749,6 +859,7 @@ scan)
   meta=$(gh pr view "$n" --repo "$REPO" --json title,body,commits --jq '.title, .body, (.commits[].messageHeadline), (.commits[].messageBody)') || { echo "SCAN FAILED: gh pr view #$n"; exit 2; }
   # the local ban (roster names, page ids) never sits in the committed config, so it joins the leak pattern here
   leakre=$(cfg '.scan.leak'); ban=$(lcl '.prompt_ban // empty'); [ -n "$ban" ] && leakre="($leakre)|($ban)"
+  rr=$(roster_re) || { echo "SCAN FAILED: the roster cannot be read"; exit 2; }; [ -z "$rr" ] || leakre="($leakre)|$rr"
   gf=$(echo "$files" | grep -E "$(cfg '.scan.gate_files')" || true)
   add=$(echo "$d" | grep -E '^\+' | grep -v '^+++' | grep -E "$(cfg '.scan.weakening')" || true)
   leak=$( (echo "$d" | grep -E '^\+'; echo "$meta") | grep -E "$leakre" || true)

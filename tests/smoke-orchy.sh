@@ -2,9 +2,22 @@
 # Smoke for skills/start-orchy: orchy.sh against a throwaway repo and home with mocked gh / agent-worktree / claude-usage, the templates, the page toolchain's own smoke.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd); K="$HERE/skills/start-orchy"; ORCHY="$K/scripts/orchy.sh"
-T=$(mktemp -d -t orchy-smoke-XXXX); pgp=; trap '[ -z "$pgp" ] || kill "$pgp" 2>/dev/null; rm -rf "$T"' EXIT
+T=$(mktemp -d -t orchy-smoke-XXXX); pgp=; sess=; trap '[ -z "$pgp" ] || kill "$pgp" 2>/dev/null; [ -z "$sess" ] || kill $sess 2>/dev/null; rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
-export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_CAPACITY_ROOT="$T/cap" ORCHY_HOME="$T/cap/home" ORCHY_REPO=example/app ORCHY_WATCH_SLEEP=1 ORCHY_PROFILE_DIR="$T/profile" ORCHY_ASKS_DIR="$T/asks" ORCHY_GITLEAKS=fake-gitleaks; mkdir -p "$MOCK_DIR"
+export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_CAPACITY_ROOT="$T/cap" ORCHY_HOME="$T/cap/home" ORCHY_REPO=example/app ORCHY_WATCH_SLEEP=1 ORCHY_PROFILE_DIR="$T/profile" ORCHY_ASKS_DIR="$T/asks" ORCHY_GITLEAKS=fake-gitleaks ORCHY_ACCOUNTS="$T/accounts.json"; mkdir -p "$MOCK_DIR"
+# the orchestrator session the seat records: a sleep named claude, so lock, launch and resume agree on it from any subshell
+mkdir -p "$T/sess"; cp "$(command -v sleep)" "$T/sess/claude"; "$T/sess/claude" 3600 & sess=$!; export CLAUDE_PID=$sess
+# the roster and readings the account policy reads; the orchestrator runs on acct-o, and every other account is fresh and well inside its week
+row() { # row <label> <week %> <hours to the weekly reset|null> [<session %> [<seconds since the reading> [<note>]]]
+  jq -nc --arg a "$1" --argjson w "$2" --arg h "$3" --argjson s "${4:-80}" --argjson ago "${5:-60}" --arg n "${6:-}" --argjson now "$(date +%s)" \
+    '{account: $a, active: false, week_left_pct: $w, week_resets_at: (if $h == "null" then null else ($now + ($h | tonumber) * 3600 | floor) end),
+      session_left_pct: $s, session_resets_at: ($now + 3600), observed_at: ($now - $ago), note: $n}'; }
+roster() { # roster <fixture dir> <current account> <label[=key]>...: claude-usage list and current; the caller writes rows.json
+  local d=$1 c=$2 e; shift 2; mkdir -p "$d"; printf '%-14s %s\n' main "$T/slot" > "$d/list.txt"; echo "$c" > "$d/current.txt"
+  for e in "$@"; do printf '%-14s %s\n' "${e%%=*}" "$T/accounts-root/${e#*=}" >> "$d/list.txt"; done; }
+roster "$MOCK_DIR/cu" acct-o acct-a acct-b acct-c acct-d acct-e acct-f acct-main acct-o
+for a in acct-a acct-b acct-c acct-d acct-e acct-f acct-main acct-o; do row "$a" 90 100; done | jq -s . > "$MOCK_DIR/cu/rows.json"
+echo '{"schema": "orchy.accounts/1", "never": ["acct-main"]}' > "$ORCHY_ACCOUNTS"
 # the page toolchain's own smoke shares nothing with this one, so it runs alongside
 [ -x "$K/page/smoke.sh" ] || fail "page/smoke.sh missing"; bash "$K/page/smoke.sh" > "$T/page.log" 2>&1 & pgp=$!
 # a real local origin with a dev branch, so wt-new's fetch and reset work
@@ -15,6 +28,7 @@ cd "$T/repo"
 if "$ORCHY" config .trunk >/dev/null 2>&1; then fail "config before bootstrap must refuse"; fi
 mkdir -p "$ORCHY_HOME"; jq '.install="true"' "$K/examples/orchy.example.json" > "$ORCHY_HOME/orchy.json"; cp "$K/examples/local.example.json" "$ORCHY_HOME/local.json"
 [ "$("$ORCHY" config .trunk)" = dev ] || fail "config .trunk"
+"$ORCHY" lock >/dev/null || fail "lock"
 # render: every token substituted; a token left over is exit 1
 out=$("$ORCHY" render common-brief.md REPO=example/app PRODUCT="the app" TRUNK=dev WORKTREE=/w/x BRANCH=worktree-x LANE=x KEY=x-plan PLANS_DIR=plans ARCHIVE_DIR=plans/archive ORCHY_HOME="$ORCHY_HOME" CODEX_EFFORT=high CODEX_MODEL=gpt-6.1-sol CODEX_MODEL_SHORT=sol LEAD_MODEL=opus LEAD_MODEL_NAME="Claude Opus 5.5" QUALITY_BAR=production GATES="lint, test" PROTECTED=main KNOWN_LIMIT_LABEL=known-limit DELEGATIONS="" NEVER_OPEN="")
 grep -q 'example/app backlog program (the app)' <<<"$out" || fail "render substitution"
@@ -27,10 +41,10 @@ printf '%s\n' "$out" > "$T/brief.md"; "$ORCHY" check-text "$T/brief.md" || fail 
 printf 'run it on acct-a\n' > "$T/bad.md"; if "$ORCHY" check-text "$T/bad.md" >/dev/null 2>&1; then fail "check-text accepted a roster name"; fi
 tmp=$(mktemp); jq '.prompt_ban="("' "$ORCHY_HOME/local.json" > "$tmp"; cp "$ORCHY_HOME/local.json" "$T/local.bak"; mv "$tmp" "$ORCHY_HOME/local.json"
 if "$ORCHY" check-text "$T/brief.md" >/dev/null 2>&1; then fail "check-text accepted an invalid regex"; fi; cp "$T/local.bak" "$ORCHY_HOME/local.json"
-# launch: never-list, allowlist, duplicate and cap refusals; a launched lead is alive with its start-time identity
+# launch: never-list, roster, duplicate and cap refusals; a launched lead is alive with its start-time identity
 mkdir -p "$ORCHY_HOME/prompts" ".claude/worktrees/x"; printf 'You are a subagent.\n' > "$ORCHY_HOME/prompts/x-plan.md"; cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/x-a1.md"; cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/x-a2.md"
-o=$("$ORCHY" launch x-plan x acct-main 2>&1 || true); grep -q 'accounts.never' <<<"$o" || fail "launch did not refuse accounts.never: $o"
-o=$("$ORCHY" launch x-plan x acct-z 2>&1 || true); grep -q 'accounts.use' <<<"$o" || fail "launch did not refuse an account off the allowlist: $o"
+o=$("$ORCHY" launch x-plan x acct-main 2>&1 || true); grep -q 'acct-main: on a never-list' <<<"$o" || fail "launch did not refuse the policy's never-list: $o"
+o=$("$ORCHY" launch x-plan x acct-z 2>&1 || true); grep -q 'not on the claude-usage roster' <<<"$o" || fail "launch did not refuse an account off the roster: $o"
 "$ORCHY" launch x-plan x acct-a >/dev/null || fail "launch"
 o=$("$ORCHY" launch x-plan x acct-a 2>&1 || true); grep -q 'is alive' <<<"$o" || fail "launch did not refuse a duplicate key: $o"
 "$ORCHY" launch x-a1 x acct-a >/dev/null || fail "second heavy launch"
@@ -47,7 +61,7 @@ jq -e '.hooks.PostToolUse[0].hooks[0].command | test("inbox-hook.sh .*/inbox/x-p
 grep -q '"type":"orchy_invocation","key":"x-plan","lane":"x"' "$ORCHY_HOME/leads/x-plan.log" || fail "no invocation marker"
 if grep -q '^claude-usage:' "$ORCHY_HOME/leads/x-plan.log" || ! grep -q '^claude-usage:' "$ORCHY_HOME/leads/x-plan.err"; then fail "the banner is not in .err alone"; fi
 for f in "$ORCHY_HOME"/leads/*.started; do read -r p _ < "$f"; for fd in /proc/"$p"/fd/*; do case "$(readlink "$fd")" in *spawn.lock) fail "lead $p holds the spawn lock";; esac; done; done
-tmp=$(mktemp); jq '.accounts.use += ["acct-d","acct-e","acct-f"]' "$ORCHY_HOME/local.json" > "$tmp" && mv "$tmp" "$ORCHY_HOME/local.json"
+tmp=$(mktemp)
 jq '.leads.permission_mode="bypass"' "$ORCHY_HOME/orchy.json" > "$tmp" && cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak" && mv "$tmp" "$ORCHY_HOME/orchy.json"
 cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/x-b1.md"; mkdir -p "$ORCHY_HOME/page/shots-plan"; echo '[]' > "$ORCHY_HOME/page/shots-plan/x-b1.json"
 "$ORCHY" launch x-b1 x acct-b >/dev/null || fail "bypass launch"
@@ -55,14 +69,17 @@ tail -1 "$MOCK_DIR/cu.log" | grep -q -- '--dangerously-skip-permissions' || fail
 tail -1 "$MOCK_DIR/cu.log" | grep -q -- "--add-dir $ORCHY_HOME/page/shots " || fail "a shots lead cannot write the page's shots"
 if head -1 "$MOCK_DIR/cu.log" | grep -q -- 'page/shots'; then fail "a lead with no shots plan got the shots dir"; fi
 if "$ORCHY" launch .x-hidden x acct-b >/dev/null 2>&1; then fail "launch accepted a dot-led key"; fi
-# the cap holds across every program under the capacity root, at the strictest cap among them
+# the policy's cap holds across every program under the capacity root
 # the second home's name carries a space, which must not shift the fields its rows are counted by
 H2="$T/cap/home 2"; mkdir -p "$H2/prompts"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$H2/"; cp "$ORCHY_HOME/prompts/x-plan.md" "$H2/prompts/y-a1.md"
+ORCHY_HOME="$H2" "$ORCHY" lock >/dev/null || fail "lock the second home"
 o=$(ORCHY_HOME="$H2" "$ORCHY" launch y-a1 x acct-a 2>&1 || true); grep -q 'across programs (cap 2)' <<<"$o" || fail "a second program exceeded the account cap: $o"
+# one machine-wide cap: a home's own caps are retired
 jq '.accounts.heavy_per_account=1' "$H2/local.json" > "$tmp" && mv "$tmp" "$H2/local.json"
 ORCHY_HOME="$H2" "$ORCHY" launch y-a1 x acct-d >/dev/null || fail "second program launch"
-for k in x-d1 x-c1 x-c2 x-c3; do cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/$k.md"; done
-o=$("$ORCHY" launch x-d1 x acct-d 2>&1 || true); grep -q 'cap 1' <<<"$o" || fail "the strictest cap among running programs was not applied: $o"
+for k in x-d1 x-d2 x-c1 x-c2 x-c3; do cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/$k.md"; done
+"$ORCHY" launch x-d1 x acct-d >/dev/null || fail "a home's retired cap still applied"
+o=$("$ORCHY" launch x-d2 x acct-d 2>&1 || true); grep -q 'across programs (cap 2)' <<<"$o" || fail "the policy's cap did not hold across programs: $o"
 # concurrent launches never pass the cap together
 ps=(); for k in x-c1 x-c2 x-c3; do ( "$ORCHY" launch "$k" x acct-c > "$T/$k.out" 2>&1 ) & ps+=($!); done; wait "${ps[@]}" || true
 [ "$(cat "$T"/x-c?.out | grep -c ' on acct-c pid ')" = 2 ] || fail "concurrent launches broke the cap: $(cat "$T"/x-c?.out)"
@@ -208,6 +225,7 @@ if "$ORCHY" lock >/dev/null 2>&1; then fail "lock did not refuse a live holder";
 # a takeover file left by a killed contender never blocks the next one
 touch "$ORCHY_HOME/orchestrator.lock.takeover"
 kill $hp; wait $hp 2>/dev/null || true; "$ORCHY" lock | grep -q '^locked' || fail "lock did not replace a stale holder"; "$ORCHY" unlock >/dev/null
+"$ORCHY" lock >/dev/null || fail "relock"
 for f in "$T"/cap/*/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/null || true; done; for f in "$MOCK_DIR"/gc.*; do kill "$(cat "$f")" 2>/dev/null || true; done
 # triage mode refuses worktrees, leads and merges in one guard
 cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak"; jq '.mode="triage"' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"
@@ -421,7 +439,7 @@ o=$(ORCHY_HOME="$HR" "$ORCHY" receipt r); grep -qF "asks done 1 ($r)" <<<"$o" ||
 # readers write nothing: the home, the ledger and gh's log stay byte-for-byte; the state names asks by id and flags only
 fp() { find "$HR" "$T/asks" -printf '%p %s %T@ %m\n' | sort; md5sum < "$MOCK_DIR/gh.log"; }
 b=$(fp); R() { ORCHY_HOME="$HR" "$ORCHY" "$@" >/dev/null || fail "reader $*"; }
-R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline; R waiting list; R waiting list --json
+R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline; R waiting list; R waiting list --json; R accounts; R accounts --json
 [ "$(fp)" = "$b" ] || fail "a reader changed the home, the ledger or gh.log: $(diff <(echo "$b") <(fp))"
 "$ORCHY" state > "$T/st.json"; jq -e --arg g "$g" '.asks | any(.id == $g and .lane == "gone-1" and .has_public) and all(has("text") | not)' "$T/st.json" >/dev/null || fail "state asks: $(jq -c .asks "$T/st.json")"
 grep -q 'Ana' "$T/st.json" && fail "state printed an ask's text"
@@ -443,7 +461,7 @@ o=$("$ORCHY" say x-say "$g: Gone-lane requirement" 2>&1 || true); grep -q "$g is
 "$ORCHY" say x-say "fix the review finding in $l first" | grep -q queued || fail "say refused an ordinary note naming a finding"
 "$ORCHY" stop x-say >/dev/null
 # the seat: session id and messaging address recorded, the token never; pid and start time alone decide ownership
-L="$ORCHY_HOME/orchestrator.lock"; TOK="tok-$RANDOM$RANDOM"
+"$ORCHY" unlock >/dev/null; L="$ORCHY_HOME/orchestrator.lock"; TOK="tok-$RANDOM$RANDOM"
 CLAUDE_CODE_SESSION_ID=sess-0001 CLAUDE_CODE_MESSAGING_SOCKET="$T/m.sock" CLAUDE_CODE_MESSAGING_TOKEN="$TOK" "$ORCHY" lock >/dev/null || fail "lock with the session env"
 read -r _ _ _ s4 s5 < "$L"; [ "$s4 $s5" = "sess-0001 uds:$T/m.sock" ] || fail "seat fields: $(cat "$L")"
 grep -rqF -- "$TOK" "$ORCHY_HOME" && fail "the messaging token reached the home"
@@ -485,6 +503,7 @@ E="$ORCHY_HOME/events.jsonl"; en() { grep -c '' "$E"; }
 one() { [ "$(en)" = $(( $1 + 1 )) ] && tail -1 "$E" | jq -e "$2" >/dev/null || fail "events after $3: $(tail -2 "$E")"; }
 n=$(en); "$ORCHY" lock >/dev/null; one "$n" '.kind == "seat.lock"' lock
 n=$(en); "$ORCHY" unlock >/dev/null; one "$n" '.kind == "seat.unlock"' unlock
+"$ORCHY" lock >/dev/null
 printf 'work\nARC_FAILED: gate red\nretry\nARC_FAILED: gate red again\n' > "$ORCHY_HOME/reports/x-ev.md"; printf 'You are a subagent.\n' > "$ORCHY_HOME/prompts/x-ev.md"
 sha=$(printf 'ARC_FAILED: gate red again' | sha256sum | cut -d' ' -f1)
 n=$(en); MOCK_LEAD_SECS=30 "$ORCHY" launch --force-cap x-ev x acct-b >/dev/null || fail "launch x-ev"
@@ -492,7 +511,7 @@ one "$n" ".kind == \"lead.launch\" and .key == \"x-ev\" and .lane == \"x\" and .
 "$ORCHY" state | jq -e '.leads[] | select(.key == "x-ev") | .alive and .lane == "x" and .weight == "heavy" and (.newest.cmd | type) == "string" and (.quiet_s | type) == "number" and .stalled == false' >/dev/null || fail "state of a live lead: $("$ORCHY" state | jq -c '.leads')"
 n=$(en); "$ORCHY" stop x-ev >/dev/null; one "$n" '.kind == "lead.stop" and .key == "x-ev"' stop
 n=$(en); MOCK_LEAD_SECS=30 "$ORCHY" resume --force-cap x-ev x acct-b 00000000-0000-4000-8000-000000000009 >/dev/null || fail "resume x-ev"
-one "$n" '.kind == "lead.resume" and .key == "x-ev" and .prior_failed_lines == 2' resume; "$ORCHY" stop x-ev >/dev/null
+one "$n" '.kind == "lead.resume" and .key == "x-ev" and .prior_failed_lines == 2' resume; "$ORCHY" stop x-ev >/dev/null; "$ORCHY" unlock >/dev/null
 n=$(en); A add "an event row" >/dev/null; one "$n" '.kind == "ask.row" and (.ask | test("^ask[0-9]+$")) and .state == "open"' "ask add"
 grep -q 'acct-\|event row\|gate red' "$E" && fail "an event carries an account name or text: $(grep 'acct-\|event row\|gate red' "$E")"
 jq -se 'all(.schema == "orchy.event/1" and (.at | test("Z$")))' "$E" >/dev/null || fail "an event without its schema"
@@ -504,7 +523,93 @@ w2=$({ "$ORCHY" lock; echo "rc=$?"; "$ORCHY" unlock; echo "rc=$?"; A add "writab
 # a symlink or a FIFO at the log's path is skipped: never followed, never waited on
 mv "$E" "$T/ev.keep"; ln -s "$T/ev.elsewhere" "$E"; "$ORCHY" lock >/dev/null; "$ORCHY" unlock >/dev/null; [ ! -e "$T/ev.elsewhere" ] || fail "an event followed a symlink"
 rm "$E"; mkfifo "$E"; timeout 10 "$ORCHY" lock >/dev/null || fail "an event waited on a FIFO"; timeout 10 "$ORCHY" unlock >/dev/null; rm "$E"; mv "$T/ev.keep" "$E"
+# the account policy, in a home of its own: the never-lists, the orchestrator's own account and each reading decide; auto spends
+# the headroom that expires soonest first, and a renamed account launches by its key
+HA="$T/cap/acct"; CA="$T/cu-a"; PA="$T/acct-policy.json"; mkdir -p "$HA/prompts" .claude/worktrees/acc; cp "$ORCHY_HOME/orchy.json" "$HA/"
+jq '.accounts = {use: ["p-bravo"], never: ["p-mike"]}' "$K/examples/local.example.json" > "$HA/local.json"
+AC() { MOCK_LEAD_SECS=${MOCK_LEAD_SECS:-120} ORCHY_HOME="$HA" MOCK_CU="$CA" ORCHY_ACCOUNTS="$PA" "$ORCHY" "$@"; }
+roster "$CA" p-echo p-alpha p-bravo p-charlie p-delta p-echo p-fox p-golf p-hotel p-india p-juliet p-kilo p-lima-new=p-lima p-mike p-oscar p-zulu
+cu_rows() { { row p-alpha 60 20; row p-bravo 60 100; row p-charlie 20 5; row p-delta 90 100; row p-echo 90 100; row p-fox 25 150
+  row p-golf 90 100 80 10800; row p-hotel 90 -1; row p-india 84 null; row p-juliet 90 100 80 60 "logged out"; row p-kilo 90 100 0
+  row p-lima-new 40 100; row p-mike 90 100; row p-oscar 0 100; row main 10 50; } | jq -s . > "$CA/rows.json"; }
+cu_rows; echo '{"schema": "orchy.accounts/1", "never": ["p-delta"]}' > "$PA"
+for k in 1 2 3 4 5 6 7 8 9; do printf 'You are a subagent.\n' > "$HA/prompts/acc-a$k.md"; done
+AC lock >/dev/null || fail "lock the policy home"
+picked() { tail -1 "$MOCK_DIR/cu.log" | grep -oE '=[a-z-]+' | head -1; }
+AC launch acc-a1 acc auto >/dev/null && [ "$(picked)" = =p-alpha ] || fail "auto did not spend the heavy headroom that expires soonest: $(tail -1 "$MOCK_DIR/cu.log")"
+AC launch --light acc-a2 acc auto >/dev/null && [ "$(picked)" = =p-charlie ] || fail "a light auto did not take the account under the floor: $(tail -1 "$MOCK_DIR/cu.log")"
+for x in "p-delta:on a never-list" "p-mike:on a never-list" "p-echo:the orchestrator runs on it" "p-juliet:claude-usage notes logged out" "p-kilo:its session is spent" "p-oscar:its week is spent"; do
+  o=$(AC launch --light acc-a3 acc "${x%%:*}" 2>&1 || true); grep -qF "${x%%:*}: ${x#*:}" <<<"$o" || fail "launch on ${x%%:*}: $o"; done
+for x in "p-charlie:week 20% is under the 25% floor" "p-golf:the reading is over 2 h old" "p-hotel:its week reset after the reading" "p-zulu:no reading in the snapshot"; do
+  o=$(AC launch acc-a3 acc "${x%%:*}" 2>&1 || true); grep -qF "${x%%:*} takes light leads only: ${x#*:}" <<<"$o" || fail "a heavy launch on ${x%%:*}: $o"; done
+AC launch acc-a3 acc p-fox >/dev/null || fail "exactly the floor is not heavy"
+AC launch --light acc-a4 acc p-golf >/dev/null || fail "a stale reading refused a light lead"
+AC launch --force-cap acc-a5 acc p-charlie >/dev/null || fail "--force-cap did not pass the floor"
+o=$(AC launch --force-cap acc-a8 acc p-golf 2>&1 || true); grep -qx 'refused: p-golf takes light leads only: the reading is over 2 h old; --light' <<<"$o" || fail "--force-cap passed a stale reading: $o"
+AC launch acc-a6 acc p-lima-new >/dev/null && [ "$(picked)" = =p-lima ] || fail "a renamed account did not launch by its key: $(tail -1 "$MOCK_DIR/cu.log")"
+AC accounts --json | jq -e '.schema == "orchy.headroom/1" and .orchestrator == "p-echo" and ([.accounts[] | select(.verdict == "heavy") | .key] == ["p-alpha", "p-bravo", "p-india", "p-lima", "p-fox"])
+  and (.accounts[] | select(.key == "p-echo") | .verdict == "no" and .why == "the orchestrator runs on it") and all(.accounts[]; (.why | length) > 0)
+  and (.accounts[] | select(.key == "p-alpha") | .heavy_leads == 1) and ([.accounts[] | select(.floor) | .key] == ["p-charlie"])
+  and ([.accounts[] | select(.key == "p-hotel" or .key == "p-zulu") | .verdict] == ["light", "light"])' >/dev/null || fail "accounts --json: $(AC accounts --json)"
+AC accounts | grep -qE '^orchestrator: p-echo  week 90% session 80% resets in (99|100)h$' || fail "accounts text: $(AC accounts)"
+echo main > "$CA/current.txt"; AC accounts | grep -q '^orchestrator: main  week 10% ' || fail "a slot orchestrator lost its reading: $(AC accounts)"; echo p-echo > "$CA/current.txt"
+o=$(AC resume acc-a7 acc p-charlie 00000000-0000-4000-8000-000000000007 2>&1 || true); grep -q 'light leads only' <<<"$o" || fail "a heavy resume below the floor: $o"
+AC resume --light acc-a7 acc p-charlie 00000000-0000-4000-8000-000000000007 >/dev/null || fail "a light resume below the floor"
+for f in "" --light; do o=$(AC resume $f acc-a8 acc p-kilo 00000000-0000-4000-8000-000000000008 2>&1 || true); grep -q 'its session is spent' <<<"$o" || fail "a resume $f on a spent session: $o"; done
+o=$(AC resume acc-a8 acc auto 00000000-0000-4000-8000-000000000008 2>&1 || true); grep -q "own account; name it" <<<"$o" || fail "resume took auto: $o"
+mv "$CA/rows.json" "$T/rows.keep"; o=$(AC launch acc-a8 acc auto 2>&1 || true); mv "$T/rows.keep" "$CA/rows.json"; grep -q 'run claude-usage once' <<<"$o" || fail "launch without a snapshot: $o"
+# the ban: every roster name, a label and its key alike, whether or not the bootstrap saw it; the slot label main never
+printf 'Base the release PR on main\n' > "$T/main.md"; AC check-text "$T/main.md" >/dev/null || fail "check-text refused the branch main"
+for n in p-bravo p-lima p-lima-new; do printf 'run it on %s.\n' "$n" > "$T/n.md"; AC check-text "$T/n.md" >/dev/null 2>&1 && fail "check-text passed the roster name $n"; done
+printf 'see p-bravox and xp-bravo\n' > "$T/n.md"; AC check-text "$T/n.md" >/dev/null || fail "check-text matched a roster name inside a longer one"
+jq '.prompt_ban = "\\b(main|acct-a)\\b"' "$HA/local.json" > "$T/l.json" && mv "$T/l.json" "$HA/local.json"
+AC check-text "$T/main.md" >/dev/null 2>&1 && fail "the stored ban did not hold main before the resume"
+AC lock | grep -q 'no longer bans the slot label main' || fail "the resume kept main in the stored ban"
+[ "$(jq -r .prompt_ban "$HA/local.json")" = '\b(acct-a)\b' ] || fail "stored ban after the resume: $(jq -r .prompt_ban "$HA/local.json")"
+AC check-text "$T/main.md" >/dev/null || fail "check-text refused main after the resume"
+printf 'use acct-a\n' > "$T/n.md"; AC check-text "$T/n.md" >/dev/null 2>&1 && fail "the resume dropped acct-a from the ban"
+echo '{"never": ["p-delta", "p-lima-new"]}' > "$PA"; for n in p-lima p-lima-new; do
+  o=$(AC launch --light acc-a8 acc "$n" 2>&1 || true); grep -q 'on a never-list' <<<"$o" || fail "a never entry by label let $n launch: $o"; done
+echo '{"schema": "orchy.accounts/1", "never": ["p-delta"]}' > "$PA"
+# the policy file: missing is the defaults; malformed, foreign-shaped or symlinked refuses every reader
+ORCHY_HOME="$HA" ORCHY_ACCOUNTS="$T/none.json" "$ORCHY" state | jq -e '.caps == {week_floor_pct: 25, heavy: 2, light: 3, load_max: 144}' >/dev/null || fail "state without a policy file"
+B() { ORCHY_HOME="$HA" MOCK_CU="$CA" ORCHY_ACCOUNTS="$T/bad.json" "$ORCHY" "$@"; }
+for m in '{"heavy_floor_pct": 101}' '[]' '{"x": 1}' '{"never": ["a b"]}' '{"schema": "orchy.accounts/2"}' '{"light_per_account": 1.5}' '{}{}' '' '{"never": false}' '{"never": ["p-delta\n"]}' '{"heavy_per_account": null}'; do
+  printf '%s' "$m" > "$T/bad.json"; o=$(B accounts 2>&1) && fail "accounts read a malformed policy: $m"; grep -q 'not orchy.accounts/1' <<<"$o" || fail "accounts on $m: $o"; done
+o=$(B launch --light acc-a8 acc auto 2>&1) && fail "launch read a malformed policy: $o"
+B state | jq -e '.caps == null and (.errors | index("caps"))' >/dev/null || fail "state over a malformed policy"
+ln -s "$PA" "$T/lnk.json"; LK() { ORCHY_HOME="$HA" MOCK_CU="$CA" ORCHY_ACCOUNTS="$T/lnk.json" "$ORCHY" "$@"; }
+for c in accounts "launch --light acc-a8 acc auto"; do o=$(LK $c 2>&1) && fail "$c read a symlinked policy"; grep -q 'not a symlink' <<<"$o" || fail "$c on a symlinked policy: $o"; done
+LK state | jq -e '.caps == null' >/dev/null || fail "state read a symlinked policy"
+# the seat: only its holder spawns; two programs racing for an account's last heavy slot take that one and the next
+for f in "$HA"/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/null || true; done; sleep 1
+for k in r0 r1 r2; do printf 'You are a subagent.\n' > "$HA/prompts/acc-$k.md"; done
+HB="$T/cap/acct2"; mkdir -p "$HB/prompts"; cp "$HA/orchy.json" "$HA/local.json" "$HB/"; cp "$HA/prompts/acc-r2.md" "$HB/prompts/"
+ORCHY_HOME="$HB" "$ORCHY" lock >/dev/null || fail "lock the racing home"
+MOCK_LEAD_SECS=30 AC launch acc-r0 acc p-alpha >/dev/null || fail "first heavy lead on p-alpha"
+: > "$T/race.log"; ( MOCK_LEAD_SECS=30 AC launch acc-r1 acc auto >> "$T/race.log" 2>&1 ) & r1=$!
+( MOCK_LEAD_SECS=30 ORCHY_HOME="$HB" MOCK_CU="$CA" ORCHY_ACCOUNTS="$PA" "$ORCHY" launch acc-r2 acc auto >> "$T/race.log" 2>&1 ) & r2=$!; wait "$r1" "$r2" || true
+[ "$(grep -oE ' on p-[a-z]+ ' "$T/race.log" | sort | tr -d ' ' | paste -sd, -)" = "onp-alpha,onp-bravo" ] || fail "two programs racing for the last slot: $(cat "$T/race.log")"
+# a launch that waited on the spawn lock checks the seat again inside it
+"$T/sess/claude" 600 & s2=$!; sess="$sess $s2"; exec {sl}>"$T/cap/.spawn.lock"; flock "$sl"
+( exec {sl}>&-; AC launch --light acc-a9 acc auto > "$T/late.out" 2>&1 ) & lw=$!
+w8=0; for _ in $(seq 300); do for q in $(pgrep -f 'orchy.sh launch --light acc-a9 acc auto'); do readlink /proc/"$q"/fd/* 2>/dev/null | grep -q 'spawn.lock$' && { w8=1; break 2; }; done; sleep 0.1; done
+[ "$w8" = 1 ] || fail "the launch never reached the spawn lock: $(cat "$T/late.out")"; cp "$HA/orchestrator.lock" "$T/seat.keep"; echo "$s2 $(awk '{print $22}' /proc/$s2/stat) 2026-01-01T00:00:00Z - -" > "$HA/orchestrator.lock"
+exec {sl}>&-; wait "$lw" || true; cp "$T/seat.keep" "$HA/orchestrator.lock"
+grep -q 'does not hold the seat' "$T/late.out" || fail "a launch spawned after its seat changed hands: $(cat "$T/late.out")"
+mkdir -p "$HA/watch"; sleep 60 & sw=$!; echo "$sw $(awk '{print $22}' /proc/$sw/stat)" > "$HA/watch/merge-41.pid"; printf '10:00Z required ok=1/2\n' > "$HA/watch/merge-41.out"
+AC unlock | grep -qx unlocked || fail "unlock the policy home"
+for c in "launch --light acc-a9 acc auto" "resume --light acc-a9 acc p-alpha 00000000-0000-4000-8000-000000000009"; do
+  o=$(AC $c 2>&1 || true); grep -q 'no session holds the seat' <<<"$o" || fail "$c ran with no seat holder: $o"; done
+CLAUDE_PID=$s2 AC lock | grep -q '^locked' || fail "another session could not take a handed-over seat"
+for c in "launch --light acc-a9 acc auto" "resume --light acc-a9 acc p-alpha 00000000-0000-4000-8000-000000000009"; do
+  o=$(AC $c 2>&1 || true); grep -q 'does not hold the seat' <<<"$o" || fail "the session that handed the seat over ran $c: $o"; done
+"$T/sess/claude" 600 & s3=$!; sess="$sess $s3"
+o=$(CLAUDE_PID=$s3 AC launch --light acc-a9 acc auto 2>&1 || true); grep -q "(pid $s3) does not hold the seat" <<<"$o" || fail "a session that never held the seat launched: $o"
+: > "$MOCK_DIR/refresh.log"; o=$(CLAUDE_PID=$s2 AC snapshot 2>&1); grep -qx refresh "$MOCK_DIR/refresh.log" || fail "snapshot did not refresh the readings"; grep -q '^alive acc-r0 ' <<<"$o" && grep -qx "alive merge-41 pid $sw" <<<"$o" || fail "a handed-over seat lost a lead or a watcher: $o"
+CLAUDE_PID=$s2 AC unlock >/dev/null; ORCHY_HOME="$HB" "$ORCHY" unlock >/dev/null; kill "$sw"; wait "$sw" 2>/dev/null || true
+for f in "$T"/cap/*/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/null || true; done; for f in "$MOCK_DIR"/gc.*; do kill "$(cat "$f")" 2>/dev/null || true; done
 wait "$pgp" || { tail -n 20 "$T/page.log"; fail "page smoke"; }; pgp=
-# no project names, home paths or roster names anywhere in the skill
-if grep -rnE 'nulo|Nulo|program-2|program2|/mnt/user-data|/Users/|martu|proton|icloud|GzKw77' "$K" --include='*.md' --include='*.sh' --include='*.py' --include='*.js' --include='*.ts' --include='*.json' --include='*.cjs' | grep -v 'page/fixtures' ; then fail "project-specific text in the skill"; fi
+# no project names, home paths or roster names anywhere in the skills
+if grep -rnE 'nulo|Nulo|program-2|program2|/mnt/user-data|/Users/|martu|proton|icloud|GzKw77' "$K" "$HERE/skills/pause-orchy" --include='*.md' --include='*.sh' --include='*.py' --include='*.js' --include='*.ts' --include='*.json' --include='*.cjs' | grep -v 'page/fixtures' ; then fail "project-specific text in the skill"; fi
 echo "smoke-orchy: ok"
