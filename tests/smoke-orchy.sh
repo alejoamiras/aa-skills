@@ -593,8 +593,8 @@ MOCK_LEAD_SECS=30 AC launch acc-r0 acc p-alpha >/dev/null || fail "first heavy l
 # a launch that waited on the spawn lock checks the seat again inside it
 "$T/sess/claude" 600 & s2=$!; sess="$sess $s2"; exec {sl}>"$T/cap/.spawn.lock"; flock "$sl"
 ( exec {sl}>&-; AC launch --light acc-a9 acc auto > "$T/late.out" 2>&1 ) & lw=$!
-for _ in $(seq 50); do for q in $(pgrep -f 'orchy.sh launch --light acc-a9 acc auto'); do readlink /proc/"$q"/fd/* 2>/dev/null | grep -q 'spawn.lock$' && break 2; done; sleep 0.1; done
-cp "$HA/orchestrator.lock" "$T/seat.keep"; echo "$s2 $(awk '{print $22}' /proc/$s2/stat) 2026-01-01T00:00:00Z - -" > "$HA/orchestrator.lock"
+w8=0; for _ in $(seq 300); do for q in $(pgrep -f 'orchy.sh launch --light acc-a9 acc auto'); do readlink /proc/"$q"/fd/* 2>/dev/null | grep -q 'spawn.lock$' && { w8=1; break 2; }; done; sleep 0.1; done
+[ "$w8" = 1 ] || fail "the launch never reached the spawn lock: $(cat "$T/late.out")"; cp "$HA/orchestrator.lock" "$T/seat.keep"; echo "$s2 $(awk '{print $22}' /proc/$s2/stat) 2026-01-01T00:00:00Z - -" > "$HA/orchestrator.lock"
 exec {sl}>&-; wait "$lw" || true; cp "$T/seat.keep" "$HA/orchestrator.lock"
 grep -q 'does not hold the seat' "$T/late.out" || fail "a launch spawned after its seat changed hands: $(cat "$T/late.out")"
 mkdir -p "$HA/watch"; sleep 60 & sw=$!; echo "$sw $(awk '{print $22}' /proc/$sw/stat)" > "$HA/watch/merge-41.pid"; printf '10:00Z required ok=1/2\n' > "$HA/watch/merge-41.out"
