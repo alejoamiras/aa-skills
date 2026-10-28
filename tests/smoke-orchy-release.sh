@@ -256,6 +256,12 @@ W merge 85 "$S28" main merge --ok "$z" >/dev/null; [[ "$(done_line 85)" == "#85 
 [ "$(grep -c 'HELD' "$ORCHY_HOME/watch/merge-84.out")" = 1 ] && [ "$(merges 84)" = 0 ] || fail "a lane watcher under a trunk hold: $(cat "$ORCHY_HOME/watch/merge-84.out")"
 "$ORCHY" hold "done" lane:release-7 >/dev/null; for _ in $(seq 1 60); do grep -q '^#84 MERGED' "$ORCHY_HOME/watch/merge-84.out" && break; sleep 0.5; done
 grep -q '^#84 MERGED' "$ORCHY_HOME/watch/merge-84.out" || fail "the lane watcher, after hold done: $(cat "$ORCHY_HOME/watch/merge-84.out")"
+# an act's call in flight when a hold is added finishes first, as a merge call does
+tq=$(A add "tag build-h"); A public "$tq" "Tag build-h" >/dev/null; A ok "$tq" tag build-h "$TS" -- "tag build-h" >/dev/null
+c0=$(grep -c '^api repos/example/app/git/refs ' "$MOCK_DIR/gh.log" || true); MOCK_GH_POST_SLEEP=3 "$ORCHY" act tag build-h "$TS" --ok "$tq" > "$T/tag-h.out" 2>&1 & tp=$!
+for _ in $(seq 1 200); do [ "$(grep -c '^api repos/example/app/git/refs ' "$MOCK_DIR/gh.log")" -gt "$c0" ] && break; sleep 0.1; done
+"$ORCHY" hold add other:peer-t all >/dev/null; grep -q 'refs/tags/build-h' "$MOCK_DIR/posts.log" || fail "hold add returned before an act's call in flight ended"
+wait "$tp" || true; grep -q '^tagged build-h' "$T/tag-h.out" || fail "the tag in flight: $(cat "$T/tag-h.out")"; "$ORCHY" hold "done" other:peer-t >/dev/null
 [ ! -e "$MOCK_DIR/locked.log" ] || fail "a call held holds.lock: $(cat "$MOCK_DIR/locked.log")"
 
 # --- triage mode refuses act; the acts above wrote only ask rows to the event log

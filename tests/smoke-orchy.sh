@@ -243,10 +243,16 @@ jq -n --arg h 4444444444444444444444444444444444444444 '[{number:5,headRefOid:$h
 o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1 || true); grep -q 'not the head of a PR merged' <<<"$o" || fail "teardown removed a worktree whose HEAD is not a merged PR head: $o"
 [ -d .claude/worktrees/y ] || fail "worktree y was removed"
 jq -n --arg h "$HY" '[{number:5,headRefOid:$h,baseRefName:"dev"}]' > "$MOCK_DIR/merged.json"
-"$ORCHY" hold add lane:y trunk >/dev/null || fail "hold add lane:y"
+# a removal that fails keeps the lane's hold; each success path ends it, and no other hold
+"$ORCHY" hold add lane:y trunk >/dev/null || fail "hold add lane:y"; "$ORCHY" hold add lane:z trunk >/dev/null || fail "hold add lane:z"
+git worktree lock .claude/worktrees/y; o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1 || true); git worktree unlock .claude/worktrees/y
+grep -q 'hand removal failed' <<<"$o" && [ -d .claude/worktrees/y ] && "$ORCHY" hold list | grep -q '^lane:y ' || fail "a failed hand removal: $o"
 o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1); grep -q 'hand-removed' <<<"$o" || fail "teardown did not remove an exact merged head: $o"
-"$ORCHY" hold list --json | jq -e '.holds == []' >/dev/null || fail "teardown left lane y's hold: $("$ORCHY" hold list)"
 [ ! -d .claude/worktrees/y ] || fail "worktree y still there"
+"$ORCHY" hold add lane:y trunk >/dev/null; "$ORCHY" teardown y >/dev/null || fail "teardown of a lane with no worktree"
+"$ORCHY" wt-new y2 >/dev/null || fail "wt-new y2"; "$ORCHY" hold add lane:y2 trunk >/dev/null; "$ORCHY" teardown y2 >/dev/null || fail "teardown y2"
+"$ORCHY" hold list --json | jq -e '[.holds[].ref] == ["lane:z"]' >/dev/null || fail "teardown's holds: $("$ORCHY" hold list)"
+"$ORCHY" hold "done" lane:z >/dev/null; git worktree remove --force .claude/worktrees/y2; git branch -q -D worktree-y2
 # disarm stops a live watcher (its whole process group); lock refuses while another live holder has it and replaces a stale one
 mkpr "$SHA"; "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 30 >/dev/null || fail "arm-merge for disarm"
 # another home's watcher on the same PR number is never this home's stray

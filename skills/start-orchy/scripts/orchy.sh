@@ -1192,21 +1192,21 @@ watch-merge)
         *) echo "HEAD MOVED: $BASE history was rewritten since arming"; exit 2;;
       esac
       margs=("--$method"); [ -n "$ACT" ] || margs+=(--delete-branch)   # an act's head may be the trunk itself
-      # holds.lock, shared, spans the hold check, the claim, the call and its outcome line; the calls run without the descriptor
+      if [ -n "$ACT" ] && [ "$claimed" = 0 ] && [ "$AUTH" = grant ]; then grant_pr_ok "$N" || { echo "REFUSED at merge time: #$N is no longer Dependabot's own"; exit 4; }; fi
+      # holds.lock, shared, spans the hold check, the claim, the call and its outcome line; each call is bounded and runs without the descriptor
       ( flock -s -w 300 7 || { echo "REFUSED at merge time: holds.lock is busy for 300 s"; exit 4; }
         hr=$(held "$HS") || hr="holds.json, unreadable"; [ -z "$hr" ] || exit 10
         # an act spends its authority once, before its first call: a retry, on a moved base or after a hold, is the same attempt
         if [ -n "$ACT" ] && [ "$claimed" = 0 ]; then
-          [ "$AUTH" != grant ] || (exec 7>&-; grant_pr_ok "$N") || { echo "REFUSED at merge time: #$N is no longer Dependabot's own"; exit 4; }
           claim "$AUTH" "$AASK" "$ACT" "$LANE" 2>/dev/null || { echo "REFUSED at merge time: $ACT is no longer authorized"; exit 4; }
         elif [ -n "$ACT" ]; then
           unrevoked "$AUTH" "$AASK" "$ACT" "$LANE" || { echo "REFUSED at merge time: $ACT was revoked before its retry"; exit 4; }
         fi
         out=$(exec 7>&-; timeout 120 gh pr merge "$N" --repo "$REPO" "${margs[@]}" --match-head-commit "$PIN" 2>&1 | tail -1); echo "$out"
-        for _ in 1 2 3; do sleep $((WS/10)); s=$(exec 7>&-; gh pr view "$N" --repo "$REPO" --json state --jq .state 2>/dev/null) && break; done
+        for _ in 1 2 3; do sleep $((WS/10)); s=$(exec 7>&-; timeout 30 gh pr view "$N" --repo "$REPO" --json state --jq .state 2>/dev/null) && break; done
         [ -n "$s" ] || { echo "#$N state unreadable after the merge call; check it by hand"; exit 6; }
         if [ "$s" = MERGED ]; then
-          (exec 7>&-; gh pr view "$N" --repo "$REPO" --json state,mergeCommit --jq '"#'"$N"' \(.state) \(.mergeCommit.oid)"' 2>/dev/null) || echo "#$N MERGED"; exit 0
+          (exec 7>&-; timeout 30 gh pr view "$N" --repo "$REPO" --json state,mergeCommit --jq '"#'"$N"' \(.state) \(.mergeCommit.oid)"' 2>/dev/null) || echo "#$N MERGED"; exit 0
         fi
         grep -q "Base branch was modified" <<<"$out" && exit 11; exit 12 ) 7>>"$HOLDS_LOCK"
       rc=$?; case $rc in
@@ -1346,8 +1346,10 @@ disarm)
   done;;
 teardown)
   need gh; need agent-worktree; s=$1; W="$WT_ROOT/$s"; q="$(basename "$ROOT")/$s"
-  # a release freeze is the lane's own hold: it ends with the lane
-  end_hold() { holds_read 2>/dev/null | jq -e --arg r "lane:$s" 'any(.holds[]; .ref == $r)' >/dev/null && "$0" hold "done" "lane:$s"; return 0; }
+  end_hold() { # a release freeze is the lane's own hold: it ends with the lane, and a teardown that cannot end it fails
+    local h; h=$(holds_read) || { echo "$s: torn down, but holds.json is unreadable, so lane:$s may still hold"; exit 1; }
+    jq -e --arg r "lane:$s" 'any(.holds[]; .ref == $r)' <<<"$h" >/dev/null || return 0
+    "$0" hold "done" "lane:$s" || { echo "$s: torn down, but its hold remains (ORCHY hold done lane:$s)"; exit 1; }; }
   [ -d "$W" ] || { echo "$s: no worktree dir"; (cd "$ROOT" && agent-worktree done "$q" --forget 2>&1 | tail -1); end_hold; exit 0; }
   # a lead belongs to the lane whose worktree it runs in (launch starts it there), whatever its key
   wr=$(realpath -m "$W")
@@ -1360,7 +1362,8 @@ teardown)
   [ "$(cfg '.teardown.hand_remove // false')" = true ] || { echo "$out" | tail -2; echo "$s: hand removal is off (teardown.hand_remove); relay the refusal"; exit 2; }
   pr=$(gh pr list --repo "$REPO" --head "$b" --state merged --json number,headRefOid,baseRefName --jq ".[] | select(.headRefOid==\"$head\" and .baseRefName==\"$TRUNK\") | .number" | head -1)
   [ -n "$pr" ] || { echo "$s: HEAD $head is not the head of a PR merged into $TRUNK from $b; refusing"; exit 2; }
-  (cd "$ROOT" && git worktree remove --force "$W" && git branch -D "$b" >/dev/null && agent-worktree done "$q" --forget >/dev/null 2>&1; git worktree prune); echo "$s: hand-removed (branch $b at $head = merged PR #$pr)"; end_hold;;
+  (cd "$ROOT" && git worktree remove --force "$W" && git branch -D "$b" >/dev/null) || { echo "$s: hand removal failed; the lane's hold stays"; exit 5; }
+  (cd "$ROOT" && agent-worktree done "$q" --forget >/dev/null 2>&1; git worktree prune); echo "$s: hand-removed (branch $b at $head = merged PR #$pr)"; end_hold;;
 receipt)
   js=0; off=0; want=""; for o in "$@"; do case "$o" in --json) js=1;; --offline) off=1;; *) want=$o;; esac; done
   [ $off = 1 ] || need gh
