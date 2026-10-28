@@ -33,7 +33,12 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #                                ask:askN lane:<slug> other:<slug>); add replaces the text and keeps since; orchy.waiting/1 with --json
 #   hold add <ref> <all|trunk> | done <ref> | list [--json]   pause the program for a peer or a release freeze, one hold per
 #                                waiting ref: all refuses worktrees, leads and acts and holds every merge; trunk holds trunk merges
-#   wt-new <slug>...             create worktrees from origin/<trunk> and install deps; sequential; refuses an existing slug
+#   runbook add <slug> <file> | tick <slug> <n> | check <slug> | show <slug>   the owner's own steps for a release or a goal, one
+#                                per line ('- [ ] <step>', ending ' (proof: run <id>)' or ' (proof: release <tag>)' or not), kept
+#                                as the record waiting other:<slug>; add appends; check ticks a step whose run succeeded or
+#                                whose release is published
+#   wt-new <slug>... [--base <branch>]   create worktrees from origin/<trunk>, or a merge.branches base, and install deps;
+#                                sequential; refuses an existing slug; teardown proves each against its base
 #   launch [--light] <key> <slug> <account|auto>       start a headless lead on prompts/<key>.md inside the lane worktree; only the
 #                                seat holder launches, on an account the policy allows (auto: the one whose headroom expires soonest)
 #   resume [--light] <key> <slug> <account> <session>  resume a lead's session with prompts/<key>.md, on that session's account
@@ -89,7 +94,7 @@ for d in "${ds[@]}"; do [ ! -L "$d" ] && [ -O "$d" ] || { echo "orchy: $d must b
 f=$({ find "$H" -maxdepth 2 ! -user "$EUID"; [ $under = 0 ] || find "$CAP" -maxdepth 1 ! -user "$EUID"; } 2>/dev/null | head -1)
 [ -z "$f" ] || { echo "orchy: $f belongs to another user; refusing a home someone else could write" >&2; exit 1; }
 # Readers keep the ownership checks but create nothing, so a poller never changes the home it reads.
-ro=0; case "$cmd" in state|config|local|session-id|receipt|accounts|grants) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting|hold) case "${1:-}" in list) ro=1;; esac;; esac
+ro=0; case "$cmd" in state|config|local|session-id|receipt|accounts|grants) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting|hold) case "${1:-}" in list) ro=1;; esac;; runbook) case "${1:-}" in show) ro=1;; esac;; esac
 if [ $ro = 0 ]; then
   mkdir -p "$H"/{briefs,prompts,reports,leads,watch,wt,scratch,inbox,page/shots,page/build}
   chmod 700 "$H"; [ $under = 1 ] && chmod 700 "$CAP"
@@ -442,6 +447,35 @@ if not 1 <= len(t) <= 160: sys.exit(f"refused: the text is {len(t)} characters; 
 bad = {*range(0x20), *range(0x7f, 0xa0), 0x2028, 0x2029, 0x61c, 0x200e, 0x200f, *range(0x202a, 0x202f), *range(0x2066, 0x206a)}
 if any(ord(c) in bad for c in t): sys.exit("refused: the text carries a control, line separator or bidi character")'
 }
+RUNBOOKS="$H/runbooks"; RB_LOCK="$H/runbooks.lock"
+rb_parse() { # rb_parse <file> [--new]: the steps as JSON [[done, text, proof kind, proof arg], ...]; refuses a line outside the format
+  python3 -I - "$@" <<'PY'
+import sys, json, re
+path, new = sys.argv[1], sys.argv[2:] == ["--new"]
+try: raw = open(path, "rb").read().decode("utf-8")
+except UnicodeDecodeError: sys.exit("refused: the runbook is not UTF-8")
+except OSError as e: sys.exit(f"refused: cannot read the runbook ({e.strerror})")
+bad = {*range(0x20), *range(0x7f, 0xa0), 0x2028, 0x2029, 0x61c, 0x200e, 0x200f, *range(0x202a, 0x202f), *range(0x2066, 0x206a)}
+step = re.compile(r"- \[( |x)\] (.+?)(?: \(proof: (run|release) ([^)]*)\))?")
+steps = []
+for n, line in enumerate(raw.split("\n"), 1):   # \n alone ends a line, so a \r or a separator stays inside one for the check
+    if not line: continue
+    m = step.fullmatch(line)
+    if not m: sys.exit(f"refused: line {n} is not '- [ ] <step>', optionally ending ' (proof: run <run-id>)' or ' (proof: release <tag>)'")
+    done, text, kind, arg = m[1] == "x", m[2], m[3] or "", m[4] or ""
+    if any(ord(c) in bad for c in line): sys.exit(f"refused: line {n} carries a control, line separator or bidi character")
+    if new and done: sys.exit(f"refused: line {n} is ticked; a step starts unticked")
+    if not text.strip() or len(text) > 160: sys.exit(f"refused: line {n}: a step is 1 to 160 characters")
+    if "proof:" in text.lower(): sys.exit(f"refused: line {n}: a proof is ' (proof: run <run-id>)' or ' (proof: release <tag>)', at the end")
+    if kind == "run" and not re.fullmatch(r"[1-9][0-9]{0,19}", arg): sys.exit(f"refused: line {n}: a run proof names a run id")
+    if kind == "release" and not (re.fullmatch(r"[A-Za-z0-9._/-]{1,100}", arg) and ".." not in arg and arg[0] not in "-/"):
+        sys.exit(f"refused: line {n}: a release proof names a tag")
+    steps.append([done, text, kind, arg])
+if not 1 <= len(steps) <= 20: sys.exit(f"refused: a runbook holds 1 to 20 steps, not {len(steps)}")
+print(json.dumps(steps))
+PY
+}
+rb_line() { jq -r '.[] | "- [\(if .[0] then "x" else " " end)] \(.[1])\(if .[2] != "" then " (proof: \(.[2]) \(.[3]))" else "" end)"'; }
 case "$cmd" in
 config) cfg "$1";;
 local) lcl "$1";;
@@ -664,7 +698,8 @@ ask)
     ask_close() { local id kd x; for id in $(fold | jq -r --arg s "$s" 'map(select(.state == "lane" and .lane == $s)) | .[].id'); do
         kd=${res[$id]:-}; x=${kd#*$'\t'}; kd=${kd%%$'\t'*}
         case "$kd" in
-        D) append_row "$(row --arg t "delivered in $s PR #$x" '{id: $id, at: $at, state: "done", note: $t}')" && echo "$id done (PR #$x)";;
+        D) t="delivered in $s"; p=""; [ "$x" = "?" ] || { t+=" PR #$x"; p=" (PR #$x)"; }   # a dispatch-only release delivers with no PR
+           append_row "$(row --arg t "$t" '{id: $id, at: $at, state: "done", note: $t}')" && echo "$id done$p";;
         *) case "$kd" in L|C) ;; *) x="not reported";; esac
            append_row "$(row --arg t "lane $s closed without delivering it: $x" '{id: $id, at: $at, state: "open", note: $t}')" && echo "$id reopened: $x";;
         esac
@@ -729,18 +764,72 @@ hold)
       echo "hold $sub $r${sc:+ $sc}" ) 7>>"$HOLDS_LOCK";;
   *) echo "usage: hold add <ref> <all|trunk> | done <ref> | list [--json]" >&2; exit 1;;
   esac;;
+runbook)
+  sub=${1:-}; s=${2:-}; f="$RUNBOOKS/$s.md"
+  case "$sub $#" in "add 3"|"tick 3"|"check 2"|"show 2") ;; *) echo "usage: runbook add <slug> <file> | tick <slug> <n> | check <slug> | show <slug>" >&2; exit 1;; esac
+  [[ "$s" =~ ^[a-z0-9-]{1,32}$ ]] || { echo "refused: a runbook's slug is its waiting ref other:<slug>: [a-z0-9-], at most 32" >&2; exit 1; }
+  rb_read() { # the stored steps; a missing, symlinked or malformed runbook refuses
+    if [ -L "$RUNBOOKS" ] || [ -L "$f" ] || { [ -e "$f" ] && [ ! -f "$f" ]; }; then echo "refused: $f must be a regular file, not a symlink" >&2; return 1; fi
+    [ -f "$f" ] || { echo "refused: no runbook $s" >&2; return 1; }
+    rb_parse "$f"; }
+  if [ "$sub" = show ]; then j=$(rb_read) || exit 1; rb_line <<<"$j" | nl -w1 -s'. ' | sed -E 's/^([0-9]+)\. - /\1. /'; exit 0; fi
+  need flock
+  if [ "$sub" = add ]; then new=$(rb_parse "$3" --new) || exit 1
+    o=$("$0" check-public "$3" 2>&1); case $? in 0) ;; 1) echo "refused: the runbook fails check-public ($(grep -oE '^(LEAK|SENSITIVE|SECRET)|copies the owner' <<<"$o" | sort -u | paste -sd, -))" >&2; exit 1;;
+      *) echo "refused: check-public could not run" >&2; exit 1;; esac; fi
+  [ "$sub" != tick ] || [[ "$3" =~ ^[1-9][0-9]?$ ]] || { echo "refused: a step is numbered 1 to 20" >&2; exit 1; }
+  [ "$sub" != check ] || { need gh; need timeout; }
+  [ ! -L "$RUNBOOKS" ] && mkdir -p "$RUNBOOKS" || { echo "refused: $RUNBOOKS must be a directory, not a symlink" >&2; exit 1; }
+  ( flock -w 30 6 || { echo "refused: the runbooks lock is busy for 30 s" >&2; exit 1; }
+    case $sub in
+    add) if [ -e "$f" ] || [ -L "$f" ]; then j=$(rb_read) || exit 1; else j='[]'; fi
+      j=$(jq -c --argjson n "$new" '. + $n' <<<"$j"); n=$(jq length <<<"$j")
+      [ "$n" -le 20 ] || { echo "refused: runbook $s would hold $n steps; at most 20" >&2; exit 1; };;
+    tick) j=$(rb_read) || exit 1; i=$(( $3 - 1 ))
+      case $(jq -r --argjson i "$i" 'if .[$i] == null then "none" else .[$i][0] end' <<<"$j") in none) echo "refused: runbook $s has no step $3" >&2; exit 1;;
+        true) echo "refused: step $3 of runbook $s is already done" >&2; exit 1;; esac
+      j=$(jq -c --argjson i "$i" '.[$i][0] = true' <<<"$j");;
+    check) j=$(rb_read) || exit 1; moved=0; ef=$(mktemp "$H/scratch/runbook.XXXXXX") || exit 1
+      while IFS=$'\t' read -r i k a; do
+        if [ "$k" = run ]; then r=$(timeout 30 gh api "repos/$REPO/actions/runs/$a" --jq '"\(.status) \(.conclusion)"' 2>"$ef") || r=unreadable
+          [ "$r" = "completed success" ] && ok=1 || ok=0
+        else r=$(timeout 30 gh api "repos/$REPO/releases/tags/$(jq -rn --arg t "$a" '$t | @uri')" --jq 'if type != "object" or (.draft | type) != "boolean" then "unreadable" elif .draft then "a draft"
+            elif .published_at == null then "not published" elif (.published_at | try fromdateiso8601 catch null) != null then "published" else "unreadable" end' 2>"$ef") \
+            || { grep -q 'HTTP 404' "$ef" && r="not published" || r=unreadable; }
+          [ "$r" = published ] && ok=1 || ok=0
+        fi
+        echo "step $((i + 1)): $k $a: $r"; [ $ok = 0 ] || { j=$(jq -c --argjson i "$i" '.[$i][0] = true' <<<"$j"); moved=1; }
+      done < <(jq -r 'to_entries[] | select((.value[0] | not) and .value[2] != "") | "\(.key)\t\(.value[2])\t\(.value[3])"' <<<"$j")
+      rm -f "$ef"; [ $moved = 1 ] || { echo "runbook $s: nothing proven since the last check"; exit 0; };;
+    esac
+    # the record before the file: a failed update leaves the runbook as it was, so a rerun retries both
+    t=$(jq -r '(map(select(.[0])) | length) as $k | (map(select(.[0] | not)) | first) as $x
+      | if $x == null then "" else "\($k) of \(length) done; next: \($x[1])" | if length > 160 then .[0:157] + "..." else . end end' <<<"$j")
+    if [ -n "$t" ]; then "$0" waiting add "other:$s" "$t" >/dev/null || exit 1
+    else o=$("$0" waiting "done" "other:$s" 2>&1) || grep -q 'nothing waits' <<<"$o" || { echo "$o" >&2; exit 1; }; fi
+    tmp=$(mktemp "$RUNBOOKS/.$s.XXXXXX") && rb_line <<<"$j" > "$tmp" && mv -f "$tmp" "$f" || { rm -f "${tmp:-}"; echo "refused: cannot write $f" >&2; exit 1; }
+    echo "runbook $s: ${t:-every step done}"
+  ) 6>>"$RB_LOCK";;
 wt-new)
-  hold_guard; need agent-worktree; install=$(cfg '.install // empty'); rc=0
-  git -C "$ROOT" fetch -q origin "$TRUNK" || { echo "fetch failed"; exit 1; }
-  for s in "$@"; do
+  hold_guard; need agent-worktree; install=$(cfg '.install // empty'); rc=0; base=$TRUNK; ss=()
+  while [ $# -gt 0 ]; do case "$1" in --base) [ $# -ge 2 ] || { echo "usage: wt-new <slug>... [--base <branch>]" >&2; exit 1; }; base=$2; shift 2;; *) ss+=("$1"); shift;; esac; done
+  # a hotfix starts from the release branch; any other base would be proved at teardown against a branch nothing merges into
+  { [ "$base" = "$TRUNK" ] || jq -e --arg b "$base" '(.merge.branches // {}) | has($b)' "$CFG" >/dev/null; } && ref_ok "$base" \
+    || { echo "refused: --base $base is neither the trunk nor a merge.branches base" >&2; exit 1; }
+  git -C "$ROOT" fetch -q origin "$base" || { echo "fetch failed"; exit 1; }
+  for s in "${ss[@]}"; do
     out="$H/wt/$s.out"; w="$WT_ROOT/$s"
     [ -d "$w" ] && { echo "$s: worktree exists at $w; refusing"; rc=1; continue; }
     lane_reported "$s" && { echo "$s: lane $s has reports from an earlier run; a closed lane's slug is never reused"; rc=1; continue; }
+    bf="$H/wt/$s.base"   # replaced by rename below, never written through a planted link
+    if [ -L "$bf" ] || { [ -e "$bf" ] && [ ! -f "$bf" ]; }; then echo "$s: $bf must be a regular file, not a link; refusing"; rc=1; continue; fi
     { echo "== $(now) new $s"; } >> "$out"
     # never pipe `agent-worktree new` into head: SIGPIPE kills it after the branch exists and before the directory does
     if ! (cd "$ROOT" && agent-worktree new "$s" --no-start) >> "$out" 2>&1; then echo "$s: agent-worktree new failed (see $out)"; rc=1; continue; fi
     [ -d "$w" ] || { echo "$s: no directory at $w (see $out)"; rc=1; continue; }
-    if (cd "$w" && git fetch -q origin "$TRUNK" && git reset -q --hard "origin/$TRUNK" && { [ -z "$install" ] || eval "$install"; }) >> "$out" 2>&1; then
+    { bt=$(mktemp "$H/wt/.$s.base.XXXXXX") && printf '%s\n' "$base" > "$bt" && mv -f "$bt" "$bf"; } \
+      || { rm -f "${bt:-}"; echo "$s: cannot record its base in $bf; refusing"; rc=1; continue; }
+    if (cd "$w" && git fetch -q origin "$base" && git reset -q --hard "origin/$base" && { [ -z "$install" ] || eval "$install"; }) >> "$out" 2>&1; then
       echo "install exit 0 $(git -C "$w" rev-parse --short HEAD) $(git -C "$w" rev-parse --abbrev-ref HEAD)" >> "$out"
     else echo "install exit 1" >> "$out"; rc=1; fi
     echo "$s: $(tail -n 1 "$out")"
@@ -907,6 +996,8 @@ snapshot)
   echo "-- waiting"; "$0" waiting list 2>&1
   echo "-- grants"; "$0" grants 2>&1
   echo "-- holds"; "$0" hold list 2>&1
+  echo "-- runbooks"; for f in "$RUNBOOKS"/*.md; do [ -f "$f" ] || continue; b=$(basename "$f" .md); j=$(rb_parse "$f" 2>&1) || { echo "$b: $j"; continue; }
+    jq -r --arg b "$b" '(map(select(.[0])) | length) as $k | select($k < length) | "\($b) \($k)/\(length)"' <<<"$j"; done
   # launch reads only the cached snapshot, so the tick refreshes it: a reading over 2 h old allows light leads only
   echo "-- headroom"; claude-usage refresh >/dev/null 2>&1; "$0" accounts 2>&1 | head -20;;
 accounts)
@@ -1356,12 +1447,16 @@ teardown)
   lead_rows | while read -r k _ _ p; do c=$(readlink "/proc/$p/cwd" 2>/dev/null) || continue; { [ "$c" = "$wr" ] || [ "${c#"$wr"/}" != "$c" ]; } && echo "$k"; done | grep -q . && { echo "$s: a lead of this lane is alive; refusing"; exit 4; }
   b=$(git -C "$W" rev-parse --abbrev-ref HEAD); head=$(git -C "$W" rev-parse HEAD); dirty=$(git -C "$W" status --short | wc -l)
   [ "$dirty" = "0" ] || { echo "$s: $dirty uncommitted files; refusing"; exit 3; }
-  if out=$(cd "$ROOT" && agent-worktree done "$q" --merged --trunk "$TRUNK" 2>&1); then echo "$out" | tail -2; end_hold; exit 0; fi
+  base=$TRUNK; bf="$H/wt/$s.base"   # absent for a lane made before bases: the trunk
+  if [ -e "$bf" ] || [ -L "$bf" ]; then base=$( [ -f "$bf" ] && [ ! -L "$bf" ] && head -n 1 "$bf")
+    { [ "$base" = "$TRUNK" ] || jq -e --arg b "$base" '(.merge.branches // {}) | has($b)' "$CFG" >/dev/null; } && ref_ok "$base" \
+      || { echo "$s: wt/$s.base names neither the trunk nor a merge.branches base; refusing"; exit 2; }; fi
+  if out=$(cd "$ROOT" && agent-worktree done "$q" --merged --trunk "$base" 2>&1); then echo "$out" | tail -2; end_hold; exit 0; fi
   echo "$out" | grep -qi 'refus' || { echo "$s: agent-worktree failed: $(echo "$out" | tail -1)"; exit 5; }
   # the squash proof can fail after a later PR rewrote a file the squash carried; a HEAD that IS a merged PR's head is proof enough, when the config allows a hand removal
   [ "$(cfg '.teardown.hand_remove // false')" = true ] || { echo "$out" | tail -2; echo "$s: hand removal is off (teardown.hand_remove); relay the refusal"; exit 2; }
-  pr=$(gh pr list --repo "$REPO" --head "$b" --state merged --json number,headRefOid,baseRefName --jq ".[] | select(.headRefOid==\"$head\" and .baseRefName==\"$TRUNK\") | .number" | head -1)
-  [ -n "$pr" ] || { echo "$s: HEAD $head is not the head of a PR merged into $TRUNK from $b; refusing"; exit 2; }
+  pr=$(gh pr list --repo "$REPO" --head "$b" --state merged --json number,headRefOid,baseRefName --jq ".[] | select(.headRefOid==\"$head\" and .baseRefName==\"$base\") | .number" | head -1)
+  [ -n "$pr" ] || { echo "$s: HEAD $head is not the head of a PR merged into $base from $b; refusing"; exit 2; }
   (cd "$ROOT" && git worktree remove --force "$W" && git branch -D "$b" >/dev/null) || { echo "$s: hand removal failed; the lane's hold stays"; exit 5; }
   (cd "$ROOT" && agent-worktree done "$q" --forget >/dev/null 2>&1; git worktree prune); echo "$s: hand-removed (branch $b at $head = merged PR #$pr)"; end_hold;;
 receipt)

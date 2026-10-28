@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# agent-worktree mock: `done --merged` refuses when $MOCK_AW_REFUSE=1, `new` creates a plain worktree, the rest is a no-op
+# agent-worktree mock: `done --merged` refuses when $MOCK_AW_REFUSE=1, or with $MOCK_AW_ANCESTRY=1 when the worktree's HEAD is not
+# on origin/<the --trunk it names>; `new` creates a plain worktree, the rest is a no-op
 set -u; echo "$*" >> "$MOCK_DIR/aw.log"
 for f in /proc/$$/fd/*; do case $(readlink "$f") in *holds.lock) echo "$*" >> "$MOCK_DIR/locked.log";; esac; done   # no call may hold the holds lock
 case "$1" in
 new) git worktree add -q -b "worktree-$2" ".claude/worktrees/$2" HEAD;;
-done) if printf '%s\n' "$@" | grep -qx -- --merged && [ "${MOCK_AW_REFUSE:-0}" = 1 ]; then echo "refusing: HEAD is not contained in origin trunk"; exit 1; fi; echo "ok";;
+done) if printf '%s\n' "$@" | grep -qx -- --merged; then
+    [ "${MOCK_AW_REFUSE:-0}" = 1 ] && { echo "refusing: HEAD is not contained in origin trunk"; exit 1; }
+    if [ "${MOCK_AW_ANCESTRY:-0}" = 1 ]; then t=$(printf '%s\n' "$@" | sed -n '/^--trunk$/{n;p;}')
+      git merge-base --is-ancestor "$(git -C ".claude/worktrees/${2##*/}" rev-parse HEAD)" "origin/$t" || { echo "refusing: HEAD is not contained in origin/$t"; exit 1; }; fi
+  fi; echo "ok";;
 *) exit 0;;
 esac

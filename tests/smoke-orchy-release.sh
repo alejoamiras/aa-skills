@@ -266,4 +266,48 @@ wait "$tp" || true; grep -q '^tagged build-h' "$T/tag-h.out" || fail "the tag in
 jq '.mode = "triage"' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"; o=$(W tag build-9 "$TS" --check || true); cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"
 grep -q 'mode is triage' <<<"$o" || fail "act in triage mode: $o"
 k=$(tail -n +"$((ev0 + 1))" "$ORCHY_HOME/events.jsonl" | jq -r .kind | sort -u | paste -sd,); [ "$k" = ask.row ] || fail "the event log gained $k"
+# --- a hotfix under its go: the lane's own PR into main merges with a merge commit; another head or an app's PR does not
+hx=$(A add "hotfix the footer into main"); A public "$hx" "Hotfix the footer into main" >/dev/null; A lane "$hx" hotfix-2 hotfix >/dev/null
+A go "$hx" -- "hotfix it into main" >/dev/null; S30=$(sha 30); pr 86 "$S30" main worktree-hotfix-2
+W merge 86 "$S30" main merge --lane hotfix-2 >/dev/null; [[ "$(done_line 86)" == "#86 MERGED"* ]] && grep -q "^pr merge 86 .*--merge --match-head-commit $S30" "$MOCK_DIR/gh.log" \
+  || fail "the hotfix PR under its go: $(done_line 86)"
+S31=$(sha 31); pr 87 "$S31" main fix/x; o=$(W merge 87 "$S31" main merge --lane hotfix-2 || true); grep -q 'none of the shapes a go merges' <<<"$o" || fail "a hotfix from another head: $o"
+pr 87 "$S31" main worktree-hotfix-2 '.author = {login: "app/other", is_bot: true}'; o=$(W merge 87 "$S31" main merge --lane hotfix-2 || true)
+grep -q 'none of the shapes a go merges' <<<"$o" && [ "$(merges 87)" = 0 ] || fail "an app's PR on the hotfix branch: $o"
+
+# --- runbooks: the owner's own steps behind one record that says what is next; check ticks what a run or a release proves
+w() { "$ORCHY" waiting list --json | jq -r --arg r "other:$1" '.waiting[] | select(.ref == $r) | .text'; }
+rbadd() { o=$("$ORCHY" runbook add "$1" "$2" 2>&1) && rc=0 || rc=$?; }
+printf 'Publish the build in the store\n' > "$T/rb1.md"; printf -- '- [ ] Check it (proof: curl https://example.com)\n' > "$T/rb2.md"
+printf -- '- [ ] Check the notes (proof: release -Rx/y)\n' > "$T/rb3.md"; for i in $(seq 1 21); do printf -- '- [ ] Step %s\n' "$i"; done > "$T/rb4.md"
+printf -- '- [ ] Bad\001step\n' > "$T/rb5.md"
+for c in "rb1|is not '- \[ \] <step>'" "rb2|a proof is" "rb3|a release proof names a tag" "rb4|not 21" "rb5|carries a control"; do
+  rbadd rel-7 "$T/${c%%|*}.md"; [ "$rc" = 1 ] && grep -q -- "${c#*|}" <<<"$o" || fail "runbook add took ${c%%|*}: $o"; done
+[ ! -e "$ORCHY_HOME/runbooks/rel-7.md" ] && [ -z "$(w rel-7)" ] || fail "a refused runbook left a file or a record"
+printf -- '- [ ] Publish the staged build in the store dashboard\n- [ ] Answer the store review\n- [ ] Announce the release\n' > "$T/rb6.md"
+rbadd rel-7 "$T/rb6.md"; [ "$rc" = 0 ] && [ "$(w rel-7)" = "0 of 3 done; next: Publish the staged build in the store dashboard" ] || fail "runbook add: $o; $(w rel-7)"
+"$ORCHY" runbook tick rel-7 1 >/dev/null; [ "$(w rel-7)" = "1 of 3 done; next: Answer the store review" ] || fail "tick: $(w rel-7)"
+# a record that cannot be written leaves the runbook as it was; the tick of step 2 below retries both
+cp -p "$ORCHY_HOME/waiting.json" "$T/waiting.keep"; ln -sf "$T/waiting.keep" "$ORCHY_HOME/waiting.json"
+o=$("$ORCHY" runbook tick rel-7 2 2>&1) && rc=0 || rc=$?; rm -f "$ORCHY_HOME/waiting.json"; mv "$T/waiting.keep" "$ORCHY_HOME/waiting.json"
+[ "$rc" != 0 ] && grep -q 'must be a regular file' <<<"$o" && "$ORCHY" runbook show rel-7 | grep -qx '2. \[ \] Answer the store review' && [ "$(w rel-7)" = "1 of 3 done; next: Answer the store review" ] \
+  || fail "a failed record update ticked the runbook: $o"
+o=$("$ORCHY" runbook tick rel-7 1 2>&1 || true); grep -q 'already done' <<<"$o" || fail "a step ticked twice: $o"
+o=$("$ORCHY" runbook tick rel-7 4 2>&1 || true); grep -q 'has no step 4' <<<"$o" || fail "a step past the end: $o"
+"$ORCHY" runbook tick rel-7 3 >/dev/null; "$ORCHY" runbook tick rel-7 2 >/dev/null; [ -z "$(w rel-7)" ] || fail "the last tick left the record: $(w rel-7)"
+printf -- '- [ ] Run the store check (proof: run 901)\n- [ ] Publish the release notes (proof: release v1.4.0)\n- [ ] Confirm the listing\n' > "$T/rb7.md"
+rbadd rel-8 "$T/rb7.md"; [ "$rc" = 0 ] || fail "runbook add with proofs: $o"
+# a run not completed though its conclusion reads success; a draft though it carries a publication time; a release without
+# a draft flag, or with a publication time that does not parse
+echo '{"status": "in_progress", "conclusion": "success"}' > "$MOCK_DIR/run-901.json"; "$ORCHY" runbook check rel-8 > "$T/chk.out"
+echo '{"status": "completed", "conclusion": "failure"}' > "$MOCK_DIR/run-901.json"; jq -n '{draft: true, published_at: "2031-01-15T00:00:00Z"}' > "$MOCK_DIR/release-v1.4.0.json"
+"$ORCHY" runbook check rel-8 >> "$T/chk.out"
+for r in '{published_at: "2031-01-15T00:00:00Z"}' '{draft: false, published_at: "2031-01-15T"}'; do
+  jq -n "$r" > "$MOCK_DIR/release-v1.4.0.json"; "$ORCHY" runbook check rel-8 >> "$T/chk.out"; done
+[ "$(w rel-8)" = "0 of 3 done; next: Run the store check" ] && "$ORCHY" runbook show rel-8 | grep -qx '1. \[ \] Run the store check (proof: run 901)' || fail "check ticked an unproven step: $(cat "$T/chk.out")"
+for l in 'run 901: in_progress success' 'release v1.4.0: not published' 'release v1.4.0: a draft' 'release v1.4.0: unreadable'; do
+  grep -q "^step [12]: $l\$" "$T/chk.out" || fail "check's lines lack '$l': $(cat "$T/chk.out")"; done
+echo '{"status": "completed", "conclusion": "success"}' > "$MOCK_DIR/run-901.json"; jq -n '{draft: false, published_at: "2031-01-15T00:00:00Z"}' > "$MOCK_DIR/release-v1.4.0.json"
+"$ORCHY" runbook check rel-8 >/dev/null; [ "$(w rel-8)" = "2 of 3 done; next: Confirm the listing" ] || fail "check after the run succeeded and the release published: $(w rel-8)"
+"$ORCHY" snapshot 2>/dev/null | sed -n '/^-- runbooks/,/^--/p' | grep -qx 'rel-8 2/3' || fail "the snapshot's runbooks: $("$ORCHY" snapshot 2>&1 | sed -n '/^-- runbooks/,/^--/p')"
 echo "smoke-orchy-release: ok"

@@ -2,7 +2,7 @@
 # Smoke for skills/start-orchy: orchy.sh against a throwaway repo and home with mocked gh / agent-worktree / claude-usage, the templates, the page toolchain's own smoke.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd); K="$HERE/skills/start-orchy"; ORCHY="$K/scripts/orchy.sh"
-T=$(mktemp -d -t orchy-smoke-XXXX); pgp=; sess=; trap '[ -z "$pgp" ] || kill "$pgp" 2>/dev/null; [ -z "$sess" ] || kill $sess 2>/dev/null; rm -rf "$T"' EXIT
+T=$(mktemp -d -t orchy-smoke-XXXX); pgp=; sess=; trap '[ -z "$pgp" ] || kill "$pgp" 2>/dev/null || true; [ -z "$sess" ] || kill $sess 2>/dev/null || true; rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_CAPACITY_ROOT="$T/cap" ORCHY_HOME="$T/cap/home" ORCHY_REPO=example/app ORCHY_WATCH_SLEEP=1 ORCHY_PROFILE_DIR="$T/profile" ORCHY_ASKS_DIR="$T/asks" ORCHY_GITLEAKS=fake-gitleaks ORCHY_ACCOUNTS="$T/accounts.json"; mkdir -p "$MOCK_DIR"
 # the orchestrator session the seat records: a sleep named claude, so lock, launch and resume agree on it from any subshell
@@ -34,10 +34,14 @@ out=$("$ORCHY" render common-brief.md REPO=example/app PRODUCT="the app" TRUNK=d
 grep -q 'example/app backlog program (the app)' <<<"$out" || fail "render substitution"
 "$ORCHY" render --keep LANE,KEY,WORKTREE,BRANCH common-brief.md REPO=example/app PRODUCT=x TRUNK=dev PLANS_DIR=plans ARCHIVE_DIR=plans/archive ORCHY_HOME="$ORCHY_HOME" CODEX_EFFORT=high CODEX_MODEL=m CODEX_MODEL_SHORT=s LEAD_MODEL=opus LEAD_MODEL_NAME=x QUALITY_BAR=p GATES=g PROTECTED=main KNOWN_LIMIT_LABEL=k DELEGATIONS= NEVER_OPEN= | grep -q '<WORKTREE>' || fail "render --keep did not keep the lead-bound tokens"
 if "$ORCHY" render common-brief.md REPO=x >/dev/null 2>&1; then fail "render must fail on a leftover token"; fi
-for t in planner-brief implementer-brief lane-brief plan-spawn arc-spawn closeout-spawn shots-spawn quick-spawn tick; do [ -f "$K/templates/$t.md" ] || fail "template $t missing"; done
+for t in planner-brief implementer-brief lane-brief plan-spawn arc-spawn closeout-spawn shots-spawn quick-spawn release-spawn tick; do [ -f "$K/templates/$t.md" ] || fail "template $t missing"; done
 "$ORCHY" render tick.md REPO=example/app ORCHY_SH="$ORCHY" > "$T/tick.txt" || fail "render tick left a token"; "$ORCHY" check-text "$T/tick.txt" >/dev/null || fail "check-text tick"
-"$ORCHY" render quick-spawn.md LANE=qk KEY=qk-a1 WORKTREE=/w/qk BRANCH=worktree-qk TRUNK=dev ORCHY_HOME="$ORCHY_HOME" DECISIONS=none CODEX_MODEL=gpt-6.1-sol CODEX_EFFORT=high CLOSES="Delivers ask3" DATE=2031-01-15 STATE="a fresh lane" NEVER_OPEN="" > "$T/quick.md" || fail "render quick-spawn left a token"
+"$ORCHY" render quick-spawn.md LANE=qk KEY=qk-a1 WORKTREE=/w/qk BRANCH=worktree-qk TRUNK=dev BASE=dev ORCHY_HOME="$ORCHY_HOME" DECISIONS=none CODEX_MODEL=gpt-6.1-sol CODEX_EFFORT=high CLOSES="Delivers ask3" DATE=2031-01-15 STATE="a fresh lane" NEVER_OPEN="" > "$T/quick.md" || fail "render quick-spawn left a token"
 "$ORCHY" check-text "$T/quick.md" >/dev/null || fail "check-text quick-spawn"
+"$ORCHY" render release-spawn.md LANE=release-7 KEY=release-7-a1 WORKTREE=/w/r BRANCH=worktree-release-7 TRUNK=dev ORCHY_HOME="$ORCHY_HOME" \
+  RELEASE_SKILL=/w/r/.claude/skills/release/SKILL.md PROFILE="$ORCHY_HOME/scratch/release-7/profile.json" LEGS="none yet" DATE=2031-01-15 \
+  STATE="a fresh lane" NEVER_OPEN="" > "$T/release.md" || fail "render release-spawn left a token"
+"$ORCHY" check-text "$T/release.md" >/dev/null || fail "check-text release-spawn"
 # every rendered brief passes check-text (no roster name, no account-variable assignment)
 printf '%s\n' "$out" > "$T/brief.md"; "$ORCHY" check-text "$T/brief.md" || fail "rendered common brief fails check-text"
 printf 'run it on acct-a\n' > "$T/bad.md"; if "$ORCHY" check-text "$T/bad.md" >/dev/null 2>&1; then fail "check-text accepted a roster name"; fi
@@ -254,6 +258,20 @@ o=$(MOCK_AW_REFUSE=1 "$ORCHY" teardown y 2>&1); grep -q 'hand-removed' <<<"$o" |
 "$ORCHY" wt-new y2 >/dev/null || fail "wt-new y2"; "$ORCHY" hold add lane:y2 trunk >/dev/null; "$ORCHY" teardown y2 >/dev/null || fail "teardown y2"
 "$ORCHY" hold list --json | jq -e '[.holds[].ref] == ["lane:z"]' >/dev/null || fail "teardown's holds: $("$ORCHY" hold list)"
 "$ORCHY" hold "done" lane:z >/dev/null; git worktree remove --force .claude/worktrees/y2; git branch -q -D worktree-y2
+# a hotfix worktree starts from the release branch; bounced and clean, it tears down against that branch, though main holds a
+# release commit dev lacks; a second hotfix lane starts from main too
+m=$(git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit-tree -p origin/dev -m "release 1.4" "origin/dev^{tree}"); git push -q origin "$m:refs/heads/main"
+cp "$ORCHY_HOME/orchy.json" "$T/cfg.bak"; jq '.merge.branches = {main: {method: "merge", required_checks: ["release-gate"]}}' "$T/cfg.bak" > "$ORCHY_HOME/orchy.json"
+o=$("$ORCHY" wt-new hx --base feature-x 2>&1 || true); grep -q 'neither the trunk nor a merge.branches base' <<<"$o" && [ ! -d .claude/worktrees/hx ] || fail "wt-new on another base: $o"
+"$ORCHY" wt-new hf --base main >/dev/null || fail "wt-new --base main"
+[ "$(git -C .claude/worktrees/hf rev-parse HEAD)" = "$m" ] && [ "$(cat "$ORCHY_HOME/wt/hf.base")" = main ] || fail "wt-new --base main is at $(git -C .claude/worktrees/hf rev-parse --short HEAD)"
+o=$(MOCK_AW_ANCESTRY=1 "$ORCHY" teardown hf 2>&1) && grep -qx 'done [^ ]*/hf --merged --trunk main' "$MOCK_DIR/aw.log" || fail "teardown of a hotfix lane against main: $o"
+"$ORCHY" wt-new hf2 --base main >/dev/null && [ "$(git -C .claude/worktrees/hf2 rev-parse HEAD)" = "$m" ] || fail "a second hotfix lane's base"
+echo keep > "$T/target"; ln -s "$T/target" "$ORCHY_HOME/wt/hx.base"; o=$("$ORCHY" wt-new hx --base main 2>&1 || true)
+grep -q 'must be a regular file, not a link' <<<"$o" && [ "$(cat "$T/target")" = keep ] && [ ! -d .claude/worktrees/hx ] || fail "wt-new wrote through a planted base link: $o"
+rm -f "$ORCHY_HOME/wt/hx.base"
+echo feature-x > "$ORCHY_HOME/wt/hf2.base"; o=$("$ORCHY" teardown hf2 2>&1 || true); grep -q 'names neither the trunk nor a merge.branches base' <<<"$o" || fail "teardown on a planted base: $o"
+for w in hf hf2; do git worktree remove --force ".claude/worktrees/$w"; git branch -q -D "worktree-$w"; done; cp "$T/cfg.bak" "$ORCHY_HOME/orchy.json"
 # disarm stops a live watcher (its whole process group); lock refuses while another live holder has it and replaces a stale one
 mkpr "$SHA"; "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 30 >/dev/null || fail "arm-merge for disarm"
 # another home's watcher on the same PR number is never this home's stray
@@ -500,6 +518,10 @@ printf 'LEAD_BLOCKED: needs a plan\nOWNER_ASKS: none\nASKS: left out %s needs a 
 A close-lane qb >/dev/null || fail "close-lane qb"; [ "$(st "$qb")" = "open lane qb closed without delivering it: needs a plan" ] || fail "a bounce did not reopen its ask: $(st "$qb")"
 A lane "$qb" qb2 "planned after a bounce" >/dev/null || fail "a bounced ask was not laned again"
 o=$("$ORCHY" wt-new qb 2>&1 || true); grep -q 'never reused' <<<"$o" || fail "wt-new reused a bounced lane: $o"
+# a dispatch-only release delivers with no PR line
+ra=$(A add "release case"); A public "$ra" "Release requirement" >/dev/null; A lane "$ra" rl release >/dev/null || fail "ask lane $ra rl release"
+printf 'LEAD_DONE\nRELEASE: 2.3.0 complete\nASKS: delivered %s\nPLAN: none\n' "$ra" > "$RP/rl-a3.md"
+A close-lane rl >/dev/null || fail "close-lane rl"; [ "$(st "$ra")" = "done delivered in rl" ] || fail "a delivery with no PR: $(st "$ra")"
 # snapshot names asks by id and state only, flags an ask whose lane is gone, and lists no untriaged issue for an empty backlog
 g=$(A add "my sister Ana wants the gone lane"); A public "$g" "Gone-lane requirement" >/dev/null; A lane "$g" gone-1 "a repo change" >/dev/null
 echo '[]' > "$MOCK_DIR/issues.json"; : > "$ORCHY_HOME/triaged.txt"; "$ORCHY" snapshot > "$T/snap.out" 2>&1
@@ -510,8 +532,9 @@ r=$(A add "receipt case"); A public "$r" "Receipt requirement" >/dev/null; A lan
 o=$(ORCHY_HOME="$HR" "$ORCHY" receipt r); grep -qF "asks done 1 ($r)" <<<"$o" || fail "receipt asks: $o"
 # readers write nothing: the home, the ledger and gh's log stay byte-for-byte; the state names asks by id and flags only
 fp() { find "$HR" "$T/asks" -printf '%p %s %T@ %m\n' | sort; md5sum < "$MOCK_DIR/gh.log"; }
+mkdir -p "$HR/runbooks"; printf -- '- [x] Publish the build\n- [ ] Announce it (proof: release v1.0.0)\n' > "$HR/runbooks/rb-r.md"
 b=$(fp); R() { ORCHY_HOME="$HR" "$ORCHY" "$@" >/dev/null || fail "reader $*"; }
-R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline; R waiting list; R waiting list --json; R accounts; R accounts --json; R grants; R grants --json; R hold list; R hold list --json
+R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline; R waiting list; R waiting list --json; R accounts; R accounts --json; R grants; R grants --json; R hold list; R hold list --json; R runbook show rb-r
 [ "$(fp)" = "$b" ] || fail "a reader changed the home, the ledger or gh.log: $(diff <(echo "$b") <(fp))"
 "$ORCHY" state > "$T/st.json"; jq -e --arg g "$g" '.asks | any(.id == $g and .lane == "gone-1" and .has_public) and all(has("text") | not)' "$T/st.json" >/dev/null || fail "state asks: $(jq -c .asks "$T/st.json")"
 grep -q 'Ana' "$T/st.json" && fail "state printed an ask's text"
