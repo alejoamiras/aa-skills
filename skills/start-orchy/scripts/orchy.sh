@@ -265,6 +265,7 @@ def ok_live($x): (state_of | . != null and (.state == "open" or .state == "lane"
 def grant_live($s): [.[] | select(.note == "grant: \($s)" or .note == "revoke: \($s)")] | last | . != null and .note == "grant: \($s)" and (.said | type) == "string";
 def ok_spent($x): (state_of | . != null and (.state == "open" or .state == "lane"))
   and ([.[] | select(.note == "ok: \($x)" or .note == "revoke: \($x)" or .note == "used: \($x)")] | last | . != null and .note == "used: \($x)");
+def unmoved($u; f): to_entries | ([.[] | select(.value | f)] | last | .key // -1) < ([.[] | select(.value.note == $u)] | last | .key // -1);
 def unused($x): all(.[]; (.note // "") as $n | ($n == "used: \($x)" or ($n | startswith("used: \($x) under "))) | not);
 def live_grants: . as $all | [.[] | select((.note // "") | startswith("grant: ")) | {scope: (.note | ltrimstr("grant: ")), ask: .id, since: .at}]
   | group_by([.ask, .scope]) | map(last) | map(select(. as $g | $all | mine($g.ask) | grant_live($g.scope)));
@@ -284,12 +285,13 @@ authorized() { # authorized go|ok|grant <ask> <act> [<lane>]: the authority is l
   ok) jq -e --arg id "$2" --arg x "$3" "$LIVE_JQ"'mine($id) | ok_live($x)' <<<"$r" >/dev/null;;
   grant) jq -e --arg id "$2" --arg x "$3" --arg s "$(act_scope "$3")" "$LIVE_JQ"'unused($x) and (mine($id) | grant_live($s))' <<<"$r" >/dev/null;;
   *) return 1;; esac; }
-unrevoked() { # unrevoked go|ok|grant <ask> <act> [<lane>]: the authority that spent the act is not revoked since, nor its ask closed
+unrevoked() { # unrevoked go|ok|grant <ask> <act> [<lane>]: the authority that spent the act is live, and no revoke or replacement followed its claim
   local r; r=$(ledger_rows) || return 1
   case $1 in
-  go) jq -e --arg id "$2" --arg l "${4:-}" "$LIVE_JQ"'mine($id) | go_live($l)' <<<"$r" >/dev/null;;
+  go) jq -e --arg id "$2" --arg x "$3" --arg l "${4:-}" "$LIVE_JQ"'mine($id) | go_live($l) and unmoved("used: \($x)"; .note == "go" or .note == "revoke:")' <<<"$r" >/dev/null;;
   ok) jq -e --arg id "$2" --arg x "$3" "$LIVE_JQ"'mine($id) | ok_spent($x)' <<<"$r" >/dev/null;;
-  grant) jq -e --arg id "$2" --arg s "$(act_scope "$3")" "$LIVE_JQ"'mine($id) | grant_live($s)' <<<"$r" >/dev/null;;
+  grant) jq -e --arg id "$2" --arg x "$3" --arg s "$(act_scope "$3")" "$LIVE_JQ"'mine($id) | grant_live($s)
+    and unmoved("used: \($x) under \($s)"; .note == "grant: \($s)" or .note == "revoke: \($s)")' <<<"$r" >/dev/null;;
   *) return 1;; esac; }
 claim() { # claim go|ok|grant <ask> <act> [<lane>]: the authority read again and its used: row written under one ledger lock, so racing claims leave one
   local k=$1 id=$2 x=$3 l=${4:-} n="used: $3"; [ "$k" = grant ] && n="used: $3 under $(act_scope "$3")"

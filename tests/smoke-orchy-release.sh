@@ -208,6 +208,13 @@ S12=$(sha 12); for c in "owner|dependabot/x|dependabot[bot]" "app/dependabot|fix
 for cm in '[{authors: [{login: "dependabot[bot]"}, {login: "someone"}]}]' '[{authors: [{login: "dependabot[bot]"}]}, {authors: [{login: "someone"}]}]'; do
   pr 71 "$S12" dev dependabot/x ".author = {login: \"app/dependabot\", is_bot: true} | .commits = $cm"; o=$(W merge 71 "$S12" dev squash --grant || true)
   grep -q "not Dependabot's own PR" <<<"$o" || fail "a grant merged commits $cm: $o"; done
+# a revoke and a fresh go or grant during a retry's wait: the retry was the old authority's
+S23=$(sha 23); pr 54 "$S23" main release-7-fix; dep 72 "$S23"; echo . > "$MOCK_DIR/merge-race-54.jq"; echo . > "$MOCK_DIR/merge-race-72.jq"
+ORCHY_WATCH_SLEEP=16 "$ORCHY" act merge 54 "$S23" main merge --lane release-7 >/dev/null; ORCHY_WATCH_SLEEP=16 "$ORCHY" act merge 72 "$S23" dev squash --grant >/dev/null
+for _ in $(seq 1 200); do [ "$(merges 54)$(merges 72)" = 11 ] && break; sleep 0.1; done
+A revoke "$d" >/dev/null; A go "$d" -- "go on, again" >/dev/null; A revoke "$gr" merge dependabot dev squash >/dev/null; A grant "$gr" merge dependabot dev squash -- "merge them" >/dev/null
+for p in "54|main merge" "72|dev squash"; do l=$(done_line "${p%%|*}")
+  [[ "$l" == "REFUSED at merge time: merge ${p%%|*} $S23 ${p#*|} was revoked before its retry" ]] && [ "$(merges "${p%%|*}")" = 1 ] || fail "a retry revived by a fresh go or grant: $l"; done
 A revoke "$gr" merge dependabot dev squash >/dev/null; dep 71 "$S12"; o=$(W merge 71 "$S12" dev squash --grant || true); grep -q 'no live grant' <<<"$o" || fail "a revoked grant: $o"
 pg=$(A add "a planted grant"); A public "$pg" "A planted grant" >/dev/null; plant "$pg" "grant: merge dependabot dev squash"
 o=$(W merge 71 "$S12" dev squash --grant || true); grep -q 'no live grant' <<<"$o" && "$ORCHY" grants --json | jq -e '.grants == []' >/dev/null || fail "a planted grant row: $o"
