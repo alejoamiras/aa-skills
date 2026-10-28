@@ -310,4 +310,46 @@ for l in 'run 901: in_progress success' 'release v1.4.0: not published' 'release
 echo '{"status": "completed", "conclusion": "success"}' > "$MOCK_DIR/run-901.json"; jq -n '{draft: false, published_at: "2031-01-15T00:00:00Z"}' > "$MOCK_DIR/release-v1.4.0.json"
 "$ORCHY" runbook check rel-8 >/dev/null; [ "$(w rel-8)" = "2 of 3 done; next: Confirm the listing" ] || fail "check after the run succeeded and the release published: $(w rel-8)"
 "$ORCHY" snapshot 2>/dev/null | sed -n '/^-- runbooks/,/^--/p' | grep -qx 'rel-8 2/3' || fail "the snapshot's runbooks: $("$ORCHY" snapshot 2>&1 | sed -n '/^-- runbooks/,/^--/p')"
+# --- goals: a milestone with its title only, the date kept in the ledger, ready only when the work is done
+G=2031-01-15; g=$(A add "before launch: the listing copy, then ship it"); A public "$g" "Launch: the listing copy, then the release" >/dev/null
+for c in "Launch!|a name is" "launch on 2031-02-30|not a calendar date" "launch by 2031-01-01 on $G|at most one date" \
+  "launch on $G then party|the only end action" "launch-$G on $G|carries its date"; do
+  read -ra av <<<"${c%%|*}"; o=$(A goal "$g" "${av[@]}" 2>&1 || true); grep -q -- "${c#*|}" <<<"$o" || fail "ask goal ${c%%|*}: $o"; done
+o=$(A note "$g" "goal: x" 2>&1 || true); grep -q 'written only by' <<<"$o" || fail "a goal note by hand: $o"
+d=$(A add "a dated ask"); A public "$d" "Ship it before January 15" >/dev/null
+o=$(A goal "$d" launch on "$G" 2>&1 || true); grep -q "carries the goal's date" <<<"$o" || fail "ask goal over a dated public text: $o"
+: > "$MOCK_DIR/posts.log"; A goal "$g" launch on "$G" "then" release >/dev/null || fail "ask goal"
+[ "$(grep -c "\"id\":\"$g\".*\"note\":\"goal: " "$ORCHY_ASKS_DIR/example-app.jsonl")" = 1 ] || fail "ask goal wrote other than one goal row"
+[ "$(cat "$MOCK_DIR/posts.log")" = 'POST repos/example/app/milestones {"title":"launch"}' ] || fail "the milestone POST: $(cat "$MOCK_DIR/posts.log")"
+! grep -q -- "$G" "$MOCK_DIR/gh.log" "$MOCK_DIR/posts.log" || fail "the goal's date left the ledger: $(grep -h -- "$G" "$MOCK_DIR/gh.log" "$MOCK_DIR/posts.log")"
+o=$(A public "$g" "Launch on 15 Jan: the listing copy" 2>&1 || true); grep -q "never carries the goal's date" <<<"$o" || fail "ask public with the date: $o"
+jq -n '[{title: "launch", open_issues: 5, closed_issues: 4}, {title: "beta", open_issues: 0, closed_issues: 3}]' > "$MOCK_DIR/milestones.json"
+: > "$MOCK_DIR/posts.log"; A goal "$g" launch on "$G" "then" release >/dev/null && [ ! -s "$MOCK_DIR/posts.log" ] || fail "ask goal on an existing milestone posted: $(cat "$MOCK_DIR/posts.log")"
+jq -n '[range(100) | {title: "m\(.)", open_issues: 0, closed_issues: 0}]' > "$T/ms100.json"; cp "$MOCK_DIR/milestones.json" "$T/ms.keep"; cp "$T/ms100.json" "$MOCK_DIR/milestones.json"
+o=$(A goal "$d" other 2>&1 || true); cp "$T/ms.keep" "$MOCK_DIR/milestones.json"; grep -q '100 milestones or more' <<<"$o" && [ ! -s "$MOCK_DIR/posts.log" ] || fail "ask goal past a page of milestones: $o"
+printf -- '- [ ] Publish the listing copy\n- [ ] Check the store preview\n- [ ] Confirm the launch post\n' > "$T/goal.md"
+"$ORCHY" runbook add goal-launch "$T/goal.md" >/dev/null && "$ORCHY" runbook tick goal-launch 1 >/dev/null
+fp() { find "$ORCHY_HOME" "$ORCHY_ASKS_DIR" -printf '%p %s %T@ %m\n' | sort | sha256sum; }
+f0=$(fp); gj=$("$ORCHY" goals --json); "$ORCHY" goals >/dev/null; [ "$(fp)" = "$f0" ] || fail "goals wrote something"
+jq -e --arg g "$g" '.schema == "orchy.goals/1" and (.goals[] | select(.ask == $g) | .milestone == {open: 5, closed: 4} and .runbook == {done: 1, steps: 3}
+  and .kind == "on" and .then == "release" and .ready == false)' <<<"$gj" >/dev/null || fail "goals --json: $gj"
+"$ORCHY" snapshot 2>/dev/null | sed -n '/^-- goals/,/^--/p' | grep -qx 'goal launch 4/9 runbook 1/3' || fail "the snapshot's goals: $("$ORCHY" snapshot 2>&1 | sed -n '/^-- goals/,/^--/p')"
+# a goal waits for its work: the go leaves it held, and no lane takes it until the orchestrator writes answered: ready
+A go "$g" -- "launch it and ship" >/dev/null || fail "ask go on an open goal ask"
+A list --json | jq -e --arg g "$g" '.asks[] | select(.id == $g) | .held == "waiting: goal launch"' >/dev/null || fail "the go released the goal's hold"
+o=$(A lane "$g" release-8 release 2>&1 || true); grep -q 'waiting: goal launch' <<<"$o" || fail "a held goal was laned: $o"
+# ready: a by-goal once its milestone and runbook are done, an on-goal also once its day comes, a laned goal never
+ms() { jq -n --argjson b "$1" '[{title: "launch", open_issues: 0, closed_issues: 9}, {title: "beta", open_issues: $b, closed_issues: 3}]' > "$MOCK_DIR/milestones.json"; }; ms 1
+"$ORCHY" runbook tick goal-launch 2 >/dev/null; "$ORCHY" runbook tick goal-launch 3 >/dev/null
+b=$(A add "the beta, by the date"); A public "$b" "Beta: the onboarding fixes" >/dev/null; A goal "$b" beta by "$G" >/dev/null
+r() { "$ORCHY" goals --json | jq -r --arg a "$1" '.goals[] | select(.ask == $a) | .ready'; }
+[ "$(r "$b")" = false ] || fail "ready with an open milestone issue"; ms 0
+printf -- '- [ ] Post the beta notes\n' > "$T/beta.md"; "$ORCHY" runbook add goal-beta "$T/beta.md" >/dev/null; [ "$(r "$b")" = false ] || fail "ready with a runbook step open"
+"$ORCHY" runbook tick goal-beta 1 >/dev/null; [ "$(r "$g")/$(r "$b")" = false/true ] || fail "ready: launch $(r "$g"), beta $(r "$b")"
+d0=$(date -u +%F); dl=$("$ORCHY" goals --json | jq -r --arg a "$g" '.goals[] | select(.ask == $a) | .days')
+[ "$dl" = $(( ($(date -ud "$G" +%s) - $(date -ud "$d0" +%s)) / 86400 )) ] || fail "days to the launch: $dl"
+A go "$b" -- "ship the beta" >/dev/null && A note "$b" "answered: ready" >/dev/null && A lane "$b" release-9 release >/dev/null || fail "lane the ready goal"
+[ "$(r "$b")" = false ] || fail "a laned goal is still ready"
+pr 95 "$(sha 95)" main dev; o=$(W merge 95 "$(sha 95)" main merge --lane release-9 --check)
+[ "$o" = "checked: merge 95 $(sha 95) main merge (go $b)" ] || fail "the goal's go on its release lane: $o"
 echo "smoke-orchy-release: ok"
