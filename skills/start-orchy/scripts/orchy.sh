@@ -881,6 +881,7 @@ scan)
   jq -e '(.files | type) == "array" and (.files | length) < 300 and .total_commits == (.commits | length)' <<<"$cj" >/dev/null \
     || { echo "SCAN FAILED: #$n is more than one compare lists (300 files, 250 commits); read it by hand"; exit 2; }
   files=$(jq -r '.files[] | .filename, (.previous_filename // empty)' <<<"$cj" | sort -u)   # a rename touches its old path too
+  nf=$(jq '[.files[] | .filename, (.previous_filename // empty)] | unique | length' <<<"$cj")   # a name with a newline is one file
   meta=$(gh pr view "$n" --repo "$REPO" --json title,body --jq '.title, .body') || { echo "SCAN FAILED: gh pr view #$n"; exit 2; }
   meta=$meta$'\n'$(jq -r '.commits[].commit.message' <<<"$cj")
   h=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid) || { echo "SCAN FAILED: gh pr view #$n"; exit 2; }
@@ -891,14 +892,13 @@ scan)
   gf=$(echo "$files" | grep -E "$(cfg '.scan.gate_files')" || true)
   add=$(echo "$d" | grep -E '^\+' | grep -v '^+++' | grep -E "$(cfg '.scan.weakening')" || true)
   leak=$( (echo "$d" | grep -E '^\+'; echo "$meta") | grep -E "$leakre" || true)
-  echo "#$n files=$(echo "$files" | grep -c .) gatefiles=$(echo -n "$gf" | grep -c .) added=$(echo -n "$add" | grep -c .) leaks=$(echo -n "$leak" | grep -c .)"
+  echo "#$n files=$nf gatefiles=$(echo -n "$gf" | grep -c .) added=$(echo -n "$add" | grep -c .) leaks=$(echo -n "$leak" | grep -c .)"
   [ -n "$gf" ] && echo "$gf" | sed 's/^/  GATE FILE: /'
   [ -n "$add" ] && echo "$add" | cut -c1-200 | sed 's/^/  ADDED: /'
   [ -n "$leak" ] && echo "$leak" | cut -c1-200 | sed 's/^/  LEAK: /'
   [ "$quick" = 1 ] || exit 0
-  # the bounds a script can see; one surface, persisted shapes and what a person sees are the reader's. A manifest holds the
-  # dependencies and the scripts the gates run. Names are counted as JSON strings: one with a newline is still one file.
-  nf=$(jq '[.files[] | .filename, (.previous_filename // empty)] | unique | length' <<<"$cj")
+  # the bounds a script can see: a manifest holds the dependencies and the scripts the gates run. One surface, persisted
+  # shapes, a dependency no manifest names (a URL import) and what a person sees are the reader's.
   why=$( { [ -n "$gf" ] && echo "a gate file"
     grep -qE '(^|/)([^/]*\.lockb?|[^/]*-lock\.(json|yaml)|npm-shrinkwrap\.json|go\.sum|[^/]*\.lockfile)$' <<<"$files" && echo "a lockfile"
     grep -qE '(^|/)(package\.json|deno\.jsonc?|Cargo\.toml|go\.mod|pyproject\.toml|Pipfile|requirements[^/]*\.txt|Gemfile|composer\.json)$' <<<"$files" && echo "a manifest"
