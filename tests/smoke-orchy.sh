@@ -502,7 +502,7 @@ o=$(ORCHY_HOME="$HR" "$ORCHY" receipt r); grep -qF "asks done 1 ($r)" <<<"$o" ||
 # readers write nothing: the home, the ledger and gh's log stay byte-for-byte; the state names asks by id and flags only
 fp() { find "$HR" "$T/asks" -printf '%p %s %T@ %m\n' | sort; md5sum < "$MOCK_DIR/gh.log"; }
 b=$(fp); R() { ORCHY_HOME="$HR" "$ORCHY" "$@" >/dev/null || fail "reader $*"; }
-R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline; R waiting list; R waiting list --json; R accounts; R accounts --json
+R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline; R waiting list; R waiting list --json; R accounts; R accounts --json; R grants; R grants --json
 [ "$(fp)" = "$b" ] || fail "a reader changed the home, the ledger or gh.log: $(diff <(echo "$b") <(fp))"
 "$ORCHY" state > "$T/st.json"; jq -e --arg g "$g" '.asks | any(.id == $g and .lane == "gone-1" and .has_public) and all(has("text") | not)' "$T/st.json" >/dev/null || fail "state asks: $(jq -c .asks "$T/st.json")"
 grep -q 'Ana' "$T/st.json" && fail "state printed an ask's text"

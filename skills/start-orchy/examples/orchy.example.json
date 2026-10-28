@@ -21,6 +21,10 @@
   "quality_bar": "production",
   "merge": {
     "method": "squash",
+    "trunk_methods": [
+      "squash"
+    ],
+    "branches": {},
     "required_checks": [
       "quality-status",
       "e2e-status"

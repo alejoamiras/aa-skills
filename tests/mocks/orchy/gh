@@ -1,36 +1,44 @@
 #!/usr/bin/env bash
-# gh mock for smoke-orchy: fixtures in $MOCK_DIR (pr-<n>.json, issue-<n>.json, checks[-<sha>].json, status[-<sha>].json, trunk.json, compare.json (a sha...sha compare), compare-<branch>.json (a sha...branch one), diff-<sha>.txt and cmp-<sha>.json (a branch...sha one, as a diff and as JSON), open.json, issues.json, merged.json; heads-<n>.txt answers successive headRefOid reads, one line each, the last one repeating; merge-race-<n>.jq edits pr-<n>.json while the next merge call fails as a moved base); every call logged to $MOCK_DIR/gh.log
+# gh mock for smoke-orchy: fixtures in $MOCK_DIR (pr-<n>.json, issue-<n>.json, checks[-<sha>].json, status[-<sha>].json, trunk.json, compare.json (a sha...sha compare), compare-<branch>.json (a sha...branch one), diff-<sha>.txt and cmp-<sha>.json (a branch...sha one, as a diff and as JSON), open.json, issues.json, merged.json; heads-<n>.txt answers successive headRefOid reads, one line each, the last one repeating; merge-race-<n>.jq edits pr-<n>.json while the next merge call fails as a moved base; commit-<ref>.json (a ref's head, else trunk.json), run-<id>.json, pending-<id>.json, tag-<name>.json (absent: 404), dispatch.json (the dispatch answer; absent: 204)); every call logged to $MOCK_DIR/gh.log, and each POST with its body to $MOCK_DIR/posts.log
 set -u; echo "$*" >> "$MOCK_DIR/gh.log"
 jqexpr=""; args=("$@"); for ((i=0;i<${#args[@]};i++)); do [ "${args[i]}" = --jq ] && jqexpr=${args[i+1]}; done
 case "$1 $2" in
 "auth status") exit 0;;
 "pr view") f="$MOCK_DIR/pr-$3.json"; [ -f "$f" ] || { echo "no such pr" >&2; exit 1; }; q="$MOCK_DIR/heads-$3.txt"
   if [ -s "$q" ] && [[ "$jqexpr" == *headRefOid* ]]; then h=$(head -n 1 "$q"); [ "$(wc -l < "$q")" -gt 1 ] && sed -i 1d "$q"; jq -r --arg h "$h" ".headRefOid = \$h | $jqexpr" "$f"
-  else jq -r "$jqexpr" "$f"; fi;;
+  else jq -r "${jqexpr:-.}" "$f"; fi;;
 "pr merge") n=$3; f="$MOCK_DIR/pr-$n.json"; want=""; for ((i=0;i<${#args[@]};i++)); do [ "${args[i]}" = --match-head-commit ] && want=${args[i+1]}; done
   [ -n "$want" ] || { echo "MOCK: merge without --match-head-commit" >&2; exit 1; }
   [ "$want" = "$(jq -r .headRefOid "$f")" ] || { echo "head commit mismatch" >&2; exit 1; }
   r="$MOCK_DIR/merge-race-$n.jq"; if [ -f "$r" ]; then tmp=$(mktemp); jq -f "$r" "$f" > "$tmp" && mv "$tmp" "$f"; rm -f "$r"
     echo "GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)" >&2; exit 1; fi
   tmp=$(mktemp); jq '.state="MERGED" | .mergeCommit={oid:"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}' "$f" > "$tmp" && mv "$tmp" "$f"; echo "✓ Squashed and merged";;
-"issue view") f="$MOCK_DIR/issue-$3.json"; [ -f "$f" ] || { echo "no such issue" >&2; exit 1; }; jq -r "$jqexpr" "$f";;
-"pr list") if printf '%s\n' "$@" | grep -qx -- merged; then jq -r "$jqexpr" "$MOCK_DIR/merged.json"; elif [ -f "$MOCK_DIR/open.json" ]; then jq -r "$jqexpr" "$MOCK_DIR/open.json"; fi;;
+"issue view") f="$MOCK_DIR/issue-$3.json"; [ -f "$f" ] || { echo "no such issue" >&2; exit 1; }; jq -r "${jqexpr:-.}" "$f";;
+"pr list") if printf '%s\n' "$@" | grep -qx -- merged; then jq -r "${jqexpr:-.}" "$MOCK_DIR/merged.json"; elif [ -f "$MOCK_DIR/open.json" ]; then jq -r "${jqexpr:-.}" "$MOCK_DIR/open.json"; fi;;
 "issue list") [ "${MOCK_GH_FAIL:-}" = search ] && printf '%s\n' "$@" | grep -qx -- --search && { echo "HTTP 502" >&2; exit 1; }
   [ -e "$MOCK_DIR/fail-issues" ] && { echo "HTTP 502" >&2; exit 1; }
-  [ -f "$MOCK_DIR/issues.json" ] || exit 1; jq -r "$jqexpr" "$MOCK_DIR/issues.json";;
+  [ -f "$MOCK_DIR/issues.json" ] || exit 1; jq -r "${jqexpr:-.}" "$MOCK_DIR/issues.json";;
 "issue create") sleep "${MOCK_GH_DELAY:-0}"; [ "${MOCK_GH_FAIL:-}" = create ] && { echo "HTTP 500" >&2; exit 1; }
   echo "$*" >> "$MOCK_DIR/created.log"; echo "https://github.com/example/app/issues/${MOCK_ISSUE_NUMBER:-77}";;
 "api repos/"*) s=$(sed -E 's#.*/commits/([^/]+)/.*#\1#' <<<"$2")   # per-sha fixtures (checks-<sha>.json) fall back to the shared one
+  m=GET; for ((i=0;i<${#args[@]};i++)); do case "${args[i]}" in -X|--method) m=${args[i+1]};; esac; done
+  if [ "$m" = POST ]; then b=$(cat); printf 'POST %s %s\n' "$2" "$(jq -c . <<<"$b" 2>/dev/null || printf '%s' "$b")" >> "$MOCK_DIR/posts.log"
+    case ${MOCK_GH_FAIL:-} in post) echo "gh: Validation Failed (HTTP 422)" >&2; exit 1;; post-net) echo "Post \"https://api.github.com/$2\": read: connection reset by peer" >&2; exit 1;;
+      post-timeout) exit 124;; esac
+    case "$2" in */dispatches) [ -f "$MOCK_DIR/dispatch.json" ] && cat "$MOCK_DIR/dispatch.json";; esac; exit 0; fi
   case "$2" in
-  *check-runs) f="$MOCK_DIR/checks-$s.json"; [ -f "$f" ] || f="$MOCK_DIR/checks.json"; jq -r "$jqexpr" "$f";;
-  *status) f="$MOCK_DIR/status-$s.json"; [ -f "$f" ] || f="$MOCK_DIR/status.json"; jq -r "$jqexpr" "$f";;
+  */actions/runs/*/pending_deployments) r=${2%/pending_deployments}; f="$MOCK_DIR/pending-${r##*/}.json"; [ -f "$f" ] || exit 1; cat "$f";;
+  */actions/runs/*) f="$MOCK_DIR/run-${2##*/}.json"; [ -f "$f" ] || exit 1; if [ -n "$jqexpr" ]; then jq -r "${jqexpr:-.}" "$f"; else cat "$f"; fi;;
+  */git/ref/tags/*) f="$MOCK_DIR/tag-${2##*/git/ref/tags/}.json"; [ -f "$f" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }; cat "$f";;
+  *check-runs) f="$MOCK_DIR/checks-$s.json"; [ -f "$f" ] || f="$MOCK_DIR/checks.json"; jq -r "${jqexpr:-.}" "$f";;
+  *status) f="$MOCK_DIR/status-$s.json"; [ -f "$f" ] || f="$MOCK_DIR/status.json"; jq -r "${jqexpr:-.}" "$f";;
   */compare/*) b=${2##*/compare/}; l=${b%%...*}; r=${b##*...}
     if [[ ! "$l" =~ ^[0-9a-f]{40}$ ]]; then
       if printf '%s\n' "$@" | grep -qx 'Accept: application/vnd.github.diff'; then [ "${MOCK_GH_FAIL:-}" = diff ] && { echo "HTTP 500" >&2; exit 1; }; cat "$MOCK_DIR/diff-$r.txt"; exit; fi
       f="$MOCK_DIR/cmp-$r.json"
     else f="$MOCK_DIR/compare.json"; [[ "$r" =~ ^[0-9a-f]{40}$ ]] || f="$MOCK_DIR/compare-$r.json"; fi
-    [ -f "$f" ] || exit 1; if [ -n "$jqexpr" ]; then jq -r "$jqexpr" "$f"; else cat "$f"; fi;;
-  */commits/*) [ -f "$MOCK_DIR/trunk.json" ] || exit 1; jq -r "$jqexpr" "$MOCK_DIR/trunk.json";;
+    [ -f "$f" ] || exit 1; if [ -n "$jqexpr" ]; then jq -r "${jqexpr:-.}" "$f"; else cat "$f"; fi;;
+  */commits/*) f="$MOCK_DIR/commit-${2##*/commits/}.json"; [ -f "$f" ] || f="$MOCK_DIR/trunk.json"; [ -f "$f" ] || exit 1; jq -r "${jqexpr:-.}" "$f";;
   *) exit 1;; esac;;
 *) echo "MOCK gh: unhandled $*" >&2; exit 1;;
 esac
