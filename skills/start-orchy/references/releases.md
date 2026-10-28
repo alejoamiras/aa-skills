@@ -19,7 +19,7 @@ The table goes to the owner wherever the derivation ran (the bootstrap report, o
 | dispatch | `dispatch <.github/workflows/name.yml> <ref> <sha40> [<input>=<value> …]` | The ref is the trunk, a `merge.branches` base or a tag, and its head is the sha. Inputs are sorted by name, each named once, and sent as strings |
 | tag | `tag <name> <sha40>` | `release.tags` is known and no `creation: restricted` pattern matches the name (those tags are the release tool's); the tag does not exist; the sha is on the trunk or a `merge.branches` base. Tags are lightweight |
 
-`act … --check` runs the checks and calls nothing; with `--lane`, `--ok` or `--grant` it checks that authority too. A refusal is `refused: <rule>` (exit 1). A call GitHub refused (an HTTP 4xx) still spends its act. Any other failure, a timeout included, prints `AMBIGUOUS` (exit 6): check by hand whether it happened, and ask the owner for an OK only when it did not.
+`act … --check` runs the checks and calls nothing; with `--lane`, `--ok` or `--grant` it checks that authority too, and an approve, a dispatch or a tag also reads the holds that would refuse its call. A refusal is `refused: <rule>` (exit 1). A call GitHub refused (an HTTP 4xx) still spends its act. Any other failure, a timeout included, prints `AMBIGUOUS` (exit 6): check by hand whether it happened, and ask the owner for an OK only when it did not.
 
 ## Authorities
 

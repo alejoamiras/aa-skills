@@ -488,13 +488,14 @@ text, M = sys.argv[1].lower(), ["january", "february", "march", "april", "may", 
 for d in sys.argv[2:]:
     y, m, dd = d.split("-"); mi, di = int(m), int(dd)
     mon, day = f"(?:{M[mi - 1]}|{M[mi - 1][:3]}\\.?)", f"0?{di}(?:st|nd|rd|th)?"
-    # slashed short forms only: a dotted one is also a version (1.15)
-    forms = [f"{y}-{m}-{dd}", f"{y}{m}{dd}", f"{y}/{m}/{dd}", f"{y}\\.{m}\\.{dd}", f"(?<!\\d)0?{mi}/0?{di}(?!\\d)", f"(?<!\\d)0?{di}/0?{mi}(?!\\d)",
-             f"\\b{mon}[\\s,-]*{day}\\b", f"\\b{day}(?:\\s+of)?[\\s,-]*{mon}\\b"]
+    # without its year only a slashed form counts: a dotted or dashed one is also a version or a range (1.15, 1-15)
+    forms = [f"{y}{m}{dd}", f"(?<!\\d){y}[-/.]0?{mi}[-/.]0?{di}(?!\\d)", f"(?<!\\d)0?{di}[-/.]0?{mi}[-/.]{y}(?!\\d)", f"(?<!\\d)0?{mi}[-/.]0?{di}[-/.]{y}(?!\\d)",
+             f"(?<!\\d)0?{mi}/0?{di}(?!\\d)", f"(?<!\\d)0?{di}/0?{mi}(?!\\d)", f"\\b{mon}[\\s,-]*{day}\\b", f"\\b{day}(?:\\s+of)?[\\s,-]*{mon}\\b"]
     if any(re.search(f, text) for f in forms): sys.exit(0)
 sys.exit(1)
 PY2
 }
+GOAL_DATES='[.notes[] | select(startswith("goal: ")) | capture(" (by|on) (?<d>[0-9]{4}-[0-9]{2}-[0-9]{2})").d] | unique | join(" ")'
 GOAL_LINE='"goal \(.name) " + (.milestone | if . == null then "milestones unread" elif . == "missing" then "milestone missing"
   else "\(.closed)/\(.open + .closed)" end) + (.runbook | if . == null then "" elif type == "object" then " runbook \(.done)/\(.steps)" else " runbook unreadable" end)'
 case "$cmd" in
@@ -590,7 +591,7 @@ ask)
     tf=$(mktemp "$H/scratch/public.XXXXXX"); printf '%s\n' "$t" > "$tf"; "$0" check-public "$tf"; rc=$?; rm -f "$tf"; [ "$rc" = 0 ] || exit 1
     ask_public() { local a st; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
       st=$(jq -r .state <<<"$a"); case "$st" in open|lane) ;; *) echo "refused: $id is $st" >&2; return 1;; esac
-      read -ra ds <<<"$(jq -r '[.notes[] | select(startswith("goal: ")) | capture(" (by|on) (?<d>[0-9]{4}-[0-9]{2}-[0-9]{2})").d] | unique | join(" ")' <<<"$a")"
+      read -ra ds <<<"$(jq -r "$GOAL_DATES" <<<"$a")"
       [ ${#ds[@]} = 0 ] || ! date_in "$t" "${ds[@]}" || { echo "refused: $id is a goal, and its public text never carries the goal's date" >&2; return 1; }
       # the owner's OK covered the wording they saw, never its replacement; one row, so no reader sees it unheld
       if jq -e 'any(.notes[]; startswith("waiting: wording"))' <<<"$a" >/dev/null; then
@@ -693,24 +694,31 @@ ask)
       *) echo "refused: ask goal takes [by|on <YYYY-MM-DD>] [then release], not '$1'" >&2; exit 1;; esac; done
     [ -z "$dk" ] || { [[ "$dt" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && python3 -I -c 'import datetime, sys; datetime.date.fromisoformat(sys.argv[1])' "$dt" 2>/dev/null; } \
       || { echo "refused: $dt is not a calendar date (YYYY-MM-DD)" >&2; exit 1; }
-    [ -z "$dt" ] || ! date_in "$nm" "$dt" || { echo "refused: the goal's name carries its date, and the name is public" >&2; exit 1; }
     tf=$(mktemp "$H/scratch/goal.XXXXXX"); printf '%s\n' "$nm" > "$tf"; "$0" check-public "$tf" >/dev/null; rc=$?; rm -f "$tf"
     [ "$rc" = 0 ] || { echo "refused: the goal's name fails check-public" >&2; exit 1; }
     need gh; need timeout; gn="goal: $nm${dk:+ $dk $dt}${th:+ then $th}"
-    ask_goal() { local a st w p ms; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
+    ask_goal() { local a st w p ms nh ds; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
       st=$(jq -r .state <<<"$a"); [ "$st" = open ] || { echo "refused: $id is $st; a goal is an open ask" >&2; return 1; }
       # a goal's hold would replace another, which answers nothing
       w=$(jq -r "$ASK_HOLD" <<<"$a"); case "$w" in "" | "waiting: goal "*) ;; *) echo "refused: $id is $w; settle that first" >&2; return 1;; esac
-      p=$(jq -r '.public // empty' <<<"$a"); [ -z "$dt" ] || [ -z "$p" ] || ! date_in "$p" "$dt" \
-        || { echo "refused: $id's public text carries the goal's date; restate it first" >&2; return 1; }
-      ms=$(timeout 30 gh api "repos/$REPO/milestones?state=all&per_page=100") && jq -e 'type == "array"' <<<"$ms" >/dev/null \
+      # every date this ask's goals have named, so a goal set again cannot publish an earlier one
+      read -ra ds <<<"$(jq -r "$GOAL_DATES" <<<"$a")"; [ -z "$dt" ] || ds+=("$dt"); p=$(jq -r '.public // empty' <<<"$a")
+      if [ ${#ds[@]} -gt 0 ]; then
+        ! date_in "$nm" "${ds[@]}" || { echo "refused: the goal's name carries its date, and the name is public" >&2; return 1; }
+        [ -z "$p" ] || ! date_in "$p" "${ds[@]}" || { echo "refused: $id's public text carries the goal's date; restate it first" >&2; return 1; }
+      fi
+      ms=$(timeout 30 gh api "repos/$REPO/milestones?state=all&per_page=100") \
+        && jq -e 'type == "array" and all(.[]; type == "object" and (.title | type) == "string")' <<<"$ms" >/dev/null \
         || { echo "refused: the milestones could not be read; nothing recorded" >&2; return 1; }
       [ "$(jq length <<<"$ms")" -lt 100 ] || { echo "refused: 100 milestones or more, past one page; nothing recorded" >&2; return 1; }
-      # the title only: a due date would publish the goal's date
-      if ! jq -e --arg t "$nm" 'any(.[]; .title == $t)' <<<"$ms" >/dev/null; then
-        jq -n --arg t "$nm" '{title: $t}' | timeout 30 gh api "repos/$REPO/milestones" -X POST --input - >/dev/null \
-          || { echo "refused: creating milestone $nm failed; nothing recorded, and a rerun finds it if GitHub made it" >&2; return 1; }
-      fi
+      nh=$(jq --arg t "$nm" 'map(select(.title == $t)) | length' <<<"$ms") || { echo "refused: the milestones could not be read; nothing recorded" >&2; return 1; }
+      case $nh in
+        # the title only: a due date would publish the goal's date
+        0) jq -n --arg t "$nm" '{title: $t}' | timeout 30 gh api "repos/$REPO/milestones" -X POST --input - >/dev/null \
+             || { echo "refused: creating milestone $nm failed; nothing recorded, and a rerun finds it if GitHub made it" >&2; return 1; };;
+        1) ;;
+        *) echo "refused: $nh milestones are titled $nm; nothing recorded" >&2; return 1;; esac
+      # the hold first: a reader never sees the goal unheld
       append_row "$(row --arg t "waiting: goal $nm" '{id: $id, at: $at, note: $t}')" && append_row "$(row --arg t "$gn" '{id: $id, at: $at, note: $t}')" \
         && echo "$id $gn recorded; milestone $nm"; }
     with_ledger ask_goal;;
@@ -765,14 +773,14 @@ goals)
     | ($g.note | capture("^goal: (?<name>[a-z0-9-]+)(?: (?<kind>by|on) (?<date>[0-9]{4}-[0-9]{2}-[0-9]{2}))?(?: then (?<then>release))?$"))
       + {ask: $g.id, state: ([.[] | select((.state | type) == "string")] | last | .state)})') || exit 1
   ms='[]'; [ "$gs" = '[]' ] || { need gh; need timeout
-    ms=$(timeout 30 gh api "repos/$REPO/milestones?state=all&per_page=100" 2>/dev/null) && jq -e 'type == "array" and length < 100' <<<"$ms" >/dev/null || ms=null; }
-  rb=$(for n in $(jq -r '.[].name' <<<"$gs"); do f="$RUNBOOKS/goal-$n.md"; [ -e "$f" ] || [ -L "$f" ] || continue
-      if [ -f "$f" ] && [ ! -L "$f" ] && j=$(rb_parse "$f" 2>/dev/null); then jq -c --arg n "$n" '{($n): {done: (map(select(.[0])) | length), steps: length}}' <<<"$j"
+    ms=$(timeout 30 gh api "repos/$REPO/milestones?state=all&per_page=100" 2>/dev/null) && jq -e 'type == "array" and length < 100 and all(.[]; type == "object" and (.title | type) == "string")' <<<"$ms" >/dev/null || ms=null; }
+  rb=$(for n in $(jq -r '.[].name' <<<"$gs"); do f="$RUNBOOKS/goal-$n.md"; [ -L "$RUNBOOKS" ] || [ -e "$f" ] || [ -L "$f" ] || continue
+      if [ ! -L "$RUNBOOKS" ] && [ -f "$f" ] && [ ! -L "$f" ] && j=$(rb_parse "$f" 2>/dev/null); then jq -c --arg n "$n" '{($n): {done: (map(select(.[0])) | length), steps: length}}' <<<"$j"
       else jq -nc --arg n "$n" '{($n): "unreadable"}'; fi; done | jq -sc 'add // {}')
-  # ready: open, its milestone read and empty, its runbook done, and an on-date come; laned or closed, never
   g=$(jq -c --argjson ms "$ms" --argjson rb "$rb" --arg today "$(date -u +%F)" '{schema: "orchy.goals/1", goals: map(. as $x
-    | ($ms | if . == null then null else (map(select(.title == $x.name)) | first | if . == null then "missing"
-        else {open: .open_issues, closed: .closed_issues} end) end) as $m | ($rb[$x.name] // null) as $b
+    | ($ms | if . == null then null else map(select(.title == $x.name)) | if length == 0 then "missing" elif length > 1 then null
+        else .[0] | if [.open_issues, .closed_issues] | all(type == "number" and . >= 0 and . == floor) then {open: .open_issues, closed: .closed_issues}
+        else null end end end) as $m | ($rb[$x.name] // null) as $b
     | $x + {milestone: $m, runbook: $b,
        days: (if $x.date then ((($x.date + "T00:00:00Z" | fromdateiso8601) - ($today + "T00:00:00Z" | fromdateiso8601)) / 86400 | floor) else null end),
        ready: ($x.state == "open" and ($m | type) == "object" and $m.open == 0 and ($b == null or (($b | type) == "object" and $b.done == $b.steps))
@@ -1069,8 +1077,9 @@ snapshot)
   echo "-- waiting"; "$0" waiting list 2>&1
   echo "-- grants"; "$0" grants 2>&1
   echo "-- holds"; "$0" hold list 2>&1
-  echo "-- goals"; g=$("$0" goals --json 2>&1) && jq -r '.goals[] | '"$GOAL_LINE" <<<"$g" || echo "goals: $g"
-  echo "-- runbooks"; for f in "$RUNBOOKS"/*.md; do [ -f "$f" ] || continue; b=$(basename "$f" .md); j=$(rb_parse "$f" 2>&1) || { echo "$b: $j"; continue; }
+  echo "-- goals"; g=$("$0" goals --json 2>/dev/null) && jq -r '.goals[] | '"$GOAL_LINE" <<<"$g" 2>/dev/null || echo "goals: unreadable (ORCHY goals)"
+  echo "-- runbooks"; [ ! -L "$RUNBOOKS" ] || echo "runbooks: $RUNBOOKS is a symlink; refusing"
+  [ -L "$RUNBOOKS" ] || for f in "$RUNBOOKS"/*.md; do [ -f "$f" ] || continue; b=$(basename "$f" .md); j=$(rb_parse "$f" 2>&1) || { echo "$b: $j"; continue; }
     jq -r --arg b "$b" '(map(select(.[0])) | length) as $k | select($k < length) | "\($b) \($k)/\(length)"' <<<"$j"; done
   # launch reads only the cached snapshot, so the tick refreshes it: a reading over 2 h old allows light leads only
   echo "-- headroom"; claude-usage refresh >/dev/null 2>&1; "$0" accounts 2>&1 | head -20;;
@@ -1468,7 +1477,7 @@ act)
       done < <(ledger_rows | jq -r --arg id "$ask" 'map(select(.id == $id)) | (map(.note == "go") | rindex(true) // -1) as $g | .[$g + 1:][]
         | select((.note // "") | test("^used: (merge|dispatch) ")) | [(.at | fromdateiso8601), (.note | ltrimstr("used: ") | split(" ") | .[0:4][])] | @tsv' 2>/dev/null)
       [ "$p" = yes ] || no "run $run is no run this go produced; it needs a per-act OK"; fi
-    [ -z "$chk" ] || { echo "checked: $X ($rwf, $rev on $rbr)${lbl:+ ($lbl $ask)}"; exit 0; }
+    [ -z "$chk" ] || { hold_guard; echo "checked: $X ($rwf, $rev on $rbr)${lbl:+ ($lbl $ask)}"; exit 0; }
     call "repos/$REPO/actions/runs/$run/pending_deployments" "$(jq -nc --argjson id "$eid" '{environment_ids: [$id], state: "approved", comment: "Approved on the repository owner'"'"'s word."}')"
     echo "approved run $run attempt $att for $env: $rwf, $rev on $rbr ($lbl $ask)";;
   dispatch)
@@ -1480,7 +1489,7 @@ act)
     [ "$how" != lane ] || jq -e --arg p "$wf" '(.release.workflows // []) | any(.[]; .path == $p
         and (((.environments // []) | length > 0) or any((.signals // [])[]; IN("id-token", "npm publish", "gh release"))))' "$CFG" >/dev/null \
       || no "the profile does not mark $wf as publishing; it needs a per-act OK"
-    [ -z "$chk" ] || { echo "checked: $X${lbl:+ ($lbl $ask)}"; exit 0; }
+    [ -z "$chk" ] || { hold_guard; echo "checked: $X${lbl:+ ($lbl $ask)}"; exit 0; }
     call "repos/$REPO/actions/workflows/$(basename "$wf")/dispatches" \
       "$(jq -nc --arg r "$r" '{ref: $r, inputs: ($ARGS.positional | map(split("=") | {(.[0]): .[1]}) | add // {}), return_run_details: true}' --args "${af[@]:4}")"
     rid=$(jq -r '.workflow_run_id // empty' <<<"$CALL_OUT" 2>/dev/null); [[ "$rid" =~ ^[0-9]+$ ]] || rid=unknown
@@ -1494,7 +1503,7 @@ act)
     done < <(jq -r '.[] | select(.creation == "restricted") | .pattern' <<<"$tags")
     case $(tag_state "$t") in no) ;; yes) no "tag $t exists";; *) no "cannot read tag $t";; esac
     reach "$sha" || no "${sha:0:8} is on neither the trunk nor a merge.branches base"
-    [ -z "$chk" ] || { echo "checked: $X${lbl:+ ($lbl $ask)}"; exit 0; }
+    [ -z "$chk" ] || { hold_guard; echo "checked: $X${lbl:+ ($lbl $ask)}"; exit 0; }
     call "repos/$REPO/git/refs" "$(jq -nc --arg r "refs/tags/$t" --arg s "$sha" '{ref: $r, sha: $s}')"
     echo "tagged $t at ${sha:0:8} ($lbl $ask)";;
   esac;;

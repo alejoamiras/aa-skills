@@ -232,6 +232,7 @@ rm "$ORCHY_HOME/holds.json"; jq -e '.holds == []' "$T/holds.other" >/dev/null ||
 for c in "wt-new h1" "launch k1 h1 acct-a" "resume k1 h1 acct-a s1"; do read -ra w <<<"$c"
   o=$("$ORCHY" "${w[@]}" 2>&1 || true); [ "$o" = "refused: other:peer-q holds the program (ORCHY hold list)" ] || fail "$c under an all hold: $o"; done
 hq=$(A add "approve run 830"); A public "$hq" "Approve run 830" >/dev/null; A ok "$hq" approve 830 1 registry -- "approve 830" >/dev/null; run 830 "$MC" push .github/workflows/release.yml
+o=$(W approve 830 1 registry --ok "$hq" --check || true); [ "$o" = "refused: other:peer-q holds the program (ORCHY hold list)" ] || fail "a dry run under an all hold: $o"
 X approve 830 1 registry --ok "$hq"; [ "$rc" = 1 ] && [ "$o" = "refused: other:peer-q holds the program (ORCHY hold list)" ] && [ "$(used "approve 830")" = 0 ] || fail "approve under an all hold (exit $rc): $o"
 "$ORCHY" hold "done" other:peer-q >/dev/null; o=$(W approve 830 1 registry --ok "$hq" || true); grep -q '^approved run 830 attempt 1' <<<"$o" || fail "the held approval, after hold done: $o"
 # hold add returns only after a merge call already past its check has written its outcome; a watcher checking after it says HELD
@@ -322,7 +323,12 @@ o=$(A goal "$d" launch on "$G" 2>&1 || true); grep -q "carries the goal's date" 
 [ "$(grep -c "\"id\":\"$g\".*\"note\":\"goal: " "$ORCHY_ASKS_DIR/example-app.jsonl")" = 1 ] || fail "ask goal wrote other than one goal row"
 [ "$(cat "$MOCK_DIR/posts.log")" = 'POST repos/example/app/milestones {"title":"launch"}' ] || fail "the milestone POST: $(cat "$MOCK_DIR/posts.log")"
 ! grep -q -- "$G" "$MOCK_DIR/gh.log" "$MOCK_DIR/posts.log" || fail "the goal's date left the ledger: $(grep -h -- "$G" "$MOCK_DIR/gh.log" "$MOCK_DIR/posts.log")"
-o=$(A public "$g" "Launch on 15 Jan: the listing copy" 2>&1 || true); grep -q "never carries the goal's date" <<<"$o" || fail "ask public with the date: $o"
+for t in "Launch on 15 Jan: the listing copy" "Launch 15.01.2031: the listing copy"; do
+  o=$(A public "$g" "$t" 2>&1 || true); grep -q "never carries the goal's date" <<<"$o" || fail "ask public with the date ($t): $o"; done
+o=$(A goal "$g" "launch-$G" 2>&1 || true); grep -q 'carries its date' <<<"$o" && [ "$(grep -c . "$MOCK_DIR/posts.log")" = 1 ] || fail "a goal set again took an earlier date: $o"
+for m in '[1]' '[{"title": "launch"}, {"title": "launch"}]'; do echo "$m" > "$MOCK_DIR/milestones.json"
+  o=$(A goal "$g" launch on "$G" 2>&1 || true); grep -qE 'could not be read|2 milestones are titled launch' <<<"$o" && [ "$(grep -c . "$MOCK_DIR/posts.log")" = 1 ] \
+    || fail "ask goal over milestones $m: $o"; done
 jq -n '[{title: "launch", open_issues: 5, closed_issues: 4}, {title: "beta", open_issues: 0, closed_issues: 3}]' > "$MOCK_DIR/milestones.json"
 : > "$MOCK_DIR/posts.log"; A goal "$g" launch on "$G" "then" release >/dev/null && [ ! -s "$MOCK_DIR/posts.log" ] || fail "ask goal on an existing milestone posted: $(cat "$MOCK_DIR/posts.log")"
 jq -n '[range(100) | {title: "m\(.)", open_issues: 0, closed_issues: 0}]' > "$T/ms100.json"; cp "$MOCK_DIR/milestones.json" "$T/ms.keep"; cp "$T/ms100.json" "$MOCK_DIR/milestones.json"
@@ -346,6 +352,12 @@ r() { "$ORCHY" goals --json | jq -r --arg a "$1" '.goals[] | select(.ask == $a) 
 [ "$(r "$b")" = false ] || fail "ready with an open milestone issue"; ms 0
 printf -- '- [ ] Post the beta notes\n' > "$T/beta.md"; "$ORCHY" runbook add goal-beta "$T/beta.md" >/dev/null; [ "$(r "$b")" = false ] || fail "ready with a runbook step open"
 "$ORCHY" runbook tick goal-beta 1 >/dev/null; [ "$(r "$g")/$(r "$b")" = false/true ] || fail "ready: launch $(r "$g"), beta $(r "$b")"
+cp "$MOCK_DIR/milestones.json" "$T/ms.keep"
+for m in '[{"title": "beta", "open_issues": 0, "closed_issues": 3}, {"title": "beta", "open_issues": 8, "closed_issues": 0}]' '[{"title": "beta", "open_issues": 0, "closed_issues": "3"}]'; do
+  echo "$m" > "$MOCK_DIR/milestones.json"; [ "$(r "$b")" = false ] || fail "ready over milestones $m"; done; cp "$T/ms.keep" "$MOCK_DIR/milestones.json"
+mv "$ORCHY_HOME/runbooks" "$T/rb.real"; mkdir "$T/rb.fake"; printf -- '- [x] Post the beta notes\n' > "$T/rb.fake/goal-beta.md"; ln -s "$T/rb.fake" "$ORCHY_HOME/runbooks"
+o=$("$ORCHY" goals --json | jq -c --arg a "$b" '.goals[] | select(.ask == $a) | [.runbook, .ready]'); rm "$ORCHY_HOME/runbooks"; mv "$T/rb.real" "$ORCHY_HOME/runbooks"
+[ "$o" = '["unreadable",false]' ] || fail "goals through a symlinked runbooks directory: $o"
 d0=$(date -u +%F); dl=$("$ORCHY" goals --json | jq -r --arg a "$g" '.goals[] | select(.ask == $a) | .days')
 [ "$dl" = $(( ($(date -ud "$G" +%s) - $(date -ud "$d0" +%s)) / 86400 )) ] || fail "days to the launch: $dl"
 A go "$b" -- "ship the beta" >/dev/null && A note "$b" "answered: ready" >/dev/null && A lane "$b" release-9 release >/dev/null || fail "lane the ready goal"

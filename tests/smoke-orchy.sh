@@ -545,6 +545,11 @@ lt() { printf 'You are a subagent.\n%s\n' "$1" > "$ORCHY_HOME/prompts/x-lt.md"; 
 o=$(lt "$l: Show a greeting"); grep -q 'not its stored public wording' <<<"$o" || fail "launch with a reworded ask line: $o"
 o=$(lt "$l: Show a greeting on the home page, a vulnerability fix"); grep -q 'SENSITIVE' <<<"$o" || fail "launch with a sensitive ask line: $o"
 o=$(lt "$r: Receipt requirement"); grep -q "$r is not laned to x" <<<"$o" || fail "launch with another lane's ask: $o"
+# a goal's line reaches a lead only once the orchestrator has written answered: ready and laned it
+gq=$(A add "the beta list"); A public "$gq" "Beta: the onboarding fixes" >/dev/null; A goal "$gq" beta >/dev/null || fail "ask goal"
+o=$(lt "$gq: Beta: the onboarding fixes"); grep -q "$gq is waiting: goal beta" <<<"$o" || fail "launch with a held goal's line: $o"
+A note "$gq" "answered: ready" >/dev/null && A lane "$gq" x "a repo change" >/dev/null || fail "lane the ready goal"
+o=$(lt "$gq: Beta: the onboarding fixes"); grep -q '^x-lt launched on acct-a' <<<"$o" || fail "launch with a ready goal's line: $o"; "$ORCHY" stop x-lt >/dev/null
 o=$(lt "Context: on the home page because my landlord asked twice"); grep -q 'copies the owner' <<<"$o" || fail "launch with a copied sentence: $o"
 printf 'Lane x for acct-a\n' > "$ORCHY_HOME/briefs/x.md"; o=$(lt "$l: Show a greeting on the home page"); grep -q 'banned text' <<<"$o" || fail "launch with a banned lane brief: $o"; rm "$ORCHY_HOME/briefs/x.md"
 o=$(lt "$l: Show a greeting on the home page"); grep -qE 'refused: (the|.* is not laned|.*copies)|SENSITIVE|LEAK' <<<"$o" && fail "launch refused a clean ask line: $o"
