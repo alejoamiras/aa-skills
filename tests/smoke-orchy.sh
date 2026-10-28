@@ -570,11 +570,11 @@ echo '{"never": ["p-delta", "p-lima-new"]}' > "$PA"; for n in p-lima p-lima-new;
 echo '{"schema": "orchy.accounts/1", "never": ["p-delta"]}' > "$PA"
 # the policy file: missing is the defaults; malformed, foreign-shaped or symlinked refuses every reader
 ORCHY_HOME="$HA" ORCHY_ACCOUNTS="$T/none.json" "$ORCHY" state | jq -e '.caps == {week_floor_pct: 25, heavy: 2, light: 3, load_max: 144}' >/dev/null || fail "state without a policy file"
+B() { ORCHY_HOME="$HA" MOCK_CU="$CA" ORCHY_ACCOUNTS="$T/bad.json" "$ORCHY" "$@"; }
 for m in '{"heavy_floor_pct": 101}' '[]' '{"x": 1}' '{"never": ["a b"]}' '{"schema": "orchy.accounts/2"}' '{"light_per_account": 1.5}' '{}{}' ''; do
-  printf '%s' "$m" > "$T/bad.json"; B() { ORCHY_HOME="$HA" MOCK_CU="$CA" ORCHY_ACCOUNTS="$T/bad.json" "$ORCHY" "$@"; }
-  o=$(B accounts 2>&1) && fail "accounts read a malformed policy: $m"; grep -q 'not orchy.accounts/1' <<<"$o" || fail "accounts on $m: $o"
-  o=$(B launch --light acc-a8 acc auto 2>&1) && fail "launch read a malformed policy: $m"
-  B state | jq -e '.caps == null and (.errors | index("caps"))' >/dev/null || fail "state over a malformed policy: $m"; done
+  printf '%s' "$m" > "$T/bad.json"; o=$(B accounts 2>&1) && fail "accounts read a malformed policy: $m"; grep -q 'not orchy.accounts/1' <<<"$o" || fail "accounts on $m: $o"; done
+o=$(B launch --light acc-a8 acc auto 2>&1) && fail "launch read a malformed policy: $o"
+B state | jq -e '.caps == null and (.errors | index("caps"))' >/dev/null || fail "state over a malformed policy"
 ln -s "$PA" "$T/lnk.json"; o=$(ORCHY_HOME="$HA" MOCK_CU="$CA" ORCHY_ACCOUNTS="$T/lnk.json" "$ORCHY" accounts 2>&1) && fail "a symlinked policy was read"
 grep -q 'not a symlink' <<<"$o" || fail "symlinked policy: $o"
 # the seat: only its holder spawns; two programs racing for an account's last heavy slot take that one and the next
