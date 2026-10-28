@@ -121,12 +121,15 @@ o=$("$ORCHY" say x-b1 "$(head -c 3100 /dev/zero | tr '\0' x)" 2>&1 || true); gre
 touch -d '30 minutes ago' "$ORCHY_HOME/leads/x-b1.log"; touch "$ORCHY_HOME/reports/x-b1.progress"
 o=$("$ORCHY" snapshot 2>/dev/null | grep '^alive x-b1 '); grep -qE 'STALLED\? quiet 30m progress 0m sleep' <<<"$o" || fail "lead health line: $o"
 o=$("$ORCHY" snapshot 2>/dev/null | grep '^alive x-c1 \|^alive x-c2 \|^alive x-c3 ' | head -1); grep -q 'STALLED' <<<"$o" && fail "a fresh lead was flagged: $o"
-# scan: a gh failure is loud, never a clean report
-jq -n '{body:"body", commits:[{messageHeadline:"feat: x", messageBody:"ran with CLAUDE_ACCOUNT=acct-a"}]}' > "$MOCK_DIR/pr-7.json"
-printf 'diff --git a/x b/x\n+++ b/x\n+ok\n' > "$MOCK_DIR/diff-7.txt"; printf 'x\n' > "$MOCK_DIR/files-7.txt"
+# scan reads a PR's content from the compare at its head: diff-<sha>.txt and cmp-<sha>.json (files, commits)
+cmpfix() { local s=$1 m=$2; shift 2
+  for f in "$@"; do printf 'diff --git a/%s b/%s\n+++ b/%s\n+ok\n' "$f" "$f" "$f"; done > "$MOCK_DIR/diff-$s.txt"
+  jq -n --arg m "$m" '{files: ($ARGS.positional | map({filename: .})), commits: [{commit: {message: $m}}], total_commits: 1}' --args "$@" > "$MOCK_DIR/cmp-$s.json"; }
+S7=7777777777777777777777777777777777777777; S8=8888888888888888888888888888888888888888
+jq -n --arg s "$S7" '{body:"body", headRefOid:$s, baseRefName:"dev"}' > "$MOCK_DIR/pr-7.json"; cmpfix "$S7" $'feat: x\n\nran with CLAUDE_ACCOUNT=acct-a' x
 o=$("$ORCHY" scan 7); grep -q 'leaks=1' <<<"$o" || fail "scan missed an account assignment in a commit message: $o"
 if MOCK_GH_FAIL=diff "$ORCHY" scan 7 >/dev/null 2>&1; then fail "scan reported success on a gh failure"; fi
-jq -n '{title:"fix: retry on acct-b", body:"body", commits:[]}' > "$MOCK_DIR/pr-8.json"; cp "$MOCK_DIR/diff-7.txt" "$MOCK_DIR/diff-8.txt"; cp "$MOCK_DIR/files-7.txt" "$MOCK_DIR/files-8.txt"
+jq -n --arg s "$S8" '{title:"fix: retry on acct-b", body:"body", headRefOid:$s, baseRefName:"dev"}' > "$MOCK_DIR/pr-8.json"; cmpfix "$S8" "fix: retry" x
 o=$("$ORCHY" scan 8); grep -q 'leaks=1' <<<"$o" || fail "scan missed a locally banned name in a PR title: $o"
 # watch-merge: pin validation, strict report parsing, pinned merge, head-moved exit
 SHA=1111111111111111111111111111111111111111; TS=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; jq -n --arg s "$TS" '{sha:$s}' > "$MOCK_DIR/trunk.json"
@@ -176,6 +179,9 @@ pr9 .; echo '{"status":"diverged"}' > "$MOCK_DIR/compare-dev.json"; o=$(wm); gre
 cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak"; jq '.merge.method="admin"' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"; mkpr "$SHA"; o=$(wm); cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"
 grep -qx 'REFUSED: merge.method must be squash, merge or rebase' <<<"$o" || fail "merge.method admin: $o"; ! grep -q -- '--admin' "$MOCK_DIR/gh.log" || fail "--admin reached gh"
 [ "$(pm)" = "$n" ] || fail "a refused PR reached the merge call: $(tail -3 "$MOCK_DIR/gh.log")"
+# a retry reads the PR again: one retargeted while "Base branch was modified" is refused, not merged into
+n=$(pm); pr9 .; echo '.baseRefName="main"' > "$MOCK_DIR/merge-race-9.jq"; o=$(wm)
+grep -q '^REFUSED at merge time: .* base=main ' <<<"$o" && [ "$(pm)" = $((n+1)) ] || fail "a retry merged into a retargeted base: $o"
 # BEHIND never clears with the head pinned: DIRTY at once, not a timeout
 pr9 '.mergeStateStatus="BEHIND"'; rc=0; o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1) || rc=$?
 [ "$rc" = 5 ] && grep -q 'DIRTY: MERGEABLE BEHIND; bring the base in first$' <<<"$o" || fail "BEHIND (exit $rc): $o"
@@ -190,10 +196,17 @@ for x in "9x lane-9 r9.md" "9 ../x r9.md" "9 lane-9 ../r.md"; do read -r p l r <
   o=$("$ORCHY" watch-merge "$p" "$SHA" "$l" "$r" 2>&1 || true); grep -q '^REFUSED: the ' <<<"$o" || fail "watch-merge took $x: $o"; done
 o=$("$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" "1;touch $T/pwn" 2>&1 || true); grep -qx 'refused: the delay is whole seconds' <<<"$o" || fail "a delay that is not seconds: $o"
 [ ! -e "$T/pwn" ] || fail "a delay ran as shell"
-# a pinned scan reads the diff only at that head
-cp "$MOCK_DIR/diff-7.txt" "$MOCK_DIR/diff-9.txt"; cp "$MOCK_DIR/files-7.txt" "$MOCK_DIR/files-9.txt"; mkpr "$SHA"
-o=$("$ORCHY" scan 9 "$SHA"); grep -q '^#9 files=1 ' <<<"$o" || fail "a pinned scan at its head: $o"
+# a pinned scan reads the content at that sha, and fails when the head is elsewhere before or after the reads
+cmpfix "$SHA" "feat: y" x; mkpr "$SHA"; dr() { grep -c "^api repos/example/app/compare/dev...$SHA -H" "$MOCK_DIR/gh.log"; }
+o=$("$ORCHY" scan 9 "$SHA"); grep -q '^#9 files=1 ' <<<"$o" && [ "$(dr)" = 1 ] || fail "a pinned scan at its head: $o"
+! grep -q '^pr diff' "$MOCK_DIR/gh.log" || fail "a scan read the diff through the PR"
 pr9 '.headRefOid="3333333333333333333333333333333333333333"'; o=$("$ORCHY" scan 9 "$SHA" || true); grep -qx 'SCAN FAILED: head moved' <<<"$o" || fail "a scan whose head moved: $o"
+mkpr "$SHA"; printf '%s\n' "$SHA" 3333333333333333333333333333333333333333 > "$MOCK_DIR/heads-9.txt"; rc=0; o=$("$ORCHY" scan 9 "$SHA") || rc=$?; rm -f "$MOCK_DIR/heads-9.txt"
+[ "$rc" = 2 ] && [ "$o" = 'SCAN FAILED: head moved' ] && [ "$(dr)" = 2 ] || fail "a head that moved during the reads (exit $rc): $o"
+jq '.files = [{filename: "docs/ci.yml", previous_filename: ".github/workflows/ci.yml"}]' "$MOCK_DIR/cmp-$SHA.json" > "$tmp" && mv "$tmp" "$MOCK_DIR/cmp-$SHA.json"
+o=$("$ORCHY" scan 9 "$SHA"); grep -qx '  GATE FILE: .github/workflows/ci.yml' <<<"$o" || fail "a workflow renamed away is not a gate file: $o"
+jq '.total_commits = 251' "$MOCK_DIR/cmp-$SHA.json" > "$tmp" && mv "$tmp" "$MOCK_DIR/cmp-$SHA.json"
+o=$("$ORCHY" scan 9 "$SHA" || true); grep -q '^SCAN FAILED: #9 is more than one compare lists' <<<"$o" || fail "a compare cut short: $o"
 # arm-merge: the detached watcher finds the repo and the home (no cd into the cache), and a second arm refuses
 if "$ORCHY" arm-merge 9 "$SHA" lane-9 "$ORCHY_HOME/reports/r9.md" >/dev/null 2>&1; then fail "arm-merge accepted a report path the watcher cannot find"; fi
 mkpr "$SHA"; "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 4 >/dev/null || fail "arm-merge"

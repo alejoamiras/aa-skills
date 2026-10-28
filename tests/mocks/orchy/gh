@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# gh mock for smoke-orchy: fixtures in $MOCK_DIR (pr-<n>.json, issue-<n>.json, checks[-<sha>].json, status[-<sha>].json, trunk.json, compare.json (a sha...sha compare), compare-<branch>.json (a sha...branch one), open.json, issues.json, merged.json, diff-<n>.txt, files-<n>.txt); every call logged to $MOCK_DIR/gh.log
+# gh mock for smoke-orchy: fixtures in $MOCK_DIR (pr-<n>.json, issue-<n>.json, checks[-<sha>].json, status[-<sha>].json, trunk.json, compare.json (a sha...sha compare), compare-<branch>.json (a sha...branch one), diff-<sha>.txt and cmp-<sha>.json (a branch...sha one, as a diff and as JSON), open.json, issues.json, merged.json; heads-<n>.txt answers successive headRefOid reads, one line each, the last one repeating; merge-race-<n>.jq edits pr-<n>.json while the next merge call fails as a moved base); every call logged to $MOCK_DIR/gh.log
 set -u; echo "$*" >> "$MOCK_DIR/gh.log"
 jqexpr=""; args=("$@"); for ((i=0;i<${#args[@]};i++)); do [ "${args[i]}" = --jq ] && jqexpr=${args[i+1]}; done
 case "$1 $2" in
 "auth status") exit 0;;
-"pr view") f="$MOCK_DIR/pr-$3.json"; [ -f "$f" ] || { echo "no such pr" >&2; exit 1; }; jq -r "$jqexpr" "$f";;
+"pr view") f="$MOCK_DIR/pr-$3.json"; [ -f "$f" ] || { echo "no such pr" >&2; exit 1; }; q="$MOCK_DIR/heads-$3.txt"
+  if [ -s "$q" ] && [[ "$jqexpr" == *headRefOid* ]]; then h=$(head -n 1 "$q"); [ "$(wc -l < "$q")" -gt 1 ] && sed -i 1d "$q"; jq -r --arg h "$h" ".headRefOid = \$h | $jqexpr" "$f"
+  else jq -r "$jqexpr" "$f"; fi;;
 "pr merge") n=$3; f="$MOCK_DIR/pr-$n.json"; want=""; for ((i=0;i<${#args[@]};i++)); do [ "${args[i]}" = --match-head-commit ] && want=${args[i+1]}; done
   [ -n "$want" ] || { echo "MOCK: merge without --match-head-commit" >&2; exit 1; }
   [ "$want" = "$(jq -r .headRefOid "$f")" ] || { echo "head commit mismatch" >&2; exit 1; }
+  r="$MOCK_DIR/merge-race-$n.jq"; if [ -f "$r" ]; then tmp=$(mktemp); jq -f "$r" "$f" > "$tmp" && mv "$tmp" "$f"; rm -f "$r"
+    echo "GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)" >&2; exit 1; fi
   tmp=$(mktemp); jq '.state="MERGED" | .mergeCommit={oid:"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}' "$f" > "$tmp" && mv "$tmp" "$f"; echo "✓ Squashed and merged";;
-"pr diff") [ "${MOCK_GH_FAIL:-}" = diff ] && { echo "HTTP 500" >&2; exit 1; }; if printf '%s\n' "$@" | grep -qx -- --name-only; then cat "$MOCK_DIR/files-$3.txt"; else cat "$MOCK_DIR/diff-$3.txt"; fi;;
 "issue view") f="$MOCK_DIR/issue-$3.json"; [ -f "$f" ] || { echo "no such issue" >&2; exit 1; }; jq -r "$jqexpr" "$f";;
 "pr list") if printf '%s\n' "$@" | grep -qx -- merged; then jq -r "$jqexpr" "$MOCK_DIR/merged.json"; elif [ -f "$MOCK_DIR/open.json" ]; then jq -r "$jqexpr" "$MOCK_DIR/open.json"; fi;;
 "issue list") [ "${MOCK_GH_FAIL:-}" = search ] && printf '%s\n' "$@" | grep -qx -- --search && { echo "HTTP 502" >&2; exit 1; }
@@ -21,8 +24,12 @@ case "$1 $2" in
   case "$2" in
   *check-runs) f="$MOCK_DIR/checks-$s.json"; [ -f "$f" ] || f="$MOCK_DIR/checks.json"; jq -r "$jqexpr" "$f";;
   *status) f="$MOCK_DIR/status-$s.json"; [ -f "$f" ] || f="$MOCK_DIR/status.json"; jq -r "$jqexpr" "$f";;
-  */compare/*) r=${2##*...}; f="$MOCK_DIR/compare.json"; [[ "$r" =~ ^[0-9a-f]{40}$ ]] || f="$MOCK_DIR/compare-$r.json"
-    [ -f "$f" ] || exit 1; jq -r "$jqexpr" "$f";;
+  */compare/*) b=${2##*/compare/}; l=${b%%...*}; r=${b##*...}
+    if [[ ! "$l" =~ ^[0-9a-f]{40}$ ]]; then
+      if printf '%s\n' "$@" | grep -qx 'Accept: application/vnd.github.diff'; then [ "${MOCK_GH_FAIL:-}" = diff ] && { echo "HTTP 500" >&2; exit 1; }; cat "$MOCK_DIR/diff-$r.txt"; exit; fi
+      f="$MOCK_DIR/cmp-$r.json"
+    else f="$MOCK_DIR/compare.json"; [[ "$r" =~ ^[0-9a-f]{40}$ ]] || f="$MOCK_DIR/compare-$r.json"; fi
+    [ -f "$f" ] || exit 1; if [ -n "$jqexpr" ]; then jq -r "$jqexpr" "$f"; else cat "$f"; fi;;
   */commits/*) [ -f "$MOCK_DIR/trunk.json" ] || exit 1; jq -r "$jqexpr" "$MOCK_DIR/trunk.json";;
   *) exit 1;; esac;;
 *) echo "MOCK gh: unhandled $*" >&2; exit 1;;

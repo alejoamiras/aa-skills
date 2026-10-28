@@ -36,8 +36,8 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   snapshot                     the tick's facts: reports, leads, watchers, PRs, worktrees, load, headroom
 #   state [--json]               a poller's view as orchy.state/1 JSON: local facts only, no gh, usage or network call, nothing written
 #   wait [seconds]               block until a report, lead or watcher changes, or (every wait.poll_sec, default 120) open PRs, open issues or the trunk head (default 1500)
-#   scan <pr> [<full-sha>]       gate-weakening and leak scan of a PR's diff, title, body and commit messages (plus the local ban);
-#                                with a sha, SCAN FAILED unless the PR's head is that sha before and after the read
+#   scan <pr> [<full-sha>]       gate-weakening and leak scan of a PR's diff, title, body and commit messages (plus the local ban),
+#                                the content read at that sha (default: the head now); SCAN FAILED unless it is the head before and after
 #   watch-merge <pr> <full-sha> <lane> <report> [archive-name|-]   merge a lane PR on the standing policy, then tear the lane
 #                                down (archive -: no plan to wait for and no teardown)
 #   arm-merge  <pr> <full-sha> <lane> <report-name> [archive-name|-] [delay-s]   watch-merge detached (nohup, .out + .pid)
@@ -103,8 +103,8 @@ watcher_alive() { local f=$1; [ -f "$f" ] || return 1; read -r p s < "$f"; [ -n 
 # A watcher log's newest marker line, not its last line (a runs table or status lines often follow), as the
 # state reports it: a merge reads MERGED, an unreadable post-merge state AMBIGUOUS, a closed PR or a disarm nothing.
 watch_marker() {
-  # a marker counts only at a line's start, after the watcher's own `HH:MMZ ` or `#N ` stamp: check names and gh output are
-  # untrusted and the runs table is indented, so neither can end a hand-back or forge a merge
+  # a marker counts only at a line's start, and MERGED, a stop and DISARMED only after the watcher's own stamp: check names
+  # and gh output are untrusted and the runs table is indented, so neither can end a hand-back or forge a merge
   local mk; mk=$(grep -oE '^#[0-9]+ (MERGED|is (MERGED|CLOSED); watcher stopped$)|^[0-9]{2}:[0-9]{2}Z DISARMED$|^(([0-9]{2}:[0-9]{2}Z|#[0-9]+) )?(HEAD MOVED|DIRTY|TRUNK RED|TRUNK UNREADABLE|REQUIRED FAILED|MISSING REQUIRED CHECK|NOT MERGED|TIMEOUT|REFUSED|state unreadable after the merge call)' "$1" 2>/dev/null | tail -n 1)
   [[ "$mk" =~ ^([0-9]{2}:[0-9]{2}Z|#[0-9]+)\ (.*)$ ]] && mk=${BASH_REMATCH[2]}
   case $mk in
@@ -867,14 +867,22 @@ wait)
 scan)
   need gh; n=${1:-}; pin=${2:-}
   [[ "$n" =~ ^[1-9][0-9]*$ ]] && { [ -z "$pin" ] || sha_ok "$pin"; } || { echo "usage: scan <pr> [<full-sha>]" >&2; exit 2; }
-  # gh reads the diff at whatever head the PR has then, so a pinned scan checks the head on both sides of the reads
-  pinned() { [ -z "$pin" ] && return; local h; h=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid) || { echo "SCAN FAILED: gh pr view #$n"; exit 2; }
-    [ "$h" = "$pin" ] || { echo "SCAN FAILED: head moved"; exit 2; }; }
-  pinned
-  d=$(gh pr diff "$n" --repo "$REPO") || { echo "SCAN FAILED: gh pr diff #$n"; exit 2; }
-  files=$(gh pr diff "$n" --repo "$REPO" --name-only) || { echo "SCAN FAILED: gh pr diff --name-only #$n"; exit 2; }
-  meta=$(gh pr view "$n" --repo "$REPO" --json title,body,commits --jq '.title, .body, (.commits[].messageHeadline), (.commits[].messageBody)') || { echo "SCAN FAILED: gh pr view #$n"; exit 2; }
-  pinned
+  hb=$(gh pr view "$n" --repo "$REPO" --json headRefOid,baseRefName --jq '"\(.headRefOid) \(.baseRefName)"') || { echo "SCAN FAILED: gh pr view #$n"; exit 2; }
+  read -r h base <<<"$hb"; pin=${pin:-$h}
+  [ "$h" = "$pin" ] || { echo "SCAN FAILED: head moved"; exit 2; }
+  [[ "$base" =~ ^[A-Za-z0-9._/-]{1,100}$ ]] && sha_ok "$pin" || { echo "SCAN FAILED: #$n's base or head is unreadable"; exit 2; }
+  # the content is read at the sha, never through the PR: a head can move during the reads and back before the last check
+  c="repos/$REPO/compare/$base...$pin"
+  d=$(gh api "$c" -H 'Accept: application/vnd.github.diff') || { echo "SCAN FAILED: the diff of #$n"; exit 2; }
+  cj=$(gh api "$c") || { echo "SCAN FAILED: the files of #$n"; exit 2; }
+  # compare stops at 300 files and 250 commits without saying so
+  jq -e '(.files | type) == "array" and (.files | length) < 300 and .total_commits == (.commits | length)' <<<"$cj" >/dev/null \
+    || { echo "SCAN FAILED: #$n is more than one compare lists (300 files, 250 commits); read it by hand"; exit 2; }
+  files=$(jq -r '.files[] | .filename, (.previous_filename // empty)' <<<"$cj" | sort -u)   # a rename touches its old path too
+  meta=$(gh pr view "$n" --repo "$REPO" --json title,body --jq '.title, .body') || { echo "SCAN FAILED: gh pr view #$n"; exit 2; }
+  meta=$meta$'\n'$(jq -r '.commits[].commit.message' <<<"$cj")
+  h=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq .headRefOid) || { echo "SCAN FAILED: gh pr view #$n"; exit 2; }
+  [ "$h" = "$pin" ] || { echo "SCAN FAILED: head moved"; exit 2; }
   # the local ban (roster names, page ids) never sits in the committed config, so it joins the leak pattern here
   leakre=$(cfg '.scan.leak'); ban=$(lcl '.prompt_ban // empty'); [ -n "$ban" ] && leakre="($leakre)|($ban)"
   rr=$(roster_re) || { echo "SCAN FAILED: the roster cannot be read"; exit 2; }; [ -z "$rr" ] || leakre="($leakre)|$rr"
@@ -950,10 +958,11 @@ watch-merge)
   done
   echo "$(date -u +%H:%MZ) required ok=$ok/${#REQ[@]} report_done=$(report_done && echo yes || echo no) state: $m"
   [ "$m" = "MERGEABLE CLEAN" ] || { echo "TIMEOUT; not merged"; exit 3; }
-  read -r state draft base head _ <<<"$(pr_state)"
-  [ "$state" = OPEN ] && [ "$draft" = false ] && [ "$base" = "$TRUNK" ] && [ "$head" = "$PIN" ] || { echo "REFUSED at merge time: state=$state draft=$draft base=$base head=$head"; exit 4; }
   merged=0; for try in 1 2 3; do
     [ "$(cfg '.mode // empty')" = triage ] && { echo "REFUSED: orchy.json mode is triage; not merged"; exit 4; }
+    # every try: gh merges into whatever base the PR names then, and a PR can be retargeted during a retry's wait
+    read -r state draft base head _ <<<"$(pr_state)"
+    [ "$state" = OPEN ] && [ "$draft" = false ] && [ "$base" = "$TRUNK" ] && [ "$head" = "$PIN" ] || { echo "REFUSED at merge time: state=$state draft=$draft base=$base head=$head"; exit 4; }
     [ "$try" = 1 ] || trunk_ok || { echo "TRUNK RED at merge time; not merged"; exit 7; }
     case $(gh api "repos/$REPO/compare/$B0...$TRUNK" --jq .status 2>/dev/null) in
       ahead|identical) ;;
