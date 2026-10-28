@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# gh mock for smoke-orchy: fixtures in $MOCK_DIR (pr-<n>.json, issue-<n>.json, checks[-<sha>].json, status[-<sha>].json, trunk.json, compare.json (a sha...sha compare), compare-<branch>.json (a sha...branch one), diff-<sha>.txt and cmp-<sha>.json (a branch...sha one, as a diff and as JSON), open.json, issues.json, merged.json; heads-<n>.txt answers successive headRefOid reads, one line each, the last one repeating; merge-race-<n>.jq edits pr-<n>.json while the next merge call fails as a moved base; commit-<ref>.json (a ref's head, else trunk.json), run-<id>.json, pending-<id>.json, tag-<name>.json (absent: 404), release-<tag>.json (absent: 404), dispatch.json (the dispatch answer; absent: 204)); every call logged to $MOCK_DIR/gh.log, and each POST with its body to $MOCK_DIR/posts.log; $MOCK_GH_MERGE_SLEEP delays each merge call, $MOCK_GH_COMPARE_SLEEP each sha...branch compare, $MOCK_GH_POST_SLEEP each POST before posts.log records it
+# gh mock for the orchy smokes: each call answers from the $MOCK_DIR fixture its case names and is logged to gh.log, each POST with its body to posts.log; MOCK_GH_*_SLEEP delays and MOCK_GH_FAIL fails chosen calls
 set -u; echo "$*" >> "$MOCK_DIR/gh.log"
 for f in /proc/$$/fd/*; do case $(readlink "$f") in *holds.lock) echo "$*" >> "$MOCK_DIR/locked.log";; esac; done   # no call may hold the holds lock
 jqexpr=""; args=("$@"); for ((i=0;i<${#args[@]};i++)); do [ "${args[i]}" = --jq ] && jqexpr=${args[i+1]}; done
 case "$1 $2" in
 "auth status") exit 0;;
-"pr view") f="$MOCK_DIR/pr-$3.json"; [ -f "$f" ] || { echo "no such pr" >&2; exit 1; }; q="$MOCK_DIR/heads-$3.txt"
+"pr view") f="$MOCK_DIR/pr-$3.json"; [ -f "$f" ] || { echo "no such pr" >&2; exit 1; }; q="$MOCK_DIR/heads-$3.txt"   # successive headRefOid reads, the last repeating
   if [ -s "$q" ] && [[ "$jqexpr" == *headRefOid* ]]; then h=$(head -n 1 "$q"); [ "$(wc -l < "$q")" -gt 1 ] && sed -i 1d "$q"; jq -r --arg h "$h" ".headRefOid = \$h | $jqexpr" "$f"
   else jq -r "${jqexpr:-.}" "$f"; fi;;
 "pr merge") n=$3; f="$MOCK_DIR/pr-$n.json"; want=""; for ((i=0;i<${#args[@]};i++)); do [ "${args[i]}" = --match-head-commit ] && want=${args[i+1]}; done
   [ -n "$want" ] || { echo "MOCK: merge without --match-head-commit" >&2; exit 1; }
   [ "$want" = "$(jq -r .headRefOid "$f")" ] || { echo "head commit mismatch" >&2; exit 1; }
   sleep "${MOCK_GH_MERGE_SLEEP:-0}"
-  r="$MOCK_DIR/merge-race-$n.jq"; if [ -f "$r" ]; then tmp=$(mktemp); jq -f "$r" "$f" > "$tmp" && mv "$tmp" "$f"; rm -f "$r"
+  r="$MOCK_DIR/merge-race-$n.jq"; if [ -f "$r" ]; then tmp=$(mktemp); jq -f "$r" "$f" > "$tmp" && mv "$tmp" "$f"; rm -f "$r"   # the PR changes while this call fails as a moved base
     echo "GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)" >&2; exit 1; fi
   tmp=$(mktemp); jq '.state="MERGED" | .mergeCommit={oid:"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}' "$f" > "$tmp" && mv "$tmp" "$f"; echo "✓ Squashed and merged";;
 "issue view") f="$MOCK_DIR/issue-$3.json"; [ -f "$f" ] || { echo "no such issue" >&2; exit 1; }; jq -r "${jqexpr:-.}" "$f";;

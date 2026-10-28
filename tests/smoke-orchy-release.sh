@@ -144,6 +144,8 @@ o=$(W tag build-7 "$TS" --lane release-7 || true); for b in dev main; do echo '{
 grep -q 'on neither the trunk nor a merge.branches base' <<<"$o" || fail "a tag on an unreachable commit: $o"
 jq 'del(.release.tags)' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"; o=$(W tag build-7 "$TS" --lane release-7 || true); cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"
 grep -q 'release.tags is unknown' <<<"$o" || fail "a tag while release.tags is unknown: $o"
+for p in '**/v*' '{v,x}*'; do jq --arg p "$p" '.release.tags = [{pattern: $p, creation: "restricted"}]' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"
+  o=$(W tag v9 "$TS" --lane release-7 || true); cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"; grep -q 'cannot evaluate' <<<"$o" || fail "a tag under the restricted pattern $p: $o"; done
 n=$(grep -c . "$MOCK_DIR/posts.log"); o=$(W tag build-7 "$TS" --lane release-7 || true); [ "$o" = "tagged build-7 at aaaaaaaa (go $a)" ] || fail "tag: $o"
 [ "$(grep -c . "$MOCK_DIR/posts.log")" = $((n+1)) ] && tail -n 1 "$MOCK_DIR/posts.log" | grep -q '^POST repos/example/app/git/refs {"ref":"refs/tags/build-7","sha":"a' || fail "the tag's POST: $(tail -n 1 "$MOCK_DIR/posts.log")"
 t=$(A add "tag build-8"); A public "$t" "Tag build-8" >/dev/null; A ok "$t" tag build-8 "$TS" -- "tag it" >/dev/null
@@ -314,7 +316,7 @@ echo '{"status": "completed", "conclusion": "success"}' > "$MOCK_DIR/run-901.jso
 # --- goals: a milestone with its title only, the date kept in the ledger, ready only when the work is done
 G=2031-01-15; g=$(A add "before launch: the listing copy, then ship it"); A public "$g" "Launch: the listing copy, then the release" >/dev/null
 for c in "Launch!|a name is" "launch on 2031-02-30|not a calendar date" "launch by 2031-01-01 on $G|at most one date" \
-  "launch on $G then party|the only end action" "launch-$G on $G|carries its date"; do
+  "launch on $G then party|the only end action" "launch-$G on $G|carries its date" "release-readiness-checklists|a name is"; do
   read -ra av <<<"${c%%|*}"; o=$(A goal "$g" "${av[@]}" 2>&1 || true); grep -q -- "${c#*|}" <<<"$o" || fail "ask goal ${c%%|*}: $o"; done
 o=$(A note "$g" "goal: x" 2>&1 || true); grep -q 'written only by' <<<"$o" || fail "a goal note by hand: $o"
 d=$(A add "a dated ask"); A public "$d" "Ship it before January 15" >/dev/null
@@ -358,6 +360,12 @@ for m in '[{"title": "beta", "open_issues": 0, "closed_issues": 3}, {"title": "b
 mv "$ORCHY_HOME/runbooks" "$T/rb.real"; mkdir "$T/rb.fake"; printf -- '- [x] Post the beta notes\n' > "$T/rb.fake/goal-beta.md"; ln -s "$T/rb.fake" "$ORCHY_HOME/runbooks"
 o=$("$ORCHY" goals --json | jq -c --arg a "$b" '.goals[] | select(.ask == $a) | [.runbook, .ready]'); rm "$ORCHY_HOME/runbooks"; mv "$T/rb.real" "$ORCHY_HOME/runbooks"
 [ "$o" = '["unreadable",false]' ] || fail "goals through a symlinked runbooks directory: $o"
+# changed wording holds a goal unready, and only answered: ready lets it take a lane
+gm=$(A add "the gamma list"); A public "$gm" "Gamma: the export fixes" >/dev/null; A note "$gm" "waiting: wording" >/dev/null; A note "$gm" "wording ok" >/dev/null
+jq '. + [{title: "gamma", open_issues: 0, closed_issues: 1}]' "$T/ms.keep" > "$MOCK_DIR/milestones.json"; A goal "$gm" gamma by "$G" >/dev/null || fail "ask goal gamma"
+A public "$gm" "Gamma: the export and import fixes" >/dev/null; [ "$(r "$gm")" = false ] || fail "a goal held by its changed wording is ready"
+A note "$gm" "wording ok" >/dev/null; [ "$(r "$gm")" = true ] || fail "a goal with its wording settled is not ready"
+o=$(A lane "$gm" release-10 release 2>&1 || true); grep -q "only after 'answered: ready'" <<<"$o" || fail "a goal laned without answered: ready: $o"
 d0=$(date -u +%F); dl=$("$ORCHY" goals --json | jq -r --arg a "$g" '.goals[] | select(.ask == $a) | .days')
 [ "$dl" = $(( ($(date -ud "$G" +%s) - $(date -ud "$d0" +%s)) / 86400 )) ] || fail "days to the launch: $dl"
 A go "$b" -- "ship the beta" >/dev/null && A note "$b" "answered: ready" >/dev/null && A lane "$b" release-9 release >/dev/null || fail "lane the ready goal"

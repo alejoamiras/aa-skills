@@ -385,7 +385,8 @@ FOLD='reduce (inputs | fromjson? | select(type == "object" and (.id | type) == "
 fold() { if [ -f "$LEDGER" ]; then jq -Rn "$FOLD" "$LEDGER"; else echo '{}'; fi; }
 ask_get() { fold | jq -c --arg id "$1" '.[$id] // empty'; }
 ask_moves() { case "$1>$2" in open\>lane|open\>done|open\>dropped|open\>filed|lane\>done|lane\>open|lane\>dropped|lane\>filed|done\>open|dropped\>open) return 0;; esac; return 1; }
-ASK_HOLD='[.notes[] | select(test("^(waiting:|answered:)") or . == "wording ok")][-1] // "" | select(startswith("waiting:"))'
+ASK_CTL='[.notes[] | select(test("^(waiting:|answered:)") or . == "wording ok")][-1] // ""'   # the latest control note
+ASK_HOLD="$ASK_CTL"' | select(startswith("waiting:"))'
 ask_ready() { # ask_ready <fold-json> <id>: a handoff needs the stored restatement and no open owner question
   local w; [ -n "$(jq -r '.public // empty' <<<"$1")" ] || { echo "refused: $2 has no public wording; ask public $2 first" >&2; return 1; }
   # only control notes decide a hold, so an ordinary note never clears one
@@ -619,6 +620,9 @@ ask)
     ask_lane() { local a st; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
       st=$(jq -r .state <<<"$a"); ask_moves "$st" lane || { echo "refused: $id is $st; lane does not apply" >&2; return 1; }
       ask_ready "$a" "$id" || return 1
+      # a goal leaves on the orchestrator's 'answered: ready' alone, never on the answer to a question that replaced its hold
+      if jq -e 'any(.notes[]; startswith("goal: "))' <<<"$a" >/dev/null && [ "$(jq -r "$ASK_CTL" <<<"$a")" != "answered: ready" ]; then
+        echo "refused: $id is a goal; it takes a lane only after 'answered: ready'" >&2; return 1; fi
       if lane_reported "$s" && [ ! -d "$WT_ROOT/$s" ]; then echo "refused: lane $s is closed (its reports remain); name a new lane" >&2; return 1; fi
       append_row "$(row --arg s "$s" --arg t "$t" '{id: $id, at: $at, state: "lane", lane: $s, note: $t}')" && echo "$id lane $s"; }
     with_ledger ask_lane;;
@@ -687,7 +691,7 @@ ask)
     with_ledger ask_auth;;
   goal)
     nm=${1:-}; shift || true; dk=; dt=; th=
-    [[ "$nm" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || { echo "usage: ask goal <askN> <name> [by|on <YYYY-MM-DD>] [then release]; a name is [a-z0-9-], at most 40" >&2; exit 1; }
+    [[ "$nm" =~ ^[a-z0-9][a-z0-9-]{0,26}$ ]] || { echo "usage: ask goal <askN> <name> [by|on <YYYY-MM-DD>] [then release]; a name is [a-z0-9-], at most 27, so runbook goal-<name> is a slug" >&2; exit 1; }
     while [ $# -gt 0 ]; do case "$1" in
       by|on) [ -z "$dk" ] && [ $# -ge 2 ] || { echo "refused: a goal has at most one date, by or on <YYYY-MM-DD>" >&2; exit 1; }; dk=$1; dt=$2; shift 2;;
       then) [ -z "$th" ] && [ "${2:-}" = release ] || { echo "refused: the only end action is 'then release'" >&2; exit 1; }; th=release; shift 2;;
@@ -771,20 +775,21 @@ goals)
   ledger_ro || exit 1
   gs=$(ledger_rows | jq -c 'group_by(.id) | map(([.[] | select((.note // "") | startswith("goal: "))] | last) as $g | select($g != null)
     | ($g.note | capture("^goal: (?<name>[a-z0-9-]+)(?: (?<kind>by|on) (?<date>[0-9]{4}-[0-9]{2}-[0-9]{2}))?(?: then (?<then>release))?$"))
-      + {ask: $g.id, state: ([.[] | select((.state | type) == "string")] | last | .state)})') || exit 1
+      + {ask: $g.id, state: ([.[] | select((.state | type) == "string")] | last | .state), hold: ({notes: [.[].note | strings]} | ['"$ASK_HOLD"'] | first // "")})') || exit 1
   ms='[]'; [ "$gs" = '[]' ] || { need gh; need timeout
     ms=$(timeout 30 gh api "repos/$REPO/milestones?state=all&per_page=100" 2>/dev/null) && jq -e 'type == "array" and length < 100 and all(.[]; type == "object" and (.title | type) == "string")' <<<"$ms" >/dev/null || ms=null; }
   rb=$(for n in $(jq -r '.[].name' <<<"$gs"); do f="$RUNBOOKS/goal-$n.md"; [ -L "$RUNBOOKS" ] || [ -e "$f" ] || [ -L "$f" ] || continue
       if [ ! -L "$RUNBOOKS" ] && [ -f "$f" ] && [ ! -L "$f" ] && j=$(rb_parse "$f" 2>/dev/null); then jq -c --arg n "$n" '{($n): {done: (map(select(.[0])) | length), steps: length}}' <<<"$j"
       else jq -nc --arg n "$n" '{($n): "unreadable"}'; fi; done | jq -sc 'add // {}')
+  # a goal another question holds is never ready, or the tick's 'answered: ready' would answer that question for the owner
   g=$(jq -c --argjson ms "$ms" --argjson rb "$rb" --arg today "$(date -u +%F)" '{schema: "orchy.goals/1", goals: map(. as $x
     | ($ms | if . == null then null else map(select(.title == $x.name)) | if length == 0 then "missing" elif length > 1 then null
         else .[0] | if [.open_issues, .closed_issues] | all(type == "number" and . >= 0 and . == floor) then {open: .open_issues, closed: .closed_issues}
         else null end end end) as $m | ($rb[$x.name] // null) as $b
     | $x + {milestone: $m, runbook: $b,
        days: (if $x.date then ((($x.date + "T00:00:00Z" | fromdateiso8601) - ($today + "T00:00:00Z" | fromdateiso8601)) / 86400 | floor) else null end),
-       ready: ($x.state == "open" and ($m | type) == "object" and $m.open == 0 and ($b == null or (($b | type) == "object" and $b.done == $b.steps))
-         and ($x.kind != "on" or $x.date <= $today))})}' <<<"$gs") || exit 1
+       ready: ($x.state == "open" and ($x.hold | IN("", "waiting: goal \($x.name)")) and ($m | type) == "object" and $m.open == 0
+         and ($b == null or (($b | type) == "object" and $b.done == $b.steps)) and ($x.kind != "on" or $x.date <= $today))} | del(.hold))}' <<<"$gs") || exit 1
   if [ "${1:-}" = --json ]; then echo "$g"
   else jq -r 'if .goals == [] then "no goals" else .goals[] | '"$GOAL_LINE"' + (if .days != null then ", \(.days) days" else "" end) + (if .ready then ", ready" else "" end) end' <<<"$g"; fi;;
 grants)
@@ -1498,7 +1503,9 @@ act)
     t=${af[1]}; sha=${af[2]}
     tags=$(jq -c '.release.tags // null' "$CFG"); [ "$tags" != null ] || no "release.tags is unknown, so creating $t is the owner's step"
     while IFS= read -r pat; do
-      # shellcheck disable=SC2053  # a ruleset pattern is a glob
+      # GitHub matches with Ruby's fnmatch, whose **/ may match no directory; bash cannot, and reads braces and parentheses its own way
+      case $pat in *'**/'* | *'{'* | *'('*) no "$pat is a restricted pattern this check cannot evaluate; the tag is the owner's step";; esac
+      # shellcheck disable=SC2053  # a glob, where bash's * and ? also cross /, which only refuses more
       [ -n "$pat" ] && [[ "$t" == $pat ]] && no "$t matches $pat, whose tags only the release tool creates; the step is the owner's"
     done < <(jq -r '.[] | select(.creation == "restricted") | .pattern' <<<"$tags")
     case $(tag_state "$t") in no) ;; yes) no "tag $t exists";; *) no "cannot read tag $t";; esac
