@@ -24,7 +24,7 @@ jobs:
         if: github.event_name != 'workflow_dispatch'
         id: filter
         with:
-          # A shell file is known by its shebang as much as by its name, so anything but Markdown may be one.
+          # checks/budget.ts finds shell files by shebang too and never in Markdown, so any other path may be one.
           predicate-quantifier: every
           filters: |
             relevant:
@@ -56,10 +56,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 2
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - run: bun test tests/budget.test.ts
-      - run: bun checks/budget.ts
+      # A pull_request checkout is the merge commit, whose first parent is the base branch's head.
+      - if: github.event_name == 'pull_request'
+        run: bun checks/budget.ts --base HEAD^1
+      - if: github.event_name != 'pull_request'
+        run: bun checks/budget.ts
       - run: checks/wired.sh
 
   shell-status:

@@ -1,54 +1,65 @@
-// checks/budget.ts: the lexer it measures functions with, the ratchet rules, and the CLI over a real git tree.
 import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Budget, check, functions, isShell, type Measured, run, shellSources, tighten } from "../checks/budget.ts";
+import { type Budget, check, functions, isShell, type Measured, raised, run, shellSources, tighten } from "../checks/budget.ts";
 
 const T = mkdtempSync(join(tmpdir(), "budget-test-"));
 afterAll(() => rmSync(T, { recursive: true, force: true }));
 const record = (b: Partial<Budget> = {}): Budget => ({ files: {}, functions: {}, duplicates: {}, ...b });
 const bash = (args: string[], stdin = "") => Bun.spawnSync(["bash", ...args], { stdin: Buffer.from(stdin) });
 
-// Braces in every place that is not syntax, a function inside a heredoc and one inside an awk program.
+// Braces that are not syntax; b() sits in a heredoc and c() in an awk program, so bash defines a, d, e and f only.
 const TRICKY = `a() {
   echo "}" '}' $'\\'}' "$(printf '%s' "}")" \`echo }\` # a } in a comment
-  x=\${y%%) }}; echo \${#x} $# "\${x:-"}"}"
+  x=\${y%%) }}; echo \${#x} $# "\${x:-"}"}"; a[1<<2]=x
   cat <<EOF
 }
 b() {
 EOF
-  cat <<-'END' > /dev/null; cat <<< '}'
+  cat <<-'END' > /dev/null; cat <<< '}'; cat <<E"OF"
 \t}
 \tEND
+}
+EOF
   (( n = 1 << 2 ))
   echo $(( (n) << 1 )) }
   awk 'function c(x) { return x }'
 }
-d() { :; }; e()
+d ( ) { :; }; e()
 {
   [[ $x == {a,b} ]] && { echo; }
 }
+if true; then f() { :; }; fi
 `;
 
 test("isShell: a .sh name or a sh-family shebang, nothing else", () => {
-  for (const s of ["#!/usr/bin/env bash\n", "#!/bin/sh -e\n", "#!/usr/bin/env -S dash -e\n"]) expect(isShell("bin/x", s)).toBe(true);
-  for (const s of ["#!/usr/bin/env zsh\n", "#!/usr/bin/env bun\n", "#!/usr/bin/env node --x-sh\n", "echo\n#!/bin/sh\n"]) expect(isShell("bin/x", s)).toBe(false);
+  for (const s of ["#!/usr/bin/env bash", "#!/bin/sh -e", "#!/usr/bin/env -S dash -e", "#!/usr/bin/env -S A=1 -u B bash"]) expect(isShell("bin/x", `${s}\n`)).toBe(true);
+  for (const s of ["#!/usr/bin/env zsh", "#!/usr/bin/env bun", "#!/usr/bin/env node --x-sh", "echo\n#!/bin/sh"]) expect(isShell("bin/x", `${s}\n`)).toBe(false);
   expect(isShell("lib/x.sh", "")).toBe(true);
+  expect(isShell("bin/x.md", "#!/bin/bash\n")).toBe(false);
 });
 
-test("functions: the definitions bash sees, measured past quotes, expansions, heredocs, comments and arithmetic", () => {
-  expect(bash(["-c", `${TRICKY}declare -F`]).stdout.toString()).toBe("declare -f a\ndeclare -f d\ndeclare -f e\n");
-  expect(functions(TRICKY)).toEqual([{ name: "a", line: 1, lines: 14 }, { name: "d", line: 15, lines: 1 }, { name: "e", line: 15, lines: 4 }]);
+test("functions: the definitions bash sees, past quotes, expansions, subscripts, heredocs, comments and arithmetic", () => {
+  expect(bash(["-c", `${TRICKY}declare -F`]).stdout.toString()).toBe("declare -f a\ndeclare -f d\ndeclare -f e\ndeclare -f f\n");
+  expect(functions(TRICKY)).toEqual([
+    { name: "a", line: 1, lines: 16 },
+    { name: "d", line: 17, lines: 1 },
+    { name: "e", line: 17, lines: 4 },
+    { name: "f", line: 21, lines: 1 },
+  ]);
+  expect(functions('echo "$(( $(h() { :; }; h) ))"\n')).toEqual([{ name: "h", line: 1, lines: 1 }]);
 });
 
 test("functions: braces it cannot pair, or a body it cannot measure, throw instead of passing", () => {
   expect(() => functions("f() {\n  echo\n")).toThrow(/never closes/);
   expect(() => functions("echo; }\n")).toThrow(/closes nothing/);
   expect(() => functions("f() ( echo )\n")).toThrow(/no \{ \} body/);
+  expect(() => functions("cat <<EOF\nf() {\n:\n}\n")).toThrow(/heredoc never reaches/);
+  expect(() => functions('echo "x\nf() {\n:\n}\n')).toThrow(/never closes/);
 });
 
-test("every function measured in this repo is one complete bash definition", () => {
+test("no function measured in this repo is cut short: each span parses on its own", () => {
   const broken: string[] = [];
   for (const [path, text] of Object.entries(shellSources(join(import.meta.dir, "..")))) {
     const lines = text.split("\n");
@@ -58,14 +69,19 @@ test("every function measured in this repo is one complete bash definition", () 
   expect(broken).toEqual([]);
 });
 
-test("check: growth past a record, or past the default without one, fails; a renamed function gets the default", () => {
-  const m: Measured = { files: { big: 900, fresh: 801, ok: 800 }, functions: { big: { grown: 121, kept: 120, renamed: 178, short: 80 } } };
+test("check: growth past a record, or past the default without one, fails whatever the name; a rename gets the default", () => {
+  const m: Measured = {
+    files: { big: 900, fresh: 801, ok: 800, constructor: 801 },
+    functions: { big: { grown: 121, kept: 120, renamed: 178, short: 80, ["__proto__"]: 81 } },
+  };
   const { errors, stale } = check(m, record({ files: { big: 899 }, functions: { big: { grown: 120, kept: 120, original: 178 } } }));
   expect(errors).toEqual([
     "big: 900 lines, over its recorded budget of 899; split it",
     "fresh: 801 lines, over its default budget of 800; split it",
+    "constructor: 801 lines, over its default budget of 800; split it",
     "big: grown(): 121 lines, over its recorded budget of 120; split it into smaller functions",
     "big: renamed(): 178 lines, over its default budget of 80; split it into smaller functions",
+    "big: __proto__(): 81 lines, over its default budget of 80; split it into smaller functions",
   ]);
   expect(stale).toEqual(["big: original(): recorded at 178 lines, no longer here"]);
 });
@@ -91,7 +107,18 @@ test("tighten: a looser record is stale until lowered or dropped, and is never r
   expect(after.errors.map((e) => e.slice(0, e.indexOf(" lines")))).toEqual(["grew: 1200", "big: g(): 150", "big: h(): 200"]);
 });
 
-test("run: measures tracked and untracked shell files but no symlink or ignored file, and --write banks a shrink", () => {
+test("raised: an entry the base record lacks or holds lower fails; lowering or dropping one does not", () => {
+  const base = record({ files: { a: 900, b: 900 }, functions: { a: { f: 100 } }, duplicates: { die: ["a", "b"] } });
+  expect(raised(base, record({ files: { a: 850 }, duplicates: { die: ["a", "b"] } }))).toEqual([]);
+  expect(raised(base, record({ files: { a: 901, c: 900 }, functions: { a: { f: 100, g: 90 } }, duplicates: { die: ["a", "b", "c"] } }))).toEqual([
+    "a: record raised from 900 to 901 lines",
+    "c: newly recorded at 900 lines",
+    "a: g(): newly recorded at 90 lines",
+    "die(): newly recorded in c",
+  ]);
+});
+
+test("run: tracked and untracked shell files but no symlink or ignored file; --write banks a shrink; --base catches a raise", () => {
   const dir = join(T, "repo");
   expect(Bun.spawnSync(["git", "init", "-q", dir]).exitCode).toBe(0);
   writeFileSync(join(dir, "a.sh"), "true\n".repeat(900));
@@ -109,4 +136,12 @@ test("run: measures tracked and untracked shell files but no symlink or ignored 
   expect(before.out.at(-1)).toContain("bun checks/budget.ts --write");
   expect(run(dir, rec, "write")).toEqual({ code: 0, out: [] });
   expect(JSON.parse(readFileSync(rec, "utf8")).files).toEqual({ "a.sh": 900 });
+  const git = ["git", "-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"];
+  expect(Bun.spawnSync([...git, "add", "budget.json"]).exitCode).toBe(0);
+  expect(Bun.spawnSync([...git, "commit", "-qm", "base"]).exitCode).toBe(0);
+  writeFileSync(join(dir, "a.sh"), "true\n".repeat(960));
+  writeFileSync(rec, JSON.stringify(record({ files: { "a.sh": 960 } })));
+  expect(run(dir, rec, "check").code).toBe(0);
+  expect(run(dir, rec, "check", "HEAD").out[0]).toBe("a.sh: record raised from 900 to 960 lines");
+  expect(() => run(dir, rec, "check", "nope")).toThrow(/no such commit/);
 });

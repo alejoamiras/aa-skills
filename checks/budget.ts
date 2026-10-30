@@ -1,8 +1,8 @@
-#!/usr/bin/env bun
 // Size budgets for this repo's shell code. A file may grow to its recorded size in budget.json, or to FILE_LINES
 // when it has no record; a function likewise to FUNCTION_LINES; a function name lives in one file unless recorded.
 // A record looser than the code also fails, so every shrink is banked: --write lowers or drops such entries and
-// never raises or adds one. Usage: bun checks/budget.ts [--write | --files]
+// never raises or adds one; --base <rev> also fails any entry raised or added since that commit's record.
+// Usage: bun checks/budget.ts [--write | --files | --base <rev>]
 import { lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
@@ -16,10 +16,23 @@ export type Budget = {
 };
 export type Fn = { name: string; line: number; lines: number };
 
+// Paths and function names are data: keep them off Object.prototype ("constructor", "__proto__").
+const dict = <T>() => Object.create(null) as Record<string, T>;
+const own = <T>(o: Record<string, T> | undefined, k: string): T | undefined => (o && Object.hasOwn(o, k) ? o[k] : undefined);
+
+// Markdown is never shell, which lets the shell workflow's path filter skip Markdown-only changes.
 export function isShell(path: string, text: string): boolean {
+  if (path.endsWith(".md")) return false;
   if (/\.(sh|bash)$/.test(path)) return true;
   const [cmd, ...args] = /^#!(.*)/.exec(text.split("\n", 1)[0])?.[1].trim().split(/\s+/) ?? [];
-  const prog = cmd?.endsWith("/env") ? args.find((a) => !a.startsWith("-")) : cmd;
+  let prog = cmd;
+  if (cmd?.endsWith("/env")) {
+    prog = undefined;
+    for (let i = 0; i < args.length && prog === undefined; i++) {
+      if (/^(-[uCP]|--unset|--chdir)$/.test(args[i])) i++;
+      else if (!args[i].startsWith("-") && !args[i].includes("=")) prog = args[i];
+    }
+  }
   return /^(ba|da|k)?sh$/.test(prog?.split("/").pop() ?? "");
 }
 
@@ -27,16 +40,17 @@ function lineCount(text: string): number {
   return text === "" ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
 }
 
-type Frame = { k: "sub" | "bt" | "dq" | "param" | "sq" | "ansi" | "arith"; depth: number; word: boolean; inDq: boolean };
-const HEREDOC = /^<<(-?)[ \t]*(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|<>()'"`]+))/;
+type Frame = { k: "sub" | "bt" | "dq" | "param" | "sq" | "ansi" | "arith"; depth: number; word: boolean; inDq: boolean; line: number };
+const HEREDOC = /^<<(-?)[ \t]*((?:'[^']*'|"[^"]*"|\\.|[^\s;&|<>()'"`\\])+)/;
 
 // The text with only shell syntax left, line for line: comments cut, quoted text, parameter expansions and
 // arithmetic blanked, heredoc bodies emptied. A command substitution opens as ";" and closes as "x", so the braces
 // inside it still pair up while its closing paren reads as part of a word, never as a boundary a "}" may follow.
+// Throws when a quote, expansion or heredoc is still open at the end: everything after it would go unmeasured.
 export function codeLines(text: string): string[] {
   const stack: Frame[] = [];
-  const heredocs: { word: string; strip: boolean }[] = [];
-  return text.split("\n").map((s) => {
+  const heredocs: { word: string; strip: boolean; line: number }[] = [];
+  const lines = text.split("\n").map((s, n) => {
     if (heredocs.length) {
       const h = heredocs[0];
       if ((h.strip ? s.replace(/^\t+/, "") : s) === h.word) heredocs.shift();
@@ -46,7 +60,7 @@ export function codeLines(text: string): string[] {
     let i = 0;
     const emit = (out: string, n = out.length) => { o += out; i += n; };
     const push = (k: Frame["k"], out: string, word = true) => {
-      stack.push({ k, depth: 0, word, inDq: stack.at(-1)?.k === "dq" });
+      stack.push({ k, depth: 0, word, inDq: stack.at(-1)?.k === "dq", line: n + 1 });
       emit(out);
     };
     while (i < s.length) {
@@ -59,6 +73,11 @@ export function codeLines(text: string): string[] {
         else emit(" ");
         continue;
       }
+      if (c === "\\") { emit("  "); continue; }
+      if (s.startsWith("$((", i)) { push("arith", "   "); continue; }
+      if (s.startsWith("$(", i)) { push("sub", " ;"); continue; }
+      if (s.startsWith("${", i)) { push("param", "$ "); continue; }
+      if (c === "`") { if (k === "bt") { stack.pop(); emit("x"); } else push("bt", ";"); continue; }
       if (k === "arith" && top) {
         if (c === "(") top.depth++;
         else if (c === ")" && top.depth > 0) top.depth--;
@@ -66,11 +85,6 @@ export function codeLines(text: string): string[] {
         emit(" ");
         continue;
       }
-      if (c === "\\") { emit("  "); continue; }
-      if (s.startsWith("$((", i)) { push("arith", "   "); continue; }
-      if (s.startsWith("$(", i)) { push("sub", " ;"); continue; }
-      if (s.startsWith("${", i)) { push("param", "$ "); continue; }
-      if (c === "`") { if (k === "bt") { stack.pop(); emit("x"); } else push("bt", ";"); continue; }
       if (k === "dq") { if (c === '"') { stack.pop(); emit('"'); } else emit(" "); continue; }
       if (c === '"') { push("dq", '"'); continue; }
       if (k === "param" && top) {
@@ -84,9 +98,11 @@ export function codeLines(text: string): string[] {
       if (s.startsWith("$'", i)) { push("ansi", "$'"); continue; }
       if (s.startsWith("((", i)) { push("arith", "  ", false); continue; }
       if (s.startsWith("<<<", i)) { emit("   "); continue; }
+      const sub = c === "[" && /\w/.test(s[i - 1] ?? "") ? s.indexOf("]", i) : -1;
+      if (sub > 0) { emit(`[${" ".repeat(sub - i - 1)}]`); continue; }   // a[1<<2]=x: an array subscript, not a heredoc
       const h = HEREDOC.exec(s.slice(i));
       if (h) {
-        heredocs.push({ word: h[2] ?? h[3] ?? h[4], strip: h[1] === "-" });
+        heredocs.push({ word: h[2].replace(/'([^']*)'|"([^"]*)"|\\(.)/g, "$1$2$3"), strip: h[1] === "-", line: n + 1 });
         emit(" ".repeat(h[0].length));
         continue;
       }
@@ -99,9 +115,12 @@ export function codeLines(text: string): string[] {
     }
     return o;
   });
+  if (heredocs.length) throw new Error(`line ${heredocs[0].line}: a heredoc never reaches its "${heredocs[0].word}" line`);
+  if (stack.length) throw new Error(`line ${stack[0].line}: a quote or expansion never closes`);
+  return lines;
 }
 
-const HEADER = /(?:^|[;&|(){}])[ \t]*(?:function[ \t]+([A-Za-z_][\w:.-]*)(?:[ \t]*\(\))?|([A-Za-z_][\w:.-]*)[ \t]*\(\))/gm;
+const HEADER = /(?:^|[;&|(){}]|\b(?:then|do|else)(?=[ \t]))[ \t]*(?:function[ \t]+([A-Za-z_][\w:.-]*)(?:[ \t]*\([ \t]*\))?|([A-Za-z_][\w:.-]*)[ \t]*\([ \t]*\))/gm;
 const OPENS_AFTER = /(?:^|[;&|(){}!]|\b(?:if|then|else|elif|do|while|until|time))$/;
 const CLOSES_AFTER = /(?:^|[;&)}])$/;
 
@@ -140,12 +159,12 @@ export function functions(text: string): Fn[] {
 export type Measured = { files: Record<string, number>; functions: Record<string, Record<string, number>> };
 
 export function measure(sources: Record<string, string>): Measured {
-  const m: Measured = { files: {}, functions: {} };
+  const m: Measured = { files: dict(), functions: dict() };
   for (const [path, text] of Object.entries(sources)) {
     m.files[path] = lineCount(text);
     let fns: Fn[];
     try { fns = functions(text); } catch (e) { throw new Error(`${path}: ${(e as Error).message}`); }
-    for (const f of fns) (m.functions[path] ??= {})[f.name] = Math.max(m.functions[path]?.[f.name] ?? 0, f.lines);
+    for (const f of fns) (m.functions[path] ??= dict())[f.name] = Math.max(m.functions[path][f.name] ?? 0, f.lines);
   }
   return m;
 }
@@ -166,15 +185,15 @@ export function check(m: Measured, b: Budget): { errors: string[]; stale: string
     if (n === undefined) stale.push(`${what}: recorded at ${recorded} lines, no longer here`);
     else if (n < recorded) stale.push(`${what}: ${n} lines, recorded at ${recorded}`);
   };
-  for (const [path, n] of Object.entries(m.files)) over(path, n, b.files[path], FILE_LINES, "split it");
-  for (const [path, recorded] of Object.entries(b.files)) looser(path, m.files[path], recorded);
+  for (const [path, n] of Object.entries(m.files)) over(path, n, own(b.files, path), FILE_LINES, "split it");
+  for (const [path, recorded] of Object.entries(b.files)) looser(path, own(m.files, path), recorded);
   for (const [path, fns] of Object.entries(m.functions))
-    for (const [name, n] of Object.entries(fns)) over(`${path}: ${name}()`, n, b.functions[path]?.[name], FUNCTION_LINES, "split it into smaller functions");
+    for (const [name, n] of Object.entries(fns)) over(`${path}: ${name}()`, n, own(own(b.functions, path), name), FUNCTION_LINES, "split it into smaller functions");
   for (const [path, fns] of Object.entries(b.functions))
-    for (const [name, recorded] of Object.entries(fns)) looser(`${path}: ${name}()`, m.functions[path]?.[name], recorded);
+    for (const [name, recorded] of Object.entries(fns)) looser(`${path}: ${name}()`, own(own(m.functions, path), name), recorded);
   const by = definers(m);
   for (const [name, paths] of by) {
-    const extra = paths.filter((p) => !(b.duplicates[name] ?? []).includes(p));
+    const extra = paths.filter((p) => !(own(b.duplicates, name) ?? []).includes(p));
     if (paths.length > 1 && extra.length) errors.push(`${name}(): defined in ${paths.join(", ")}; keep one definition in a library the others source`);
   }
   for (const [name, paths] of Object.entries(b.duplicates)) {
@@ -187,12 +206,12 @@ export function check(m: Measured, b: Budget): { errors: string[]; stale: string
 // The record with each entry lowered to what the code now measures, or dropped once the default covers it.
 export function tighten(m: Measured, b: Budget): Budget {
   const files = Object.fromEntries(Object.entries(b.files).flatMap(([p, r]) => {
-    const n = m.files[p];
+    const n = own(m.files, p);
     return n === undefined || n <= FILE_LINES ? [] : [[p, Math.min(r, n)]];
   }));
   const functions = Object.fromEntries(Object.entries(b.functions).flatMap(([p, fns]) => {
     const kept = Object.fromEntries(Object.entries(fns).flatMap(([name, r]) => {
-      const n = m.functions[p]?.[name];
+      const n = own(own(m.functions, p), name);
       return n === undefined || n <= FUNCTION_LINES ? [] : [[name, Math.min(r, n)]];
     }));
     return Object.keys(kept).length ? [[p, kept]] : [];
@@ -205,6 +224,22 @@ export function tighten(m: Measured, b: Budget): Budget {
   return { files, functions, duplicates };
 }
 
+// Entries the record gained or loosened against an earlier record, so a change cannot grow code by editing the record.
+export function raised(base: Budget, b: Budget): string[] {
+  const out: string[] = [];
+  const cmp = (what: string, was: number | undefined, now: number) => {
+    if (was === undefined) out.push(`${what}: newly recorded at ${now} lines`);
+    else if (now > was) out.push(`${what}: record raised from ${was} to ${now} lines`);
+  };
+  for (const [p, n] of Object.entries(b.files)) cmp(p, own(base.files, p), n);
+  for (const [p, fns] of Object.entries(b.functions)) for (const [name, n] of Object.entries(fns)) cmp(`${p}: ${name}()`, own(own(base.functions, p), name), n);
+  for (const [name, paths] of Object.entries(b.duplicates)) {
+    const added = paths.filter((p) => !(own(base.duplicates, name) ?? []).includes(p));
+    if (added.length) out.push(`${name}(): newly recorded in ${added.join(", ")}`);
+  }
+  return out;
+}
+
 // budget.json's layout: JSON with each duplicate's file list on one line.
 export function format(b: Budget): string {
   return `${JSON.stringify(b, null, 2).replace(/\[\n\s+([^\]]*?)\n\s+\]/g, (_, list: string) => `[${list.split(/,\n\s+/).join(", ")}]`)}\n`;
@@ -214,7 +249,7 @@ export function format(b: Budget): string {
 export function shellSources(root: string): Record<string, string> {
   const ls = Bun.spawnSync(["git", "-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
   if (ls.exitCode !== 0) throw new Error(`git ls-files failed: ${ls.stderr.toString()}`);
-  const out: Record<string, string> = {};
+  const out = dict<string>();
   for (const path of [...new Set(ls.stdout.toString().split("\0").filter(Boolean))].sort()) {
     const full = join(root, path);
     try { if (!lstatSync(full).isFile()) continue; } catch { continue; }
@@ -224,30 +259,44 @@ export function shellSources(root: string): Record<string, string> {
   return out;
 }
 
-export function run(root: string, record: string, mode: "check" | "write" | "files"): { code: number; out: string[] } {
+const parse = (json: string): Budget => ({ files: {}, functions: {}, duplicates: {}, ...JSON.parse(json) });
+
+// The record as committed at <rev>, or undefined when that commit has none; a <rev> git cannot resolve throws.
+function recordAt(root: string, rev: string, path: string): Budget | undefined {
+  const git = (...a: string[]) => Bun.spawnSync(["git", "-C", root, ...a]);
+  if (git("rev-parse", "--verify", "-q", `${rev}^{commit}`).exitCode !== 0) throw new Error(`--base ${rev}: no such commit here`);
+  const show = git("show", `${rev}:${path}`);
+  return show.exitCode === 0 ? parse(show.stdout.toString()) : undefined;
+}
+
+export function run(root: string, record: string, mode: "check" | "write" | "files", base?: string): { code: number; out: string[] } {
   const sources = shellSources(root);
   if (mode === "files") return { code: 0, out: Object.keys(sources) };
   const m = measure(sources);
-  let b: Budget = { files: {}, functions: {}, duplicates: {}, ...JSON.parse(readFileSync(record, "utf8")) };
+  let b = parse(readFileSync(record, "utf8"));
   if (mode === "write") {
     b = tighten(m, b);
     writeFileSync(record, format(b));
   }
   const { errors, stale } = check(m, b);
-  const out = [...errors];
+  const was = base === undefined ? undefined : recordAt(root, base, relative(root, record));
+  const up = was ? raised(was, b) : [];
+  const out = [...errors, ...up];
+  if (up.length) out.push(`${relative(root, record)} may only lower or drop the entries ${base} has`);
   if (stale.length) out.push(...stale, `${stale.length} record(s) looser than the code: lower them with \`bun checks/budget.ts --write\` and commit ${relative(root, record)}`);
   return { code: out.length ? 1 : 0, out };
 }
 
 if (import.meta.main) {
-  const arg = process.argv[2];
-  if (arg !== undefined && arg !== "--write" && arg !== "--files") {
-    console.error("usage: bun checks/budget.ts [--write | --files]");
+  const [arg, base, ...extra] = process.argv.slice(2);
+  const ok = arg === undefined || ((arg === "--write" || arg === "--files") && base === undefined) || (arg === "--base" && base !== undefined);
+  if (!ok || extra.length) {
+    console.error("usage: bun checks/budget.ts [--write | --files | --base <rev>]");
     process.exit(2);
   }
   const mode = arg === "--write" ? "write" : arg === "--files" ? "files" : "check";
   try {
-    const { code, out } = run(join(import.meta.dir, ".."), join(import.meta.dir, "budget.json"), mode);
+    const { code, out } = run(join(import.meta.dir, ".."), join(import.meta.dir, "budget.json"), mode, arg === "--base" ? base : undefined);
     if (code) console.error(out.join("\n"));
     else console.log(mode === "files" ? out.join("\n") : "budget: ok");
     process.exit(code);
