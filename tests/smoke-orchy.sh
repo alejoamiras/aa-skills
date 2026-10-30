@@ -134,7 +134,7 @@ cmpfix() { local s=$1 m=$2; shift 2
 S7=7777777777777777777777777777777777777777; S8=8888888888888888888888888888888888888888
 jq -n --arg s "$S7" '{body:"body", headRefOid:$s, baseRefName:"dev"}' > "$MOCK_DIR/pr-7.json"; cmpfix "$S7" $'feat: x\n\nran with CLAUDE_ACCOUNT=acct-a' x
 o=$("$ORCHY" scan 7); grep -q 'leaks=1' <<<"$o" || fail "scan missed an account assignment in a commit message: $o"
-if MOCK_GH_FAIL=diff "$ORCHY" scan 7 >/dev/null 2>&1; then fail "scan reported success on a gh failure"; fi
+if MOCK_GH_FAIL="diff" "$ORCHY" scan 7 >/dev/null 2>&1; then fail "scan reported success on a gh failure"; fi
 jq -n --arg s "$S8" '{title:"fix: retry on acct-b", body:"body", headRefOid:$s, baseRefName:"dev"}' > "$MOCK_DIR/pr-8.json"; cmpfix "$S8" "fix: retry" x
 o=$("$ORCHY" scan 8); grep -q 'leaks=1' <<<"$o" || fail "scan missed a locally banned name in a PR title: $o"
 # watch-merge: pin validation, strict report parsing, pinned merge, head-moved exit
