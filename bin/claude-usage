@@ -37,7 +37,14 @@
 #                                ~/.claude stack (CLAUDE.md, AGENTS.md,
 #                                statusline.sh, settings.json, plugins, skills)
 #                                into the account first, and marks first-run onboarding
-#                                done (needs jq; skipped while the account runs)
+#                                done (needs jq; skipped while the account runs).
+#                                Accounts keep their own sessions: --resume <id>
+#                                or --continue first copies the session in from
+#                                whichever account holds its newest copy
+#   claude-usage handoff [name|other]
+#                                inside a Claude Code session: the line that
+#                                continues it on that account (default: other)
+#                                once you /exit
 #   claude-usage add <name>      store a `claude setup-token` token (pasted
 #                                hidden, or piped on stdin — never an argument)
 #   claude-usage add <name> --login [email]
@@ -2008,6 +2015,109 @@ describe() {
   printf 'headroom unknown'
 }
 
+SESSION_ID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+# Every config dir that can hold sessions: the slot, then each roster home.
+session_homes() {
+  local dir
+  printf '%s\n' "${MAIN_DIR}"
+  for dir in "${ACCOUNTS_ROOT}"/*/; do
+    [[ -d ${dir} && ! -L ${dir%/} ]] && valid_name "$(basename "${dir}")" && printf '%s\n' "${dir%/}"
+  done
+  return 0
+}
+
+home_label() {
+  local rest=${1#"${ACCOUNTS_ROOT}"/}
+  if [[ ${rest} == "$1" ]]; then printf 'main'; else label_for "${rest%%/*}"; fi
+}
+
+# The newest of the given files by mtime; on a tie the earlier one wins, so
+# callers list the target's own copies first.
+newest_of() {
+  local f best=""
+  for f in "$@"; do
+    [[ -f ${f} ]] || continue
+    [[ -z ${best} || ${f} -nt ${best} ]] && best=${f}
+  done
+  [[ -n ${best} ]] && printf '%s' "${best}"
+}
+
+# --resume <id> and --continue only see the sessions of the account claude runs
+# on. Copies the newest copy of the session into <home> unless <home> already
+# holds it, and turns --continue into --resume <id>; leaves argv in RUN_ARGS.
+# Transcripts only grow, so a copy on <home> that is not a prefix of the newer
+# one holds turns that exist nowhere else and is kept. The sidecar dir goes
+# first: a cut-short copy leaves <home>'s transcript older, and the next run
+# copies again.
+carry_session() {
+  local home=$1 i id="" at=-1 key h f src dst tmp="" files=()
+  shift
+  RUN_ARGS=("$@")
+  for ((i = 0; i < $#; i++)); do
+    case ${RUN_ARGS[i]} in
+      --) break ;;
+      --resume | -r) id=${RUN_ARGS[i + 1]:-} ;;
+      --resume=*) id=${RUN_ARGS[i]#--resume=} ;;
+      --continue | -c) at=${i} ;;
+    esac
+  done
+  if [[ ${id} =~ ${SESSION_ID_RE} ]]; then
+    at=-1
+    files=("${home}"/projects/*/"${id}".jsonl)
+    while IFS= read -r h; do
+      [[ ${h} == "${home}" ]] || files+=("${h}"/projects/*/"${id}".jsonl)
+    done < <(session_homes)
+  elif ((at >= 0)); then
+    # Claude Code truncates and hashes keys over 200 characters; those are left
+    # to its own lookup on this account.
+    key=$(pwd -P)
+    key=${key//[^A-Za-z0-9]/-}
+    ((${#key} > 200)) && return 0
+    while IFS= read -r h; do
+      for f in "${h}/projects/${key}"/*.jsonl; do
+        [[ $(basename "${f}" .jsonl) =~ ${SESSION_ID_RE} ]] || continue
+        if [[ ${h} == "${home}" ]]; then files=("${f}" ${files[@]+"${files[@]}"}); else files+=("${f}"); fi
+      done
+    done < <(session_homes)
+  fi
+  ((${#files[@]})) || return 0
+  src=$(newest_of "${files[@]}") || return 0
+  [[ ${src} == "${home}"/* ]] && return 0
+  id=$(basename "${src}" .jsonl)
+  ((at >= 0)) && RUN_ARGS=("${RUN_ARGS[@]:0:at}" --resume "${id}" "${RUN_ARGS[@]:at+1}")
+  dst="${home}/projects/$(basename "$(dirname "${src}")")"
+  if [[ -f ${dst}/${id}.jsonl ]] && ! head -c "$(wc -c < "${dst}/${id}.jsonl")" "${src}" | cmp -s - "${dst}/${id}.jsonl"; then
+    printf 'claude-usage: kept session %s as it is here: it has turns the newer copy on %s lacks\n' \
+      "${id:0:8}" "$(home_label "${src}")" >&2
+    return 0
+  fi
+  if ! mkdir -p "${dst}" ||
+    { [[ -d ${src%.jsonl} ]] && ! { mkdir -p "${dst}/${id}" && cp -Rp "${src%.jsonl}/." "${dst}/${id}/"; }; } ||
+    ! { tmp=$(mktemp "${dst}/.${id}.XXXXXX") && cp -p "${src}" "${tmp}" && mv -f "${tmp}" "${dst}/${id}.jsonl"; }; then
+    [[ -n ${tmp} ]] && rm -f "${tmp}"
+    die "could not copy session ${id} into $(home_label "${home}/")"
+  fi
+  printf 'claude-usage: carried session %s from %s\n' "${id:0:8}" "$(home_label "${src}")" >&2
+}
+
+# The session must exit before the printed line runs: run copies it at launch,
+# and a session still writing would leave two copies drifting apart.
+cmd_handoff() {
+  local sid=${CLAUDE_CODE_SESSION_ID:-} key label f cwd=""
+  [[ ${sid} =~ ${SESSION_ID_RE} ]] || die "not inside a Claude Code session (CLAUDE_CODE_SESSION_ID is unset)"
+  key=$(cmd_resolve "${1:-other}") || [[ -n ${key} ]] || exit 1
+  if [[ ${key} == main ]]; then label=main; else label=$(label_for "${key}"); fi
+  # The session's own working dir, from its transcript: resume finds it there.
+  for f in "${CLAUDE_CONFIG_DIR:-${MAIN_DIR}}"/projects/*/"${sid}".jsonl; do
+    [[ -f ${f} ]] && cwd=$(jq -r 'select(type == "object" and (.cwd | type) == "string") | .cwd' "${f}" 2> /dev/null | head -1)
+  done
+  [[ -d ${cwd} ]] || cwd=$(pwd -P)
+  # =<key> is exact: a name may begin with a dash, which clu reads as an option.
+  printf '%s: %s\n/exit here, then run:\n  cd %q && clu =%s --resume %s\n' \
+    "${label}" "$(describe "${label}")" "${cwd}" "${key}" "${sid}"
+}
+
 # Starts claude on one account. The choice holds for that process only: the
 # config dir, and the token for a token account, are exported to the exec'd
 # claude and to nothing else.
@@ -2063,7 +2173,8 @@ cmd_run() {
   fi
   ((rc == 1)) && what="${what}; nothing has headroom, this one frees up first"
   printf 'claude-usage: %s — %s\n' "${label}" "${what}" >&2
-  exec claude "$@"
+  carry_session "${dir:-${MAIN_DIR}}" "$@"
+  exec claude ${RUN_ARGS[@]+"${RUN_ARGS[@]}"}
 }
 
 spawn_refresh_if_stale() { (($(snapshot_age) > TTL)) && spawn_refresh; return 0; }
@@ -2075,6 +2186,7 @@ case "${1:-table}" in
   best)       cmd_best ;;
   statusline) cmd_statusline ;;
   run)        shift; cmd_run "$@" ;;
+  handoff)    shift; cmd_handoff "$@" ;;
   resolve)    shift; cmd_resolve "$@" ;;
   prepare)    shift; cmd_prepare "$@" ;;
   hold)       shift; cmd_reserve hold "$@" ;;
