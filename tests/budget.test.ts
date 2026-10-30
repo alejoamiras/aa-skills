@@ -9,7 +9,7 @@ afterAll(() => rmSync(T, { recursive: true, force: true }));
 const record = (b: Partial<Budget> = {}): Budget => ({ files: {}, functions: {}, duplicates: {}, ...b });
 const bash = (args: string[], stdin = "") => Bun.spawnSync(["bash", ...args], { stdin: Buffer.from(stdin) });
 
-// Braces that are not syntax; b() sits in a heredoc and c() in an awk program, so bash defines a, d, e and f only.
+// Braces that are not syntax; b() sits in a heredoc and c() in an awk program, so bash defines a, d, e, f and g only.
 const TRICKY = `a() {
   echo "}" '}' $'\\'}' "$(printf '%s' "}")" \`echo }\` # a } in a comment
   x=\${y%%) }}; echo \${#x} $# "\${x:-"}"}"; a[1<<2]=x
@@ -31,22 +31,24 @@ d ( ) { :; }; e()
   [[ $x == {a,b} ]] && { echo; }
 }
 if true; then f() { :; }; fi
+! g ( ) { :; }; while false; do :; done; a[i]=1; declare -A m; m["]"]=2
 `;
 
 test("isShell: a .sh name or a sh-family shebang, nothing else", () => {
-  for (const s of ["#!/usr/bin/env bash", "#!/bin/sh -e", "#!/usr/bin/env -S dash -e", "#!/usr/bin/env -S A=1 -u B bash"]) expect(isShell("bin/x", `${s}\n`)).toBe(true);
+  for (const s of ["#!/usr/bin/env bash", "#!/bin/sh -e", "#!/usr/bin/env -S dash -e", "#!/usr/bin/env -S A=1 -u B bash", "#!/usr/bin/env -Sbash", "#!/usr/bin/env --split-string=bash"]) expect(isShell("bin/x", `${s}\n`)).toBe(true);
   for (const s of ["#!/usr/bin/env zsh", "#!/usr/bin/env bun", "#!/usr/bin/env node --x-sh", "echo\n#!/bin/sh"]) expect(isShell("bin/x", `${s}\n`)).toBe(false);
   expect(isShell("lib/x.sh", "")).toBe(true);
-  expect(isShell("bin/x.md", "#!/bin/bash\n")).toBe(false);
+  expect(isShell("bin/x.md", "#!/bin/bash\n")).toBe(true);
 });
 
 test("functions: the definitions bash sees, past quotes, expansions, subscripts, heredocs, comments and arithmetic", () => {
-  expect(bash(["-c", `${TRICKY}declare -F`]).stdout.toString()).toBe("declare -f a\ndeclare -f d\ndeclare -f e\ndeclare -f f\n");
+  expect(bash(["-c", `${TRICKY}declare -F`]).stdout.toString()).toBe("declare -f a\ndeclare -f d\ndeclare -f e\ndeclare -f f\ndeclare -f g\n");
   expect(functions(TRICKY)).toEqual([
     { name: "a", line: 1, lines: 16 },
     { name: "d", line: 17, lines: 1 },
     { name: "e", line: 17, lines: 4 },
     { name: "f", line: 21, lines: 1 },
+    { name: "g", line: 22, lines: 1 },
   ]);
   expect(functions('echo "$(( $(h() { :; }; h) ))"\n')).toEqual([{ name: "h", line: 1, lines: 1 }]);
 });
@@ -118,7 +120,7 @@ test("raised: an entry the base record lacks or holds lower fails; lowering or d
   ]);
 });
 
-test("run: tracked and untracked shell files but no symlink or ignored file; --write banks a shrink; --base catches a raise", () => {
+test("run: tracked and untracked shell files, no symlink or ignored one; --write banks a shrink; --base and a bad record fail", () => {
   const dir = join(T, "repo");
   expect(Bun.spawnSync(["git", "init", "-q", dir]).exitCode).toBe(0);
   writeFileSync(join(dir, "a.sh"), "true\n".repeat(900));
@@ -144,4 +146,6 @@ test("run: tracked and untracked shell files but no symlink or ignored file; --w
   expect(run(dir, rec, "check").code).toBe(0);
   expect(run(dir, rec, "check", "HEAD").out[0]).toBe("a.sh: record raised from 900 to 960 lines");
   expect(() => run(dir, rec, "check", "nope")).toThrow(/no such commit/);
+  writeFileSync(rec, JSON.stringify(record({ files: { "a.sh": "disabled" as unknown as number } })));
+  expect(() => run(dir, rec, "check")).toThrow(/whole number/);
 });

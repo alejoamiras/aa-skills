@@ -66,7 +66,7 @@ Every PR runs one workflow per area. Each skips its jobs when the PR touches non
 
 | Workflow | Runs | Triggered by |
 |---|---|---|
-| `shell` | shellcheck at warning severity over every shell file, the size budgets, and a check that every smoke and bun test runs in some workflow | anything but Markdown |
+| `shell` | shellcheck at warning severity over every shell file, the size budgets, and a check that every smoke and bun test runs in some workflow | any change (a shell file is known by its shebang, whatever its name) |
 | `actionlint` | actionlint | `.github/` |
 | `gitleaks` | secret scan over full history | every PR, and pushes to `main` |
 | `agent-worktree`, `claude-usage`, `crew`, `keyed`, `start-orchy` | that area's smokes, plus `start-orchy`'s bun test | that area's files |

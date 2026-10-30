@@ -24,12 +24,10 @@ jobs:
         if: github.event_name != 'workflow_dispatch'
         id: filter
         with:
-          # checks/budget.ts finds shell files by shebang too and never in Markdown, so any other path may be one.
-          predicate-quantifier: every
+          # checks/budget.ts finds shell files by shebang as well as by name, so a change to any path may be one.
           filters: |
             relevant:
               - '**'
-              - '!**/*.md'
       - name: Override for manual dispatch
         if: github.event_name == 'workflow_dispatch'
         id: override

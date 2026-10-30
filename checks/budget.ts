@@ -20,11 +20,10 @@ export type Fn = { name: string; line: number; lines: number };
 const dict = <T>() => Object.create(null) as Record<string, T>;
 const own = <T>(o: Record<string, T> | undefined, k: string): T | undefined => (o && Object.hasOwn(o, k) ? o[k] : undefined);
 
-// Markdown is never shell, which lets the shell workflow's path filter skip Markdown-only changes.
 export function isShell(path: string, text: string): boolean {
-  if (path.endsWith(".md")) return false;
   if (/\.(sh|bash)$/.test(path)) return true;
-  const [cmd, ...args] = /^#!(.*)/.exec(text.split("\n", 1)[0])?.[1].trim().split(/\s+/) ?? [];
+  const [cmd, ...words] = /^#!(.*)/.exec(text.split("\n", 1)[0])?.[1].trim().split(/\s+/) ?? [];
+  const args = words.map((a) => a.replace(/^(-S|--split-string=)(?=.)/, ""));
   let prog = cmd;
   if (cmd?.endsWith("/env")) {
     prog = undefined;
@@ -98,8 +97,8 @@ export function codeLines(text: string): string[] {
       if (s.startsWith("$'", i)) { push("ansi", "$'"); continue; }
       if (s.startsWith("((", i)) { push("arith", "  ", false); continue; }
       if (s.startsWith("<<<", i)) { emit("   "); continue; }
-      const sub = c === "[" && /\w/.test(s[i - 1] ?? "") ? s.indexOf("]", i) : -1;
-      if (sub > 0) { emit(`[${" ".repeat(sub - i - 1)}]`); continue; }   // a[1<<2]=x: an array subscript, not a heredoc
+      const sub = /\w/.test(s[i - 1] ?? "") ? /^\[[^\]$`'"\\]*\]/.exec(s.slice(i)) : null;
+      if (sub) { emit(`[${" ".repeat(sub[0].length - 2)}]`); continue; }   // a[1<<2]=x: an array subscript, not a heredoc
       const h = HEREDOC.exec(s.slice(i));
       if (h) {
         heredocs.push({ word: h[2].replace(/'([^']*)'|"([^"]*)"|\\(.)/g, "$1$2$3"), strip: h[1] === "-", line: n + 1 });
@@ -120,7 +119,7 @@ export function codeLines(text: string): string[] {
   return lines;
 }
 
-const HEADER = /(?:^|[;&|(){}]|\b(?:then|do|else)(?=[ \t]))[ \t]*(?:function[ \t]+([A-Za-z_][\w:.-]*)(?:[ \t]*\([ \t]*\))?|([A-Za-z_][\w:.-]*)[ \t]*\([ \t]*\))/gm;
+const HEADER = /(?:^|[;&|(){}]|(?:\b(?:if|then|elif|else|while|until|do|time)|!)(?=[ \t]))[ \t]*(?:function[ \t]+([A-Za-z_][\w:.-]*)(?:[ \t]*\([ \t]*\))?|([A-Za-z_][\w:.-]*)[ \t]*\([ \t]*\))/gm;
 const OPENS_AFTER = /(?:^|[;&|(){}!]|\b(?:if|then|else|elif|do|while|until|time))$/;
 const CLOSES_AFTER = /(?:^|[;&)}])$/;
 
@@ -259,7 +258,16 @@ export function shellSources(root: string): Record<string, string> {
   return out;
 }
 
-const parse = (json: string): Budget => ({ files: {}, functions: {}, duplicates: {}, ...JSON.parse(json) });
+// A record whose shape is off fails here: a string or null budget would compare false against every length.
+function parse(json: string): Budget {
+  const b: Budget = { files: {}, functions: {}, duplicates: {}, ...JSON.parse(json) };
+  const len = (n: unknown) => Number.isSafeInteger(n) && (n as number) >= 0;
+  const names = (v: unknown) => Array.isArray(v) && v.every((p) => typeof p === "string");
+  const ok = Object.values(b.files).every(len) && Object.values(b.functions).every((f) => typeof f === "object" && f !== null && Object.values(f).every(len))
+    && Object.values(b.duplicates).every(names);
+  if (!ok) throw new Error("budget record: every budget must be a whole number of lines, every duplicate a list of paths");
+  return b;
+}
 
 // The record as committed at <rev>, or undefined when that commit has none; a <rev> git cannot resolve throws.
 function recordAt(root: string, rev: string, path: string): Budget | undefined {
