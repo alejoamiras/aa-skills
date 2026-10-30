@@ -273,11 +273,17 @@ t "carry: the arguments reach claude unchanged" grep -q "^dir=$Z .*argv=--danger
 echo newer-in-z >> "$Z/projects/$PK/$SID.jsonl"; touch -t 202001010000 "$A/projects/$PK/$SID.jsonl"
 (cd "$S/proj" && clu soon --resume "$SID" 2> /dev/null)
 t "carry: a newer copy already on the account is never overwritten" grep -qx newer-in-z "$Z/projects/$PK/$SID.jsonl"
-touch -t 201901010000 "$Z/projects/$PK/$SID.jsonl"; echo '{}' > "$A/projects/$PK/$SID2.jsonl"
+echo diverged > "$A/projects/$PK/$SID.jsonl"
+(cd "$S/proj" && clu soon --resume "$SID" 2> /dev/null)
+t "carry: a copy with turns the newer one lacks is kept" grep -qx newer-in-z "$Z/projects/$PK/$SID.jsonl"
+(cd "$S/proj" && clu soon -p -- --continue 2> /dev/null)
+t "carry: arguments after -- are never read as flags" grep -q "^dir=$Z .*argv=--dangerously-skip-permissions -p -- --continue\$" <(last)
+touch -t 201901010000 "$Z/projects/$PK/$SID.jsonl" "$A/projects/$PK/$SID.jsonl"; echo '{}' > "$A/projects/$PK/$SID2.jsonl"
 (cd "$S/proj" && clu soon -c -p go 2> /dev/null)
 t "carry: --continue resumes this folder's newest session from any account" sh -c 'grep -q "^dir=$1 .*argv=--dangerously-skip-permissions --resume $2 -p go\$" "$3" && test -f "$1/projects/$4/$2.jsonl"' _ "$Z" "$SID2" <(last) "$PK"
-out=$(cd "$S/proj" && CLAUDE_CODE_SESSION_ID=$SID CLAUDE_CONFIG_DIR="$A" "$CU" handoff zzz-soon 2> /dev/null)
-t "handoff: prints the line that resumes this session there" grep -qF "cd $S/proj && clu zzz-soon --resume $SID" <<< "$out"
+echo '{"type":"x"}'$'\n''{"cwd":"'"$S/proj"'"}' > "$A/projects/$PK/$SID.jsonl"
+out=$(cd "$S" && CLAUDE_CODE_SESSION_ID=$SID CLAUDE_CONFIG_DIR="$A" "$CU" handoff zzz-soon 2> /dev/null)
+t "handoff: prints the line that resumes this session there, from its own folder" grep -qF "cd $S/proj && clu =zzz-soon --resume $SID" <<< "$out"
 tn "handoff: refuses outside a session" env -u CLAUDE_CODE_SESSION_ID "$CU" handoff zzz-soon
 
 # --- ranking, rename, expiry --------------------------------------------------
