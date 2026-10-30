@@ -250,14 +250,16 @@ t "stack: a skill gone from the slot is pruned" test ! -L "$Z/skills/beta"
 
 # --- name resolution and clu ---------------------------------------------------
 clu soon -p a 2> /dev/null
-t "resolve: a unique part of a name" grep -q "^dir=$Z .*argv=-p a\$" <(last)
+t "resolve: a unique part of a name" grep -q "^dir=$Z .*argv=--dangerously-skip-permissions -p a\$" <(last)
 clu tok > /dev/null 2> "$S/amb.err"; rc=$?
 t "resolve: ambiguous lists the candidates and fails" sh -c '[ "$1" -ne 0 ] && grep -q "tok-proton" "$2" && grep -q "tok-two" "$2"' _ "$rc" "$S/amb.err"
 tn "resolve: no match fails" clu nobody -p x
 CLAUDE_USAGE_MODEL=sonnet clu -p "say ok" 2> /dev/null
-t "clu: a leading option means best + passthrough" grep -q "^dir=$Z .*argv=-p say ok\$" <(last)
+t "clu: a leading option means best + passthrough" grep -q "^dir=$Z .*argv=--dangerously-skip-permissions -p say ok\$" <(last)
 CLAUDE_USAGE_MODEL=sonnet clu -- hello 2> /dev/null
-t "clu: -- means best, the rest to claude" grep -q "^dir=$Z .*argv=hello\$" <(last)
+t "clu: -- means best, the rest to claude" grep -q "^dir=$Z .*argv=--dangerously-skip-permissions hello\$" <(last)
+clu soon --permission-mode plan -p b 2> /dev/null
+t "clu: a permission mode of your own drops the bypass" grep -q "^dir=$Z .*argv=--permission-mode plan -p b\$" <(last)
 
 # --- ranking, rename, expiry --------------------------------------------------
 touch "$A/spent" "$Z/spent"

@@ -31,10 +31,12 @@
 #   claude-usage run [name|best] [claude args…]
 #                                start claude on that account (default: best);
 #                                any unique part of a name will do. `clu` is
-#                                shorthand. Links this machine's ~/.claude stack
-#                                (CLAUDE.md, AGENTS.md, statusline.sh,
-#                                settings.json, plugins, skills) into the
-#                                account first, and marks first-run onboarding
+#                                shorthand that also adds
+#                                --dangerously-skip-permissions unless the args
+#                                set a permission mode. Links this machine's
+#                                ~/.claude stack (CLAUDE.md, AGENTS.md,
+#                                statusline.sh, settings.json, plugins, skills)
+#                                into the account first, and marks first-run onboarding
 #                                done (needs jq; skipped while the account runs)
 #   claude-usage add <name>      store a `claude setup-token` token (pasted
 #                                hidden, or piped on stdin — never an argument)
