@@ -261,6 +261,25 @@ t "clu: -- means best, the rest to claude" grep -q "^dir=$Z .*argv=--dangerously
 clu soon --permission-mode plan -p b 2> /dev/null
 t "clu: a permission mode of your own drops the bypass" grep -q "^dir=$Z .*argv=--permission-mode plan -p b\$" <(last)
 
+# --- session carry and handoff ------------------------------------------------
+SID=11111111-2222-4333-8444-555555555555 SID2=66666666-7777-4888-9999-000000000000
+mkdir -p "$S/proj"; PK=$(cd "$S/proj" && pwd -P); PK=${PK//[^A-Za-z0-9]/-}
+mkdir -p "$A/projects/$PK/$SID/subagents"; echo a1 > "$A/projects/$PK/$SID/subagents/s.jsonl"
+echo '{"cwd":"'"$S/proj"'"}' > "$A/projects/$PK/$SID.jsonl"
+(cd "$S/proj" && clu soon --resume "$SID" 2> /dev/null)
+t "carry: --resume copies the session in from the account that holds it" cmp -s "$A/projects/$PK/$SID.jsonl" "$Z/projects/$PK/$SID.jsonl"
+t "carry: its sidecar dir comes along" grep -qx a1 "$Z/projects/$PK/$SID/subagents/s.jsonl"
+t "carry: the arguments reach claude unchanged" grep -q "^dir=$Z .*argv=--dangerously-skip-permissions --resume $SID\$" <(last)
+echo newer-in-z >> "$Z/projects/$PK/$SID.jsonl"; touch -t 202001010000 "$A/projects/$PK/$SID.jsonl"
+(cd "$S/proj" && clu soon --resume "$SID" 2> /dev/null)
+t "carry: a newer copy already on the account is never overwritten" grep -qx newer-in-z "$Z/projects/$PK/$SID.jsonl"
+touch -t 201901010000 "$Z/projects/$PK/$SID.jsonl"; echo '{}' > "$A/projects/$PK/$SID2.jsonl"
+(cd "$S/proj" && clu soon -c -p go 2> /dev/null)
+t "carry: --continue resumes this folder's newest session from any account" sh -c 'grep -q "^dir=$1 .*argv=--dangerously-skip-permissions --resume $2 -p go\$" "$3" && test -f "$1/projects/$4/$2.jsonl"' _ "$Z" "$SID2" <(last) "$PK"
+out=$(cd "$S/proj" && CLAUDE_CODE_SESSION_ID=$SID CLAUDE_CONFIG_DIR="$A" "$CU" handoff zzz-soon 2> /dev/null)
+t "handoff: prints the line that resumes this session there" grep -qF "cd $S/proj && clu zzz-soon --resume $SID" <<< "$out"
+tn "handoff: refuses outside a session" env -u CLAUDE_CODE_SESSION_ID "$CU" handoff zzz-soon
+
 # --- ranking, rename, expiry --------------------------------------------------
 touch "$A/spent" "$Z/spent"
 "$CU" refresh
