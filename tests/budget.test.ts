@@ -31,7 +31,7 @@ d ( ) { :; }; e()
   [[ $x == {a,b} ]] && { echo; }
 }
 if true; then f() { :; }; fi
-! g ( ) { :; }; while false; do :; done; a[i]=1; declare -A m; m["]"]=2
+! g ( ) { :; }; while false; do :; done; a[i]=1; a[1<<$#]=2; declare -A m; m["]"]=3
 `;
 
 test("isShell: a .sh name or a sh-family shebang, nothing else", () => {

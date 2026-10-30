@@ -39,7 +39,7 @@ function lineCount(text: string): number {
   return text === "" ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
 }
 
-type Frame = { k: "sub" | "bt" | "dq" | "param" | "sq" | "ansi" | "arith"; depth: number; word: boolean; inDq: boolean; line: number };
+type Frame = { k: "sub" | "bt" | "dq" | "param" | "sq" | "ansi" | "arith" | "index"; depth: number; word: boolean; inDq: boolean; line: number };
 const HEREDOC = /^<<(-?)[ \t]*((?:'[^']*'|"[^"]*"|\\.|[^\s;&|<>()'"`\\])+)/;
 
 // The text with only shell syntax left, line for line: comments cut, quoted text, parameter expansions and
@@ -57,7 +57,7 @@ export function codeLines(text: string): string[] {
     }
     let o = "";
     let i = 0;
-    const emit = (out: string, n = out.length) => { o += out; i += n; };
+    const emit = (out: string) => { o += out; i += out.length; };
     const push = (k: Frame["k"], out: string, word = true) => {
       stack.push({ k, depth: 0, word, inDq: stack.at(-1)?.k === "dq", line: n + 1 });
       emit(out);
@@ -77,6 +77,12 @@ export function codeLines(text: string): string[] {
       if (s.startsWith("$(", i)) { push("sub", " ;"); continue; }
       if (s.startsWith("${", i)) { push("param", "$ "); continue; }
       if (c === "`") { if (k === "bt") { stack.pop(); emit("x"); } else push("bt", ";"); continue; }
+      if (k === "index") {
+        if (c === "]") { stack.pop(); emit("]"); }
+        else if (c === '"' || c === "'") push(c === '"' ? "dq" : "sq", c);
+        else emit(" ");
+        continue;
+      }
       if (k === "arith" && top) {
         if (c === "(") top.depth++;
         else if (c === ")" && top.depth > 0) top.depth--;
@@ -97,8 +103,7 @@ export function codeLines(text: string): string[] {
       if (s.startsWith("$'", i)) { push("ansi", "$'"); continue; }
       if (s.startsWith("((", i)) { push("arith", "  ", false); continue; }
       if (s.startsWith("<<<", i)) { emit("   "); continue; }
-      const sub = /\w/.test(s[i - 1] ?? "") ? /^\[[^\]$`'"\\]*\]/.exec(s.slice(i)) : null;
-      if (sub) { emit(`[${" ".repeat(sub[0].length - 2)}]`); continue; }   // a[1<<2]=x: an array subscript, not a heredoc
+      if (c === "[" && /\w/.test(s[i - 1] ?? "")) { push("index", "["); continue; }   // a[1<<$n]=x: arithmetic, not a heredoc
       const h = HEREDOC.exec(s.slice(i));
       if (h) {
         heredocs.push({ word: h[2].replace(/'([^']*)'|"([^"]*)"|\\(.)/g, "$1$2$3"), strip: h[1] === "-", line: n + 1 });
@@ -112,6 +117,7 @@ export function codeLines(text: string): string[] {
       }
       emit(c);
     }
+    if (stack.at(-1)?.k === "index") stack.pop();   // a lone "[" after a word is a glob character, not a subscript
     return o;
   });
   if (heredocs.length) throw new Error(`line ${heredocs[0].line}: a heredoc never reaches its "${heredocs[0].word}" line`);
@@ -258,7 +264,7 @@ export function shellSources(root: string): Record<string, string> {
   return out;
 }
 
-// A record whose shape is off fails here: a string or null budget would compare false against every length.
+// Budgets must be whole numbers: a string would coerce to NaN and pass every comparison.
 function parse(json: string): Budget {
   const b: Budget = { files: {}, functions: {}, duplicates: {}, ...JSON.parse(json) };
   const len = (n: unknown) => Number.isSafeInteger(n) && (n as number) >= 0;
