@@ -2085,6 +2085,7 @@ carry_session() {
   src=$(newest_of "${files[@]}") || return 0
   [[ ${src} == "${home}"/* ]] && return 0
   id=$(basename "${src}" .jsonl)
+  ((at >= 0)) && RUN_ARGS=("${RUN_ARGS[@]:0:at}" --resume "${id}" "${RUN_ARGS[@]:at+1}")
   dst="${home}/projects/$(basename "$(dirname "${src}")")"
   if [[ -f ${dst}/${id}.jsonl ]] && ! head -c "$(wc -c < "${dst}/${id}.jsonl")" "${src}" | cmp -s - "${dst}/${id}.jsonl"; then
     printf 'claude-usage: kept session %s as it is here: it has turns the newer copy on %s lacks\n' \
@@ -2097,7 +2098,6 @@ carry_session() {
     [[ -n ${tmp} ]] && rm -f "${tmp}"
     die "could not copy session ${id} into $(home_label "${home}/")"
   fi
-  ((at >= 0)) && RUN_ARGS=("${RUN_ARGS[@]:0:at}" --resume "${id}" "${RUN_ARGS[@]:at+1}")
   printf 'claude-usage: carried session %s from %s\n' "${id:0:8}" "$(home_label "${src}")" >&2
 }
 
