@@ -2,7 +2,7 @@
 # Requests: what waits on the owner as a typed question (requests.ts holds the format). They sit beside the ask ledger,
 # not in $H: a lead writes anywhere in $H, and a request planted there could be shown, answered and acted on.
 # Lock order: requests.lock (fd 5), then the seat's takeover lock (fd 4), then the waiting lock (fd 8).
-RQ="${LEDGER%.jsonl}.requests"
+RQ="${LEDGER%.jsonl}.requests" AN="${LEDGER%.jsonl}.answers"
 rq_dirs_ro() { # the readers' check: creates nothing; a missing folder holds no requests
   local p; for p in "$ASKS_DIR" "$RQ" "$RQ/closed"; do
     if [ -L "$p" ] || { [ -e "$p" ] && { [ ! -d "$p" ] || [ ! -O "$p" ]; }; }; then echo "refused: $p must be a directory owned by $(id -un), not a symlink" >&2; return 1; fi; done
@@ -50,12 +50,14 @@ rq_rows() { # {rows: [{id, ref, text, since}], errors: [{file, error}]} of the r
 }
 rq_holder() { local q; q=$(rq_rows 2>/dev/null) || return 1; jq -r --arg r "$1" 'first(.rows[] | select(.ref == $r) | .id) // empty' <<<"$q"; }
 rq_ref() { local q; q=$(rq_rows 2>/dev/null) || return 1; jq -r --arg i "$1" 'first(.rows[] | select(.id == $i) | .ref) // empty' <<<"$q"; }
-rq_locked() { # rq_locked <fn> <arg>...: the seat is rechecked under the takeover lock that lock and unlock take to remove a seat, so it holds until the write commits
-  ( flock -w 30 5 || { echo "refused: requests.lock is busy for 30 s" >&2; exit 1; }
-    ( flock -w 5 4 || { echo "refused: the seat's takeover lock is busy" >&2; exit 1; }
+# rq_locked <fn> <arg>...: the seat is rechecked under the takeover lock that lock and unlock take to remove a seat, so it
+# holds until the write commits; a busy lock exits RQ_BUSY (1)
+rq_locked() {
+  ( flock -w 30 5 || { echo "refused: requests.lock is busy for 30 s" >&2; exit "${RQ_BUSY:-1}"; }
+    ( flock -w 5 4 || { echo "refused: the seat's takeover lock is busy" >&2; exit "${RQ_BUSY:-1}"; }
       seat_held || exit 1; "$@" ) 4>>"$H/orchestrator.lock.takeover" ) 5>>"$RQ/requests.lock"
 }
-rq_op() { ts_run requests "$1" "$WREF" "$RQ" "${@:2}" "$(utc_now)"; }
+rq_op() { ts_run requests "$1" "$WREF" "$RQ" "$AN" "${@:2}" "$(utc_now)"; }
 # rq_waiting <fn> <arg>...: also under the waiting lock, so no waiting add or done falls between reading a ref's bare row
 # and the write that takes the ref over or gives it up
 rq_waiting() { ( flock -w 30 8 || { echo "refused: the waiting lock is busy for 30 s" >&2; exit 1; }; "$@" ) 8>>"$H/waiting.lock"; }
@@ -89,7 +91,7 @@ orchy_request() {
   sub=${1:-}; shift || true
   case "$sub" in
   list|show)
-    rq_dirs_ro || exit 1
+    rq_dirs_ro && an_dirs_ro || exit 1
     if [ "$sub" = show ]; then [ $# = 1 ] || { echo "usage: request show <rid>" >&2; exit 1; }; rq_op show "$1"; exit; fi
     all=0; js=0; for o in "$@"; do case "$o" in --all) all=1;; --json) js=1;; *) echo "usage: request list [--json] [--all]" >&2; exit 1;; esac; done
     rq_op list "$all" "$js"; exit;;

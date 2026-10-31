@@ -16,6 +16,7 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   check-private <file>...      refuse a file that copies six consecutive words of the owner's verbatim words in the ask ledger
 #   check-public [--no-sensitive] <file>   check-private, then the leak and sensitive patterns and gitleaks; any check error refuses
 #   ask add <text>               capture the owner's words verbatim; prints the new id (askN)
+#   ask add --from <aid>         an ask whose text is a taken answer's sentences, as take filed them; once per answer
 #   ask public <id> <text>       the restatement every handoff carries; ask said <id> <text>: the owner's later words, verbatim
 #   ask lane <id> <slug> <route> | done|drop|reopen <id> <note> | note <id> <text>   route or move an ask
 #   ask list [--all] [--json] | show <id>   one line per open or laned ask (every ask with --all; orchy.asks/1 with --json); one ask's fold and history
@@ -41,6 +42,13 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   request note <rid> [--re <aid>] <text> | stale <rid> <reason> | done <rid> <outcome> | withdraw <rid> <reason>
 #                                a note in its thread, or a move; done and withdraw close it into closed/
 #   request list [--json] [--all] | show <rid>   the open requests (every one with --all; orchy.requests/1 with --json); one request
+#   answer put                   the owner's answer to a request, on stdin; its verdict (orchy.answer-put/1) exits 0 whether
+#                                pending or refused, 2 when it could not run; no seat needed
+#   answer list [--json] [--all] | show <aid>   the pending answers and those of open requests (orchy.answers/1 with --json:
+#                                the owner's words, for a local reader only); text never prints a pending answer's words
+#   answer take <aid> | refuse <aid> <stale|closed|invalid|policy|withdrawn>   consume an answer once (orchy.answer-take/1):
+#                                its sentences filed in the ledger, its outcome logged in its request; exit 0 taken, 1 invalid,
+#                                4 stale or closed, 2 could not run (it stays pending)
 #   hold add <ref> <all|trunk> | done <ref> | list [--json]   pause the program for a peer or a release freeze, one hold per
 #                                waiting ref: all refuses worktrees, leads and acts and holds every merge; trunk holds trunk merges
 #   runbook add <slug> <file> | tick <slug> <n> | check <slug> | show <slug>   the owner's own steps for a release or a goal, one
@@ -106,7 +114,7 @@ for d in "${ds[@]}"; do [ ! -L "$d" ] && [ -O "$d" ] || { echo "orchy: $d must b
 f=$({ find "$H" -maxdepth 2 ! -user "$EUID"; [ $under = 0 ] || find "$CAP" -maxdepth 1 ! -user "$EUID"; } 2>/dev/null | head -1)
 [ -z "$f" ] || { echo "orchy: $f belongs to another user; refusing a home someone else could write" >&2; exit 1; }
 # Readers keep the ownership checks but create nothing, so a poller never changes the home it reads.
-ro=0; case "$cmd" in state|config|local|session-id|receipt|accounts|grants|goals) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting|hold) case "${1:-}" in list) ro=1;; esac;; request) case "${1:-}" in list|show) ro=1;; esac;; runbook) case "${1:-}" in show) ro=1;; esac;; esac
+ro=0; case "$cmd" in state|config|local|session-id|receipt|accounts|grants|goals) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting|hold) case "${1:-}" in list) ro=1;; esac;; request) case "${1:-}" in list|show) ro=1;; esac;; answer) case "${1:-}" in list|show|put) ro=1;; esac;; runbook) case "${1:-}" in show) ro=1;; esac;; esac
 if [ $ro = 0 ]; then
   mkdir -p "$H"/{briefs,prompts,reports,leads,watch,wt,scratch,inbox,page/shots,page/build}
   chmod 700 "$H"; [ $under = 1 ] && chmod 700 "$CAP"
@@ -116,6 +124,7 @@ fi
 parts=(
   accounts
   acts
+  answers
   asks
   authority
   goals
@@ -152,6 +161,7 @@ grants) orchy_grants "$@";;
 waiting) orchy_waiting "$@";;
 hold) orchy_hold "$@";;
 request) orchy_request "$@";;
+answer) orchy_answer "$@";;
 runbook) orchy_runbook "$@";;
 wt-new) orchy_wt_new "$@";;
 launch|resume) orchy_launch "$cmd" "$@";;
