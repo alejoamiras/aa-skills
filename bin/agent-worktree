@@ -45,12 +45,19 @@ usage() {
 
 # --- manifest primitives -----------------------------------------------------
 
+# Create a lock dir, failing if it exists. uutils mkdir 0.10.0 (Ubuntu 26.04)
+# reports success to both sides of a creation race; perl's mkdir is one
+# mkdir(2), and BSD and GNU mkdir(1) are already atomic.
+claim_lock_dir() {
+  if [ -x /usr/bin/perl ]; then /usr/bin/perl -e 'mkdir $ARGV[0] or exit 1' -- "$1"; else mkdir "$1"; fi
+}
+
 # mkdir-based lock with dead-owner reclaim: the holder records "pid host" in
 # $LOCK_DIR/owner; waiters reclaim only locks whose local owner is gone.
 lock() {
   mkdir -p "$AGENTS_DIR"
   local n=0 opid ohost
-  until mkdir "$LOCK_DIR" 2>/dev/null; do
+  until claim_lock_dir "$LOCK_DIR" 2>/dev/null; do
     if [ -f "$LOCK_DIR/owner" ]; then
       read -r opid ohost < "$LOCK_DIR/owner" 2>/dev/null || opid=""
       if [ "$ohost" = "$(hostname)" ] && [ -n "$opid" ] && ! kill -0 "$opid" 2>/dev/null; then
