@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Process identity, the event log and the name checks every part shares.
+# Process identity, the event log, the name checks every part shares, and the runner for the TypeScript checks.
 utc_now() { date -u +%FT%TZ; }
 ev() { # ev <kind> [k=v | k:=<json>]...: one orchy.event/1 line in $H/events.jsonl; ids only, never text, account names or paths
   local kind=$1 a args=(); shift
@@ -32,8 +32,8 @@ session_pid() { # the orchestrator session: $CLAUDE_PID while it is a live claud
   p=$PPID; while [ "$p" -gt 1 ] 2>/dev/null; do c=$(ps -o comm= -p "$p" 2>/dev/null); [ "$c" = claude ] && { echo "$p"; return; }; p=$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null || echo 1); done; echo "$PPID"
 }
 # ts_run <module> <arg>...: orchy/<module>.ts under bun, from its own directory, so no bunfig.toml or .env of the caller's
-# repo reaches it. Never on the path of state, ask list or receipt: those viewers run where bun is not installed.
-ts_run() {
-  (cd "$SCRIPTS/orchy" && exec bun "./$1.ts" "${@:2}")
-}
-abs_path() { case $1 in /* | "") printf '%s' "$1";; *) printf '%s/%s' "$(pwd -P)" "$1";; esac; }   # ts_run changes directory
+# repo reaches it; the arguments go NUL-separated on stdin (args.ts). Never on the path of state, ask list or receipt:
+# those viewers run where bun is not installed.
+ts_run() { printf '%s\0' "${@:2}" | (cd "$SCRIPTS/orchy" && exec bun "./$1.ts"); }
+# abs_path <var>: a relative path in var made absolute for ts_run's directory; no $(...), which drops a trailing newline
+abs_path() { local -n _p=$1; [[ -z $_p || $_p == /* ]] || _p="$PWD/$_p"; }

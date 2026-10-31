@@ -10,7 +10,7 @@ waiting_read() { # orchy.waiting/1 on stdout, a missing file as empty; a symlink
       and ([.waiting[].ref] | length == (unique | length)))
     | {schema, waiting: [.waiting[] | {ref, text, since}]}' "$WAITING" 2>/dev/null || { echo "refused: $WAITING is not orchy.waiting/1" >&2; return 1; }
 }
-waiting_text_ok() { printf '%s' "$1" | ts_run text; }   # one line of 1-160 code points; TypeScript, since jq silently replaces invalid UTF-8
+waiting_text_ok() { ts_run text "$1"; }   # one line of 1-160 code points; TypeScript, since jq silently replaces invalid UTF-8
 orchy_waiting() {
   sub=${1:-}; shift || true
   case "$sub" in

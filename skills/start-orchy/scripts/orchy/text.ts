@@ -1,5 +1,6 @@
 // A waiting record's text: one line of 1 to 160 code points. Strict UTF-8 with the BOM kept, as Python's decoder reads it.
-// Usage: bun text.ts < text   (exit 1 with the refusal on stderr)
+// Usage: ts_run text <text>   (exit 1 with the refusal on stderr)
+import { args } from "./args.ts";
 
 const span = (a: number, b: number) => Array.from({ length: b - a }, (_, i) => a + i);
 // C0, DEL and C1 controls, the line and paragraph separators, and every Bidi_Control character
@@ -21,6 +22,7 @@ export function textError(bytes: Uint8Array): string | null {
 }
 
 if (import.meta.main) {
-  const e = textError(new Uint8Array(await Bun.stdin.arrayBuffer()));
+  const [t] = await args();
+  const e = textError(t ?? new Uint8Array());
   if (e) { process.stderr.write(`${e}\n`); process.exitCode = 1; }
 }

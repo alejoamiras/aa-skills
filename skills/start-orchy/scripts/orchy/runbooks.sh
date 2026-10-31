@@ -1,7 +1,7 @@
 # shellcheck shell=bash disable=SC2016  # jq programs are single-quoted on purpose: their $vars are jq's
 # Runbooks: the owner's own steps for a release or a goal, kept as one waiting record that names the next step.
 RUNBOOKS="$H/runbooks"; RB_LOCK="$H/runbooks.lock"
-rb_parse() { ts_run runbook "$(abs_path "$1")" "${@:2}"; }   # rb_parse <file> [--new]: the steps as JSON [[done, text, proof kind, proof arg], ...]; refuses a line outside the format
+rb_parse() { local f=$1; abs_path f; ts_run runbook "$f" "${@:2}"; }   # rb_parse <file> [--new]: the steps as JSON [[done, text, proof kind, proof arg], ...]; refuses a line outside the format
 rb_line() { jq -r '.[] | "- [\(if .[0] then "x" else " " end)] \(.[1])\(if .[2] != "" then " (proof: \(.[2]) \(.[3]))" else "" end)"'; }
 orchy_runbook() {
   sub=${1:-}; s=${2:-}; f="$RUNBOOKS/$s.md"
