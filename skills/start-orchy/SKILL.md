@@ -96,7 +96,7 @@ Default when unsure: a lane. Withdrawing a laned ask first steers or stops its l
 | Waiting on the owner | Request |
 |---|---|
 | An unsigned page | sign on `page:N`, `blocks` the lanes it decides |
-| An ask held on a question that is not owner-level | pick on `ask:askN` when there are options, else reply |
+| An ask held on a question that is neither owner-level nor its wording | pick on `ask:askN` when there are options, else reply |
 | A PR a watcher hands back (`MISSING REQUIRED CHECK`, `NOT MERGED`, `state unreadable`, a `REFUSED` for a fork, an app's PR or a head that is not the lane's branch, or a `TIMEOUT` whose log carries `MISSING`) | done on `pr:N`, its steps what to fix; closed when the PR merges or closes or its watcher is re-armed |
 | A choice about a PR (a test path) | pick, the PR in `blocks` |
 | A lane parked after a second `ARC_FAILED` | pick on `lane:<slug>`: retry with a named change, narrow the scope, park |
@@ -109,7 +109,7 @@ Everything else stays a bare record, `ORCHY waiting add <ref> <text>` (one line 
 - **Pick**: record the choice on its issue, when it has one, as its public restatement (`check-public`, `--body-file`). When the request's ask is held for this question, `ask note askN "answered: <rid> <option id>"` first, so the next handoff passes the hold. Resume, steer or route what it blocked, the pick quoted by request id, option id and option label, then `request done <rid> <option id>`. An `other` choice's text is the owner's words, in the ledger: a requirement in it becomes an ask only through `ask add --from <aid>`, then the restatement and the wording gate.
 - **Approve**: on a Go, do what it approves under its usual policy, then `request done`. Not now closes the request with the outcome `not now` and parks what it blocked; `request add` then refuses that ref on the same binding until the binding changes, or with `--again` on the owner's word.
 - **Done**: resume what it blocked (re-arm the watcher after a fresh `scan`, the release lane's next leg, `ask note askN "answered: done"` for an ask held for this step), then `request done`. Where GitHub can prove the step, its check runs anyway.
-- **Reply**: act within the request's scope or answer in its thread; either way `request note <rid> --re <aid> <text>` says what was done or answers, after `ask note askN "answered: <rid>"` when it answers the ask's held question. Then `request done`, or leave it open when the reply asks a question back. Every taken reply gets its `--re` note: until then `request done`, `withdraw` and a refresh refuse.
+- **Reply**: act within the request's scope or answer in its thread; either way `request note <rid> --re <aid> <text>` says what was done or answers, after `ask note askN "answered: <rid>"` when it answers the ask's held question. Then `request done` only when what the request asked is resolved; otherwise it stays open after the `--re` note. Every taken reply gets its `--re` note: until then `request done`, `withdraw` and a refresh refuse.
 - A Sign request is signed on the Artifact (Phase 3); a sign answer is refused.
 - A refusal (`verdict` `refused`): for `reason` `stale`, rescan if needed, `request add` the new content, and one tick line says why the request changed; for `invalid`, `request note` the reason. Either way, read the filed text.
 
