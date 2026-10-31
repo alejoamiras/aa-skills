@@ -244,6 +244,25 @@ mkdir -p "$AGENTS_DIR/.workspaces.lock"
 echo "$$ not-this-host" > "$AGENTS_DIR/.workspaces.lock/owner"
 tn "lock: foreign-host lock times out (~10s)" "$AW" list
 rm -rf "$AGENTS_DIR/.workspaces.lock"
+# The hostname stub hands the dead owner's lock to a live holder between the waiter's read and its
+# liveness check, then holds the waiter at its next call while the lock is sampled.
+LA="$S/agents-lk"; LD="$LA/.workspaces.lock"; HN="$S/hn"; mkdir -p "$LA" "$HN" "$S/lk-wt"
+printf '| slug | repo | branch | plan | status | updated | path |\n|---|---|---|---|---|---|---|\n| lk | r | worktree-lk | p | before | t | %s |\n' "$S/lk-wt" > "$LA/workspaces.md"
+cat > "$HN/hostname" <<'STUB'
+#!/bin/sh
+n=$(($(cat "$HN/n" 2>/dev/null || echo 0) + 1)); echo "$n" > "$HN/n"
+[ "$n" = 1 ] && echo "$HN_LIVE smokehost" > "$HN_LD/owner"
+if [ "$n" = 2 ]; then : > "$HN/ready"; while [ ! -e "$HN/go" ]; do sleep 0.05; done; fi
+echo smokehost
+STUB
+chmod +x "$HN/hostname"; sleep 300 & LIVE=$!
+mkdir "$LD"; echo "4194000 smokehost" > "$LD/owner"
+env PATH="$HN:$PATH" AGENTS_DIR="$LA" HN="$HN" HN_LIVE="$LIVE" HN_LD="$LD" "$AW" status lk after > /dev/null 2>&1 & W=$!
+for _ in $(seq 100); do [ -e "$HN/ready" ] && break; sleep 0.1; done
+held="$(cat "$LD/owner" 2>/dev/null)|$(grep -c '| after |' "$LA/workspaces.md")"
+kill "$LIVE"; wait "$LIVE" 2>/dev/null; : > "$HN/go"; wait "$W"; rc=$?
+t "lock: a live holder's lock read as dead is never taken (no lost update), then taken once dead" \
+  test "$held|$rc|$(grep -c '| after |' "$LA/workspaces.md")" = "$LIVE smokehost|0|0|1"
 
 echo ""
 if [ "$FAIL" = 0 ]; then echo "ALL SMOKE TESTS PASSED"; else echo "SMOKE FAILURES PRESENT"; exit 1; fi
