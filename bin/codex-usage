@@ -822,7 +822,7 @@ cmd_add() {
   # authenticate into the home this one then deletes on its own failure.
   mkdir -p "${ACCOUNTS_ROOT}"
   ADD_GUARD="${ACCOUNTS_ROOT}/.adding-${key}"   # global: the EXIT trap outlives this function's locals
-  mkdir "${ADD_GUARD}" 2> /dev/null || die "another add for ${name} is in progress (stale? rm -r ${ADD_GUARD})"
+  claim_dir "${ADD_GUARD}" 2> /dev/null || die "another add for ${name} is in progress (stale? rm -r ${ADD_GUARD})"
   trap 'rm -rf "${ADD_GUARD}"' EXIT
   local created=""
   [[ -e ${dir} ]] || created=1
