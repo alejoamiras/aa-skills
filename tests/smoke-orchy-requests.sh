@@ -282,6 +282,10 @@ ans_dep rq2.13 '{kind: "nod", rev: "1", go: "yes", text: "a plain word on locale
 o=$(ans_run AX answer take rq2.13); [ "${o##*rc=}" = 1 ] && ans_logged rq2.13 | jq -e '.[0] | keys == ["at", "id", "reason", "state"] and .reason == "invalid"' >/dev/null || flunk "malformed metadata: $o"
 AX waiting list --json | jq -e 'any(.waiting[]; .ref == "issue:7")' >/dev/null && ans_ledger rq2.13 | jq -e '.[0] | has("id") | not' >/dev/null \
   && ! AX ask list --all --json | grep -q 'a plain word on locales' || flunk "malformed metadata: the projection, or the ledger row"
+ans_dep rq2.15 '{kind: "reply", text: "first words"}'; chmod a-w "$AQ"; o=$(ans_run AX answer take rq2.15 2>/dev/null); chmod u+w "$AQ"; [ "${o##*rc=}" = 2 ] || flunk "a stopped take: $o"
+ans_dep rq2.15 '{kind: "reply", text: "other words"}'; o=$(ans_run AX answer take rq2.15 2>/dev/null)
+[ "${o##*rc=}" = 1 ] && jq -e '.reason == "invalid" and .answer.text == "other words"' <<<"${o%rc=*}" >/dev/null && ans_ledger rq2.15 | jq -e 'length == 1 and .[0].text == "first words"' >/dev/null \
+  || flunk "a file changed after its sentences were filed: $o"
 ans_dep rq2.14 '{kind: "reply", text: "the token is \($k)"}'; ( flock 5; exec sleep 2 ) 5>>"$AQ/requests.lock" & hp=$!; sleep 0.5
 { AX answer take rq2.14 > "$T/d1.out" || true; } & d1=$!; { AX answer take rq2.14 > "$T/d2.out" || true; } & d2=$!; wait "$hp" "$d1" "$d2"
 jq -se '[.[].recovered] | sort == [false, true]' "$T/d1.out" "$T/d2.out" >/dev/null && [ ! -e "$AA/rq2.14.json" ] && ! grep -qF "$KEY" "$AA/refused/rq2.14.json" || flunk "two takes of one secret"
