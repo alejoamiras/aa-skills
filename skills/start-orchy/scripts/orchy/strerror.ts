@@ -4,7 +4,7 @@ export const STRERROR: Record<string, string> = {
   ELOOP: "Too many levels of symbolic links", ENAMETOOLONG: "File name too long", EIO: "Input/output error",
   ENXIO: "No such device or address", EMFILE: "Too many open files", ENFILE: "Too many open files in system",
   ENOMEM: "Cannot allocate memory", EPERM: "Operation not permitted", EINVAL: "Invalid argument",
-  ENOSPC: "No space left on device", EPIPE: "Broken pipe", EFBIG: "File too large", EDQUOT: "Disk quota exceeded",
+  ENOSPC: "No space left on device", EPIPE: "Broken pipe", EBADF: "Bad file descriptor", EFBIG: "File too large", EDQUOT: "Disk quota exceeded",
 };
 
 /** The last line of Python's report of a failed system call, e.g. "OSError: [Errno 28] No space left on device". */
