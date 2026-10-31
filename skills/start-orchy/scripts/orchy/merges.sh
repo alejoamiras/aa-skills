@@ -59,7 +59,8 @@ orchy_watch_merge() {
     # spliced into `--$method`, so any other value could be --admin
     method=$(cfg '.merge.method // "squash"'); case $method in squash|merge|rebase) ;; *) echo "REFUSED: merge.method must be squash, merge or rebase"; exit 4;; esac
   fi
-  rounds=$(cfg '.merge.watch_rounds // 300'); WS=${ORCHY_WATCH_SLEEP:-60}
+  rounds=$(cfg '.merge.watch_rounds // 300'); WS=${ORCHY_WATCH_SLEEP:-60}; SCANNED=$PIN
+  grace=$(cfg '.merge.check_grace_sec // 600'); [[ "$grace" =~ ^[0-9]{1,6}$ ]] || { echo "REFUSED: merge.check_grace_sec must be whole seconds"; exit 4; }
   echo "$$ $(pid_start $$)" > "$H/watch/merge-$N.pid"   # the watcher's own identity, whatever wrapper started it
   trunk_said=""
   st=$(pr_state) || { echo "REFUSED: cannot read #$N"; exit 4; }
@@ -82,7 +83,7 @@ orchy_watch_merge() {
   # the pin binds the head, not the base: the merge must land on this base or a descendant of it
   B0=$(gh api "repos/$REPO/commits/$BASE" --jq .sha 2>/dev/null) && sha_ok "$B0" || { echo "REFUSED: cannot read $BASE's head"; exit 4; }
   HS=all; [ "$BASE" = "$TRUNK" ] && HS=trunk   # a trunk hold stops only merges into the trunk
-  i=0; said_held=""; merged=0; claimed=0
+  i=0; said_held=""; merged=0; claimed=0; updated=0
   while :; do   # polling, then the merge step, which comes back here when a hold landed in between
     wm_poll
     echo "$(date -u +%H:%MZ) required ok=$ok/${#REQ[@]} report_done=$(report_done && echo yes || echo no) state: $m"
@@ -98,12 +99,13 @@ orchy_watch_merge() {
   if [ $on_trunk = 1 ]; then "$0" teardown "$LANE" 2>&1 | tail -3; else echo "archived plan not on $TRUNK yet; teardown skipped"; fi
 }
 pr_state() { gh pr view "$N" --repo "$REPO" --json state,isDraft,baseRefName,headRefOid,mergeable,mergeStateStatus --jq '"\(.state) \(.isDraft) \(.baseRefName) \(.headRefOid) \(.mergeable) \(.mergeStateStatus)"' 2>/dev/null; }
-report_done() { # the LAST marker line of the report decides; it must be exactly LEAD_DONE, with a PR line for this PR and a full-sha HEAD line equal to the pin
+report_done() { # the LAST marker line of the report decides; it must be LEAD_DONE, with a PR line for this PR and a full-sha HEAD line equal to the scanned pin
   [ -z "$ACT" ] || return 0
-  local r="$H/reports/$REPORT"; [ -f "$r" ] || return 1
-  [ "$(grep -xE 'LEAD_DONE|LEAD_BLOCKED:.*|ARC_FAILED:.*' "$r" | tail -1)" = "LEAD_DONE" ] || return 1
+  local r="$H/reports/$REPORT" last; [ -f "$r" ] || return 1
+  # the only marker lines that start LEAD_DONE are the bare word and the report's own key line
+  last=$(grep -xE "$(marker_rx "$REPORT" 'LEAD_DONE|LEAD_BLOCKED:.*|ARC_FAILED:.*')" "$r" | tail -1); [ "${last%% *}" = LEAD_DONE ] || return 1
   grep -qE "^PR #$N( |$)" "$r" || return 1
-  [ "$(grep -oE '^HEAD [0-9a-f]{40}$' "$r" | tail -1 | cut -d' ' -f2)" = "$PIN" ]
+  [ "$(grep -oE '^HEAD [0-9a-f]{40}$' "$r" | tail -1 | cut -d' ' -f2)" = "$SCANNED" ]
 }
 # An observed red trunk blocks, except for a PR that contains the red commit and passed the failed checks itself: a fix lane
 # can land, an unrelated PR cannot. Pending does not block, and nothing here proves the trunk healthy; it is re-read every round.
@@ -118,19 +120,23 @@ trunk_ok() {
   [ "$trunk_said" = "$tsha" ] || echo "$(date -u +%H:%MZ) TRUNK RED at ${tsha:0:8}: $(paste -sd, <<<"$failed"); waiting"; trunk_said=$tsha; return 1
 }
 wm_poll() { # polls until the PR may merge or the rounds run out, m holding its last merge state; every other hand-back exits
-  m=""; ok=0; missing_rounds=0; api_fail=0
+  m=""; ok=0; api_fail=0; quiet=""; said_wait=""; said_missing=""
   while [ "$i" -lt "$rounds" ]; do i=$((i+1))
     st=$(pr_state) || { api_fail=$((api_fail+1)); [ "$api_fail" = 10 ] && echo "$(date -u +%H:%MZ) API FAILURE: gh pr view failed 10 rounds running"; sleep "$WS"; continue; }; read -r state draft base head _ <<<"$st"
     [ "$state" = OPEN ] || { echo "#$N is $state; watcher stopped"; exit 4; }
-    [ "$head" = "$PIN" ] || { echo "HEAD MOVED to $head (scanned $PIN); rescan before merging"; exit 2; }
-    runs=$(checks "$head") || { api_fail=$((api_fail+1)); [ "$api_fail" = 10 ] && echo "$(date -u +%H:%MZ) API FAILURE: check-runs unreadable 10 rounds running"; sleep "$WS"; continue; }; api_fail=0; ok=0; bad=""; absent=""
+    [ "$head" = "$PIN" ] || repin "$head" || { echo "HEAD MOVED to $head (scanned $SCANNED); rescan before merging"; exit 2; }
+    runs=$(checks "$head") || { api_fail=$((api_fail+1)); [ "$api_fail" = 10 ] && echo "$(date -u +%H:%MZ) API FAILURE: check-runs unreadable 10 rounds running"; sleep "$WS"; continue; }; api_fail=0; ok=0; bad=""; absent=""; cx=""
     for name in "${REQ[@]}"; do
       line=$(awk -F'\t' -v n="$name" '$1==n' <<<"$runs" | tail -1)
-      case "$line" in "") absent="$absent $name";; *$'\t'completed$'\t'success) ok=$((ok+1));; *$'\t'completed$'\t'failure|*$'\t'completed$'\t'cancelled|*$'\t'completed$'\t'timed_out) bad="$bad $name";; esac
+      case "$line" in "") absent="$absent $name";; *$'\t'completed$'\t'success) ok=$((ok+1));; *$'\t'completed$'\t'cancelled) cx="$cx $name";; *$'\t'completed$'\t'failure|*$'\t'completed$'\t'timed_out) bad="$bad $name";; esac
     done
+    [ -n "$absent" ] || said_missing=""
+    if [ -z "$absent$cx" ]; then quiet=""; said_wait=""
+    elif [ -z "$bad" ] && ! not_started; then bad=$cx   # past the grace: absent is missing, cancelled is failed
+      [ -z "$absent" ] || [ -n "$said_missing" ] || { echo "$(date -u +%H:%MZ) MISSING REQUIRED CHECK (no run or status, nothing else running on the head for ${grace}s):$absent; a renamed check waits here until the timeout"; said_missing=1; }
+    fi
     # the table is indented: a check name is untrusted and may carry a newline, and no line of it may start a marker
     [ -n "$bad" ] && { echo "$(date -u +%H:%MZ) REQUIRED FAILED:$bad"; printf '  %s\n' "${runs//$'\n'/$'\n  '}"; exit 1; }
-    if [ -n "$absent" ]; then missing_rounds=$((missing_rounds+1)); [ "$missing_rounds" = 10 ] && echo "$(date -u +%H:%MZ) MISSING REQUIRED CHECK (no run or status after 10 rounds):$absent; a renamed check waits here until the timeout"; else missing_rounds=0; fi
     # a hold waits and never ends the watcher; an unreadable holds.json holds too
     hr=$(held "$HS") || hr="holds.json, unreadable"
     if [ -n "$hr" ]; then [ "$hr" = "$said_held" ] || echo "$(date -u +%H:%MZ) HELD: $hr; waiting"; said_held=$hr; sleep "$WS"; continue; fi
@@ -138,11 +144,52 @@ wm_poll() { # polls until the PR may merge or the rounds run out, m holding its 
     if [ "$ok" = "${#REQ[@]}" ] && report_done && trunk_ok; then
       read -r state draft base head mergeable mstate <<<"$(pr_state)"; m="$mergeable $mstate"
       [ "$m" = "MERGEABLE CLEAN" ] && break
-      # BEHIND (a strict base) never clears while the head is pinned: the base has to be merged in, and the PR rescanned
+      # BEHIND (a strict base) never clears while the head is pinned: one update per arm, then the base has to be merged in
+      [ "$state $draft $base $m $head" = "OPEN false $BASE MERGEABLE BEHIND $PIN" ] && update_branch && { sleep "$WS"; continue; }
       case "$m" in CONFLICTING*|*DIRTY) echo "$(date -u +%H:%MZ) DIRTY: $m"; exit 5;; *BEHIND) echo "$(date -u +%H:%MZ) DIRTY: $m; bring the base in first"; exit 5;; esac
     fi
     sleep "$WS"
   done
+}
+not_started() { # 0 while a required check may still start: anything else on the head queued or running, or within the grace after
+  local now why q='select(.status != "completed") | .id'; now=$(date +%s)
+  # ids, not the runs table, whose untrusted names can carry a forged row; a suite with no runs is an app that may never
+  # report, so it holds nothing, and the grace covers a real suite's first run
+  if [ -n "$(gh api "repos/$REPO/commits/$head/check-runs" --paginate --jq ".check_runs[] | $q" 2>/dev/null)" ] \
+    || [ -n "$(gh api "repos/$REPO/commits/$head/check-suites" --paginate --jq ".check_suites[] | select(.latest_check_runs_count > 0) | $q" 2>/dev/null)" ]; then
+    quiet=""; why="other checks on the head still run"
+  else
+    quiet=${quiet:-$now}; [ $((now - quiet)) -lt "$grace" ] || return 1; why="until $(date -u -d "@$((quiet + grace))" +%H:%MZ)"
+  fi
+  [ "$absent$cx|$why" = "$said_wait" ] || echo "$(date -u +%H:%MZ) waiting on required checks${absent:+ not started yet:$absent;}${cx:+ cancelled, for a newer run:$cx;} $why"
+  said_wait="$absent$cx|$why"
+}
+update_branch() { # once per arm, a lane PR only (a fork's or an app's is refused at arming): GitHub merges the base in, pinned to the head
+  local p hit=0; [ -z "$ACT" ] && [ "$updated" = 0 ] || return 1; updated=1
+  [ "$(cfg '.mode // empty')" = triage ] && { echo "REFUSED: orchy.json mode is triage; not updated"; exit 4; }
+  # shellcheck disable=SC2053  # the protected entries are globs
+  while IFS= read -r p; do [[ "$ref" == $p ]] && hit=1; done < <(cfg '(.protected // [])[]')
+  [ "$hit" = 0 ] && ref_ok "$ref" && [ "$ref" != "$TRUNK" ] && [ "$(gh api "repos/$REPO/branches/$ref" --jq .protected 2>/dev/null)" = false ] \
+    || { echo "$(date -u +%H:%MZ) not updating $ref: protected, or its protection unreadable"; return 1; }
+  # holds.lock, shared, spans the hold check and the call, as at merge time; the call runs without the descriptor
+  ( flock -s -w 300 7 || { echo "REFUSED at update time: holds.lock is busy for 300 s"; exit 4; }
+    hr=$(held "$HS") || hr="holds.json, unreadable"; [ -z "$hr" ] || exit 10
+    (exec 7>&-; timeout 120 gh api "repos/$REPO/pulls/$N/update-branch" -X PUT -f expected_head_sha="$PIN" >/dev/null 2>&1) || exit 12
+    echo "$(date -u +%H:%MZ) BEHIND: GitHub merges $BASE into $ref (once per arm); the watcher re-pins that merge" ) 7>>"$HOLDS_LOCK"
+  case $? in
+    0) ;;
+    10) updated=0;;   # a hold landed after the poll: no call was made, and polling says HELD
+    12) echo "$(date -u +%H:%MZ) update-branch refused"; return 1;;
+    *) exit 4;;
+  esac
+}
+repin() { # the one move a watcher follows, after its own update: a merge of the scanned head and a base commit, its tree their clean merge
+  local h=$1 p x more t   # FETCH_HEAD stays unwritten: another watcher's teardown reads it after its own fetch
+  [ "$updated" = 1 ] && [ "$PIN" = "$SCANNED" ] && sha_ok "$h" && timeout 120 git -C "$ROOT" fetch -q --no-write-fetch-head origin "$h" 2>/dev/null || return 1
+  read -r p x more <<<"$(git -C "$ROOT" log -1 --format=%P "$h")"; [ "$p" = "$PIN" ] && sha_ok "$x" && [ -z "$more" ] || return 1
+  case $(gh api "repos/$REPO/compare/$x...$BASE" --jq .status 2>/dev/null) in ahead|identical) ;; *) return 1;; esac
+  t=$(git -C "$ROOT" merge-tree --write-tree "$PIN" "$x" 2>/dev/null) && [ "$t" = "$(git -C "$ROOT" rev-parse "$h^{tree}")" ] || return 1
+  echo "$(date -u +%H:%MZ) re-pinned to $h: $BASE at ${x:0:8} merged into ${PIN:0:8}"; PIN=$h
 }
 wm_merge() { # up to three merge calls; 1 when a hold landed after the last poll, so polling resumes
   for try in 1 2 3; do

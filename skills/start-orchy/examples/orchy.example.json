@@ -29,7 +29,8 @@
       "quality-status",
       "e2e-status"
     ],
-    "watch_rounds": 300
+    "watch_rounds": 300,
+    "check_grace_sec": 600
   },
   "release": null,
   "labels": {

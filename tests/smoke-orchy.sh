@@ -194,10 +194,46 @@ grep -qx 'REFUSED: merge.method must be squash, merge or rebase' <<<"$o" || fail
 # a retry reads the PR again: one retargeted while "Base branch was modified" is refused, not merged into
 n=$(pm); pr9 .; echo '.baseRefName="main"' > "$MOCK_DIR/merge-race-9.jq"; o=$(wm)
 grep -q '^REFUSED at merge time: .* base=main ' <<<"$o" && [ "$(pm)" = $((n+1)) ] || fail "a retry merged into a retargeted base: $o"
-# BEHIND never clears with the head pinned: DIRTY at once, not a timeout
+# a BEHIND that the arm's one update leaves standing is DIRTY, not a timeout
 pr9 '.mergeStateStatus="BEHIND"'; rc=0; o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1) || rc=$?
 [ "$rc" = 5 ] && grep -q 'DIRTY: MERGEABLE BEHIND; bring the base in first$' <<<"$o" || fail "BEHIND (exit $rc): $o"
 printf '%s\n' "$o" > "$HF/watch/merge-9.out"; ORCHY_HOME="$HF" "$ORCHY" state | jq -e '[.watchers[] | {pr, marker}] == [{pr: 9, marker: "DIRTY"}]' >/dev/null || fail "BEHIND does not read DIRTY"
+puts() { grep -c "^PUT repos/example/app/pulls/9/update-branch .*expected_head_sha=" "$MOCK_DIR/posts.log" || true; }; [ "$(puts)" = 1 ] || fail "one arm updated #9 $(puts) times"
+# the last marker may be LEAD_DONE <lane> <arc>, the report's own key; any other tokens are no marker, so ARC_FAILED stands
+for l in "LEAD_DONE lane-8 a2" "LEAD_DONE lane-9 a3" "LEAD_DONE lane-9 a2 x" "LEAD_DONE lane-9 a2"; do mkpr "$SHA"
+  printf 'ARC_FAILED: a2 red\n%s\nPR #9 t ready checks: green\nHEAD %s\n' "$l" "$SHA" > "$ORCHY_HOME/reports/lane-9-a2.md"; o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 lane-9-a2.md - 2>&1 || true)
+  case $l in *9\ a2) grep -q '^#9 MERGED' <<<"$o" || fail "the report's own key did not end it: $o";; *) grep -q 'TIMEOUT; not merged' <<<"$o" || fail "'$l' ended a failed report: $o";; esac; done
+# a required check with no run waits while the head's other checks run (no suite without runs, no forged row) and the grace after; then MISSING
+cp "$MOCK_DIR/checks.json" "$T/checks.bak"; cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak"; jq 'del(.check_runs[] | select(.name == "e2e-status")) | .check_runs += [{id:5,name:"zz\nx\tin_progress\tnull",status:"completed",conclusion:"success"}]' "$T/checks.bak" > "$MOCK_DIR/checks.json"
+echo '{"check_suites":[{"id":1,"status":"in_progress","latest_check_runs_count":3}]}' > "$MOCK_DIR/suites.json"; mkpr "$SHA"; o=$(wm -)
+grep -qE '^[0-9:]{5}Z waiting on required checks not started yet: e2e-status; other checks on the head still run$' <<<"$o" && ! grep -q MISSING <<<"$o" || fail "a check not started yet: $o"
+echo '{"check_suites":[{"id":2,"status":"queued","latest_check_runs_count":0}]}' > "$MOCK_DIR/suites.json"; jq '.merge.check_grace_sec=1' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"; mkpr "$SHA"; o=$(wm -)
+grep -q 'not started yet: e2e-status; until ' <<<"$o" && grep -qE '^[0-9:]{5}Z MISSING REQUIRED CHECK .*: e2e-status;' <<<"$o" || fail "a check missing past the grace: $o"
+# a cancelled run is judged by the newer run that supersedes it; with none in the grace it fails as before
+jq '.check_runs += [{id:7,name:"e2e-status",status:"completed",conclusion:"cancelled"}]' "$T/checks.bak" > "$MOCK_DIR/checks.json"; cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"
+jq '.check_runs += [{id:8,name:"e2e-status",status:"completed",conclusion:"success"}]' "$MOCK_DIR/checks.json" > "$MOCK_DIR/checks.next"; rm "$MOCK_DIR/suites.json"; mkpr "$SHA"; o=$(wm -)
+grep -q 'cancelled, for a newer run: e2e-status; until ' <<<"$o" && grep -q '^#9 MERGED' <<<"$o" || fail "a cancelled run that a newer one superseded: $o"
+jq '.check_runs += [{id:7,name:"e2e-status",status:"completed",conclusion:"cancelled"}]' "$T/checks.bak" > "$MOCK_DIR/checks.json"; jq '.merge.check_grace_sec=0' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"
+mkpr "$SHA"; rc=0; o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md - 2>&1) || rc=$?; cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"; mv "$T/checks.bak" "$MOCK_DIR/checks.json"
+[ "$rc" = 1 ] && grep -q 'REQUIRED FAILED: e2e-status$' <<<"$o" || fail "a cancellation nothing superseded (exit $rc): $o"
+# BEHIND: the one update is pinned to the scanned head, and only GitHub's clean merge of it with a base commit is re-pinned
+mt() { for f in "$@"; do printf '100644 blob %s\t%s\n' "$(echo "$f" | git hash-object -w --stdin)" "$f"; done | git mktree; }
+mc() { git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit-tree "$@" -m x; }
+B0=$(git rev-parse dev); P=$(mc "$(mt a)" -p "$B0"); X=$(mc "$(mt b)" -p "$B0"); M=$(mc "$(mt a b)" -p "$P" -p "$X"); E=$(mc "$(mt a b c)" -p "$P" -p "$X")
+git push -q origin "$M:refs/smoke/m" "$E:refs/smoke/e"; printf 'LEAD_DONE\nPR #9 t ready checks: green\nHEAD %s\n' "$P" > "$ORCHY_HOME/reports/lane-9-a2.md"
+upd() { pr9 ".headRefOid=\"$P\" | .mergeStateStatus=\"BEHIND\""; printf '.headRefOid="%s" | .mergeStateStatus="CLEAN"\n' "$1" > "$MOCK_DIR/pr-9.update.jq"
+  [ -z "${2:-}" ] || echo "{\"status\":\"$2\"}" > "$MOCK_DIR/compare-dev.json"
+  rc=0; o=$("$ORCHY" watch-merge 9 "$P" lane-9 lane-9-a2.md - 2>&1) || rc=$?; }
+upd "$M"; grep -q "re-pinned to $M" <<<"$o" && grep -q '^#9 MERGED' <<<"$o" && grep -q -- "--match-head-commit $M" "$MOCK_DIR/gh.log" || fail "GitHub's update was not re-pinned: $o"
+upd "$E"; [ "$rc" = 2 ] && grep -q "^HEAD MOVED to $E " <<<"$o" || fail "a merge carrying more than the base was re-pinned (exit $rc): $o"
+upd "$M" diverged; [ "$rc" = 2 ] && grep -q "^HEAD MOVED to $M " <<<"$o" || fail "a merge with a commit off the base was re-pinned (exit $rc): $o"
+n=$(puts); echo '{"protected":true}' > "$MOCK_DIR/branch-worktree-lane-9.json"; upd "$M"; rm "$MOCK_DIR/branch-worktree-lane-9.json" "$MOCK_DIR/pr-9.update.jq"
+[ "$rc" = 5 ] && grep -q 'not updating worktree-lane-9: protected' <<<"$o" && [ "$(puts)" = "$n" ] || fail "a protected branch was updated (exit $rc): $o"
+# a hold that lands after the poll and before the update's call stops it: the call rechecks holds under holds.lock
+brc() { grep -c 'branches/worktree-lane-9' "$MOCK_DIR/gh.log" || true; }; c=$(brc); pr9 ".headRefOid=\"$P\" | .mergeStateStatus=\"BEHIND\""
+MOCK_GH_BRANCH_SLEEP=3 "$ORCHY" watch-merge 9 "$P" lane-9 lane-9-a2.md - > "$T/u.out" 2>&1 & up=$!
+for _ in $(seq 1 100); do [ "$(brc)" -gt "$c" ] && break; sleep 0.1; done; "$ORCHY" hold add other:peer-u trunk >/dev/null; wait "$up" || true
+"$ORCHY" hold "done" other:peer-u >/dev/null; grep -q 'HELD: other:peer-u' "$T/u.out" && [ "$(puts)" = "$n" ] || fail "a hold before the update's call: $(cat "$T/u.out")"
 # a lane's <lane>-* heads merge; archive - neither waits for a plan nor tears the lane down
 touch "$MOCK_DIR/aw.log"; a=$(grep -c '^done' "$MOCK_DIR/aw.log" || true)
 for h in lane-9-a2 lane-9-stats-view; do pr9 ".headRefName=\"$h\""; o=$(wm -); grep -q '^#9 MERGED' <<<"$o" || fail "head $h did not merge: $o"; done
@@ -379,6 +415,11 @@ V add pr:12 "Fix the branch rules, then re-arm" >/dev/null || fail "waiting add 
 V list --json | jq -e '.waiting | length == 2 and .[0] == {ref: "pr:12", text: "Fix the branch rules, then re-arm", since: "2026-01-01T00:00:00Z"}' >/dev/null || fail "a second add did not replace the text in place and keep since: $(V list --json)"
 V "done" pr:12 >/dev/null && V list --json | jq -e '[.waiting[].ref] == ["page:0"]' >/dev/null || fail "waiting done: $(V list --json)"
 ORCHY_HOME="$HV" "$ORCHY" snapshot 2>&1 | sed -n '/^-- waiting/,/^--/p' | grep -qx 'page:0  [0-9]*m  Sign page 0' || fail "snapshot does not list the waiting record"
+# the snapshot's shell reader and the state's python reader take one marker set: the report's own key line, and no other tokens
+HK="$T/cap/hk"; mkdir -p "$HK/reports"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HK/"
+for a in a1 a2; do printf 'ARC_FAILED: %s red\nLEAD_DONE web-2 a1\n' "$a" > "$HK/reports/web-2-$a.md"; done; o=$(ORCHY_HOME="$HK" "$ORCHY" snapshot 2>&1)
+grep -q ' web-2-a1\.md LEAD_DONE web-2 a1$' <<<"$o" && grep -q ' web-2-a2\.md ARC_FAILED: a2 red$' <<<"$o" && ORCHY_HOME="$HK" "$ORCHY" state \
+  | jq -e '[.reports[] | {key, marker, detail}] == [{key: "web-2-a1", marker: "LEAD_DONE", detail: null}, {key: "web-2-a2", marker: "ARC_FAILED", detail: "a2 red"}]' >/dev/null || fail "the readers disagree: $o"
 e160=$(printf 'é%.0s' $(seq 160)); V add pr:13 "$e160" >/dev/null && V "done" pr:13 >/dev/null || fail "160 code points were refused"
 wb=$(md5sum "$HV/waiting.json" "$HV/events.jsonl")
 bad=("pr:012" x "pr:1x" x "page:" x "lane:-x" x "other:$(printf 'a%.0s' $(seq 33))" x $'pr:1\npr:2' x "ask:7" x "pr:1234567890" x "other:acct-a" x
