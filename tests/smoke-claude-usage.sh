@@ -608,11 +608,14 @@ t "lib: pad_cell pads to the plain width, not the painted one" test "$(lib pad_c
 t "lib: hrule draws two dashes past each width" test "$(lib hrule '<' '+' '>' 1 0)" = '<───+──>'
 r=$("$CU_BIN" add main 2>&1)"|"$(cx add best 2>&1)
 t "lib: each tool's own wording for a reserved name" test "$r" = "'main' is reserved for ~/.claude|'best' is reserved: it means \"pick for me\" in \`home\` and CODEX_ACCOUNT"
-# install.sh reaches the bins through ~/.local/bin links: a relative link to an absolute one, from an unrelated cwd.
-LNR="$S/link-root"; mkdir -p "$LNR/k1" "$S/ln/abs" "$S/ln/rel" "$S/ln/cwd"; echo k1=lab > "$LNR/labels.conf"
+# install.sh reaches the bins through ~/.local/bin links: a relative link to an absolute one, from an unrelated cwd,
+# and a symlinked bin/ beside a decoy lib/ that only a lexical bin/.. would reach.
+LNR="$S/link-root"; mkdir -p "$LNR/k1" "$S/ln/abs" "$S/ln/rel" "$S/ln/cwd" "$S/ln/lib"; echo k1=lab > "$LNR/labels.conf"
 for b in claude-usage codex-usage; do ln -s "$ROOT/bin/$b" "$S/ln/abs/$b"; ln -s "../abs/$b" "$S/ln/rel/$b"; done
-t "bins: both find the lib through a chain of symlinks" sh -c 'cd "$1/cwd" && CLAUDE_ACCOUNTS_ROOT="$2" ../rel/claude-usage list | grep -q "^lab " &&
-  PATH="$3:$PATH" CODEX_ACCOUNTS_ROOT="$2" ../rel/codex-usage list | grep -q "^lab "' _ "$S/ln" "$LNR" "$S/cxbin"
+ln -s "$ROOT/bin" "$S/ln/bin"; echo 'exit 7' > "$S/ln/lib/usage.sh"
+t "bins: both find the lib through a chain of symlinks" sh -c 'cd "$1/cwd" && for b in ../rel ../bin; do
+  CLAUDE_ACCOUNTS_ROOT="$2" $b/claude-usage list | grep -q "^lab " && PATH="$3:$PATH" CODEX_ACCOUNTS_ROOT="$2" $b/codex-usage list | grep -q "^lab " || exit 1
+  done' _ "$S/ln" "$LNR" "$S/cxbin"
 # Stock macOS runs both bins, and so the lib, on bash 3.2.
 if command -v docker > /dev/null && docker image inspect bash:3.2 > /dev/null 2>&1; then
   B32="$S/b32"; mkdir -p "$B32/stub" "$B32/acc/k1" "$B32/abs" "$B32/rel" "$B32/cwd"; echo k1=lab > "$B32/acc/labels.conf"
