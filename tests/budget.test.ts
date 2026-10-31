@@ -51,6 +51,7 @@ test("functions: the definitions bash sees, past quotes, expansions, subscripts,
     { name: "g", line: 22, lines: 1 },
   ]);
   expect(functions('echo "$(( $(h() { :; }; h) ))"\n')).toEqual([{ name: "h", line: 1, lines: 1 }]);
+  expect(functions("function f { :; }\nfunction g {\n  :\n}\n")).toEqual([{ name: "f", line: 1, lines: 1 }, { name: "g", line: 2, lines: 3 }]);
   expect(functions("f() { echo file[; }\necho a[; g() {\n:\necho a[; }\n")).toEqual([{ name: "f", line: 1, lines: 1 }, { name: "g", line: 2, lines: 3 }]);
   expect(functions("echo a[<<E]=x\n}\nE]=x\nh() { :; }\n")).toEqual([{ name: "h", line: 4, lines: 1 }]);
   expect(functions('g() { x="two words" a[1<<2]=x; }\necho if a[; k() { echo ]=x\n:\necho if a[; }; echo ]=x\n')).toEqual([

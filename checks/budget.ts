@@ -128,7 +128,7 @@ export function codeLines(text: string): string[] {
 }
 
 const HEADER = /(?:^|[;&|(){}]|(?:\b(?:if|then|elif|else|while|until|do|time)|!)(?=[ \t]))[ \t]*(?:function[ \t]+([A-Za-z_][\w:.-]*)(?:[ \t]*\([ \t]*\))?|([A-Za-z_][\w:.-]*)[ \t]*\([ \t]*\))/gm;
-const OPENS_AFTER = /(?:^|[;&|(){}!]|\b(?:if|then|else|elif|do|while|until|time))$/;
+const OPENS_AFTER = /(?:^|[;&|(){}!]|\b(?:if|then|else|elif|do|while|until|time)|\bfunction[ \t]+[A-Za-z_][\w:.-]*)$/;
 const CLOSES_AFTER = /(?:^|[;&)}])$/;
 
 // Every function in a script with its first line and length. Throws when the braces cannot be paired or a body is
