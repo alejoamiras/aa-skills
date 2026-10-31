@@ -171,8 +171,17 @@ update_branch() { # once per arm, a lane PR only (a fork's or an app's is refuse
   while IFS= read -r p; do [[ "$ref" == $p ]] && hit=1; done < <(cfg '(.protected // [])[]')
   [ "$hit" = 0 ] && ref_ok "$ref" && [ "$ref" != "$TRUNK" ] && [ "$(gh api "repos/$REPO/branches/$ref" --jq .protected 2>/dev/null)" = false ] \
     || { echo "$(date -u +%H:%MZ) not updating $ref: protected, or its protection unreadable"; return 1; }
-  gh api "repos/$REPO/pulls/$N/update-branch" -X PUT -f expected_head_sha="$PIN" >/dev/null 2>&1 || { echo "$(date -u +%H:%MZ) update-branch refused"; return 1; }
-  echo "$(date -u +%H:%MZ) BEHIND: GitHub merges $BASE into $ref (once per arm); the watcher re-pins that merge"
+  # holds.lock, shared, spans the hold check and the call, as at merge time; the call runs without the descriptor
+  ( flock -s -w 300 7 || { echo "REFUSED at update time: holds.lock is busy for 300 s"; exit 4; }
+    hr=$(held "$HS") || hr="holds.json, unreadable"; [ -z "$hr" ] || exit 10
+    (exec 7>&-; timeout 120 gh api "repos/$REPO/pulls/$N/update-branch" -X PUT -f expected_head_sha="$PIN" >/dev/null 2>&1) || exit 12
+    echo "$(date -u +%H:%MZ) BEHIND: GitHub merges $BASE into $ref (once per arm); the watcher re-pins that merge" ) 7>>"$HOLDS_LOCK"
+  case $? in
+    0) ;;
+    10) updated=0;;   # a hold landed after the poll: no call was made, and polling says HELD
+    12) echo "$(date -u +%H:%MZ) update-branch refused"; return 1;;
+    *) exit 4;;
+  esac
 }
 repin() { # the one move a watcher follows, after its own update: a merge of the scanned head and a base commit, its tree their clean merge
   local h=$1 p x more t   # FETCH_HEAD stays unwritten: another watcher's teardown reads it after its own fetch
