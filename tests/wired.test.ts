@@ -7,7 +7,6 @@ const T = mkdtempSync(join(tmpdir(), "wired-test-"));
 afterAll(() => rmSync(T, { recursive: true, force: true }));
 let repos = 0;
 
-// checks/wired.sh run in a throwaway repo holding only the given workflows and (empty) test files.
 function wired(workflows: Record<string, string>, files: string[]) {
   const dir = join(T, `repo-${++repos}`);
   for (const f of ["checks/wired.sh", ...files]) mkdirSync(dirname(join(dir, f)), { recursive: true });
@@ -37,7 +36,8 @@ const list = (name: string, ...paths: string[]) => [`            ${name}:`, ...p
 
 test("wired: only the relevant list covers a test, and a workflow without one fails", () => {
   const smoke = ["skills/x/smoke.sh"];
-  expect(wired({ "x.yml": gated(list("relevant", "skills/x/**"), "bash skills/x/smoke.sh") }, smoke).code).toBe(0);
+  const commented = list("relevant", "tests/**").replace("\n", "\n              # the smoke itself\n\n") + "\n              - 'skills/x/**'";
+  expect(wired({ "x.yml": gated(commented, "bash skills/x/smoke.sh") }, smoke).code).toBe(0);
   const pooled = wired({ "x.yml": gated(`${list("relevant", "tests/**")}\n${list("unrelated", "skills/x/smoke.sh")}`, "bash skills/x/smoke.sh") }, smoke);
   expect(pooled).toEqual({ code: 1, err: ".github/workflows/x.yml runs skills/x/smoke.sh, but its path filter skips changes to it\n" });
   const unfiltered = wired({ "x.yml": gated(list("other", "**"), "bash skills/x/smoke.sh") }, smoke);
@@ -45,8 +45,8 @@ test("wired: only the relevant list covers a test, and a workflow without one fa
 });
 
 test("wired: every Bun test file name form needs a workflow", () => {
-  const files = ["tests/a.spec.ts", "tests/b_test.js", "tests/c_spec.jsx", "tests/d.test.tsx"];
+  const files = ["tests/a.spec.ts", "tests/b_test.js", "tests/c_spec.jsx", "tests/d.test.tsx", "tests/e.test.mjs"];
   const r = wired({ "t.yml": gated(list("relevant", "tests/**"), "bun test tests/d.test.tsx") }, files);
   expect(r.code).toBe(1);
-  expect(r.err.split("\n").filter(Boolean).map((l) => l.split(":")[0])).toEqual(["tests/a.spec.ts", "tests/b_test.js", "tests/c_spec.jsx"]);
+  expect(r.err.split("\n").filter(Boolean).map((l) => l.split(":")[0])).toEqual(["tests/a.spec.ts", "tests/b_test.js", "tests/c_spec.jsx", "tests/e.test.mjs"]);
 });

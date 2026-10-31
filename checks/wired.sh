@@ -6,10 +6,11 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 shopt -s nullglob
 tests=(':(glob)**/smoke.sh' ':(glob)**/smoke-*.sh')
-for ext in ts tsx js jsx; do for form in '*.test.' '*_test.' '*.spec.' '*_spec.'; do tests+=(":(glob)**/$form$ext"); done; done
+for ext in ts tsx mts cts js jsx mjs cjs; do for form in '*.test.' '*_test.' '*.spec.' '*_spec.'; do tests+=(":(glob)**/$form$ext"); done; done
 rc=0 runs="" listed=""
 for y in .github/workflows/*.yml .github/workflows/*.yaml; do
-  pats=$(awk '/^[[:space:]]+relevant:[[:space:]]*$/ { on = 1; next } on && /^[[:space:]]+- / { print; next } { on = 0 }' "$y" |
+  pats=$(awk '/^[[:space:]]+relevant:[[:space:]]*$/ { on = 1; next }
+      on && /^[[:space:]]*(#.*)?$/ { next } on && /^[[:space:]]+- / { print; next } { on = 0 }' "$y" |
     sed -nE "s/^[[:space:]]+- '([^']+)'[[:space:]]*$/\1/p")
   listed+=$(sed -nE 's/^# ([^[:space:]]+): .+/\1/p' "$y")$'\n'
   while IFS= read -r f; do
