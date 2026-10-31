@@ -5,8 +5,11 @@ HERE=$(cd "$(dirname "$0")/.." && pwd); K="$HERE/skills/start-orchy"; ORCHY="$K/
 T=$(mktemp -d -t orchy-smoke-XXXX); pgp=; sess=; trap '[ -z "$pgp" ] || kill "$pgp" 2>/dev/null || true; [ -z "$sess" ] || kill $sess 2>/dev/null || true; rm -rf "$T"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 export PATH="$HERE/tests/mocks/orchy:$PATH" MOCK_DIR="$T/mock" ORCHY_CAPACITY_ROOT="$T/cap" ORCHY_HOME="$T/cap/home" ORCHY_REPO=example/app ORCHY_WATCH_SLEEP=1 ORCHY_PROFILE_DIR="$T/profile" ORCHY_ASKS_DIR="$T/asks" ORCHY_GITLEAKS=fake-gitleaks ORCHY_ACCOUNTS="$T/accounts.json"; mkdir -p "$MOCK_DIR"
-# the orchestrator session the seat records: a sleep named claude, so lock, launch and resume agree on it from any subshell
-mkdir -p "$T/sess"; cp "$(command -v sleep)" "$T/sess/claude"; "$T/sess/claude" 3600 & sess=$!; export CLAUDE_PID=$sess
+# the orchestrator session the seat records: a process named claude, so lock, launch and resume agree on it from any
+# subshell; python3 via a symlink, since a multicall coreutils (uutils) dispatches on the name and refuses a copied sleep
+mkdir -p "$T/sess"; ln -s "$(command -v python3)" "$T/sess/claude"
+fake_claude() { exec "$T/sess/claude" -c 'import sys, time; time.sleep(int(sys.argv[1]))' "$1"; } # `& p=$!` stays its pid
+fake_claude 3600 & sess=$!; export CLAUDE_PID=$sess
 # the roster and readings the account policy reads; the orchestrator runs on acct-o, and every other account is fresh and well inside its week
 row() { # row <label> <week %> <hours to the weekly reset|null> [<session %> [<seconds since the reading> [<note>]]]
   jq -nc --arg a "$1" --argjson w "$2" --arg h "$3" --argjson s "${4:-80}" --argjson ago "${5:-60}" --arg n "${6:-}" --argjson now "$(date +%s)" \
@@ -134,7 +137,7 @@ cmpfix() { local s=$1 m=$2; shift 2
 S7=7777777777777777777777777777777777777777; S8=8888888888888888888888888888888888888888
 jq -n --arg s "$S7" '{body:"body", headRefOid:$s, baseRefName:"dev"}' > "$MOCK_DIR/pr-7.json"; cmpfix "$S7" $'feat: x\n\nran with CLAUDE_ACCOUNT=acct-a' x
 o=$("$ORCHY" scan 7); grep -q 'leaks=1' <<<"$o" || fail "scan missed an account assignment in a commit message: $o"
-if MOCK_GH_FAIL=diff "$ORCHY" scan 7 >/dev/null 2>&1; then fail "scan reported success on a gh failure"; fi
+if MOCK_GH_FAIL="diff" "$ORCHY" scan 7 >/dev/null 2>&1; then fail "scan reported success on a gh failure"; fi
 jq -n --arg s "$S8" '{title:"fix: retry on acct-b", body:"body", headRefOid:$s, baseRefName:"dev"}' > "$MOCK_DIR/pr-8.json"; cmpfix "$S8" "fix: retry" x
 o=$("$ORCHY" scan 8); grep -q 'leaks=1' <<<"$o" || fail "scan missed a locally banned name in a PR title: $o"
 # watch-merge: pin validation, strict report parsing, pinned merge, head-moved exit
@@ -281,7 +284,8 @@ wp2=$(cut -d' ' -f1 "$H2/watch/merge-9.pid")
 wp=$(cut -d' ' -f1 "$ORCHY_HOME/watch/merge-9.pid"); "$ORCHY" disarm 9 | grep -q 'stopped merge-9' || fail "disarm did not stop the watcher"
 sleep 1; [ ! -d "/proc/$wp" ] || fail "watcher $wp still alive after disarm"
 [ -d "/proc/$wp2" ] || fail "disarm in one home killed another home's watcher on the same PR number"
-[ "$(ps -eo pid,args | grep "[w]atch-merge 9 " | grep -vc "^ *$wp2 ")" = 0 ] || fail "a watch-merge 9 process of this home survived disarm: $(ps -eo pid,args | grep "[w]atch-merge 9 ")"
+strays() { ps -eo pid,args | grep -F "$ORCHY watch-merge 9 " | grep -v ' grep '; } # this checkout's only: a concurrent run is not a stray
+[ "$(strays | grep -vc "^ *$wp2 ")" = 0 ] || fail "a watch-merge 9 process of this home survived disarm: $(strays)"
 ORCHY_HOME="$H2" "$ORCHY" disarm 9 | grep -q 'stopped merge-9' || fail "disarm in the second home"
 [ "$(grep -c '' "$H2/events.jsonl")" = 1 ] && jq -e '.kind == "merge.disarmed" and .pr == 9' "$H2/events.jsonl" >/dev/null || fail "disarm event: $(cat "$H2/events.jsonl")"
 [ "$(grep -cxE '[0-9]{2}:[0-9]{2}Z DISARMED' "$H2/watch/merge-9.out")" = 1 ] || fail "disarm did not write one DISARMED line: $(cat "$H2/watch/merge-9.out")"
@@ -691,7 +695,7 @@ MOCK_LEAD_SECS=30 AC launch acc-r0 acc p-alpha >/dev/null || fail "first heavy l
 ( MOCK_LEAD_SECS=30 ORCHY_HOME="$HB" MOCK_CU="$CA" ORCHY_ACCOUNTS="$PA" "$ORCHY" launch acc-r2 acc auto >> "$T/race.log" 2>&1 ) & r2=$!; wait "$r1" "$r2" || true
 [ "$(grep -oE ' on p-[a-z]+ ' "$T/race.log" | sort | tr -d ' ' | paste -sd, -)" = "onp-alpha,onp-bravo" ] || fail "two programs racing for the last slot: $(cat "$T/race.log")"
 # a launch that waited on the spawn lock checks the seat again inside it
-"$T/sess/claude" 600 & s2=$!; sess="$sess $s2"; exec {sl}>"$T/cap/.spawn.lock"; flock "$sl"
+fake_claude 600 & s2=$!; sess="$sess $s2"; exec {sl}>"$T/cap/.spawn.lock"; flock "$sl"
 ( exec {sl}>&-; AC launch --light acc-a9 acc auto > "$T/late.out" 2>&1 ) & lw=$!
 w8=0; for _ in $(seq 300); do for q in $(pgrep -f 'orchy.sh launch --light acc-a9 acc auto'); do readlink /proc/"$q"/fd/* 2>/dev/null | grep -q 'spawn.lock$' && { w8=1; break 2; }; done; sleep 0.1; done
 [ "$w8" = 1 ] || fail "the launch never reached the spawn lock: $(cat "$T/late.out")"; cp "$HA/orchestrator.lock" "$T/seat.keep"; echo "$s2 $(awk '{print $22}' /proc/$s2/stat) 2026-01-01T00:00:00Z - -" > "$HA/orchestrator.lock"
@@ -704,7 +708,7 @@ for c in "launch --light acc-a9 acc auto" "resume --light acc-a9 acc p-alpha 000
 CLAUDE_PID=$s2 AC lock | grep -q '^locked' || fail "another session could not take a handed-over seat"
 for c in "launch --light acc-a9 acc auto" "resume --light acc-a9 acc p-alpha 00000000-0000-4000-8000-000000000009"; do
   o=$(AC $c 2>&1 || true); grep -q 'does not hold the seat' <<<"$o" || fail "the session that handed the seat over ran $c: $o"; done
-"$T/sess/claude" 600 & s3=$!; sess="$sess $s3"
+fake_claude 600 & s3=$!; sess="$sess $s3"
 o=$(CLAUDE_PID=$s3 AC launch --light acc-a9 acc auto 2>&1 || true); grep -q "(pid $s3) does not hold the seat" <<<"$o" || fail "a session that never held the seat launched: $o"
 : > "$MOCK_DIR/refresh.log"; o=$(CLAUDE_PID=$s2 AC snapshot 2>&1); grep -qx refresh "$MOCK_DIR/refresh.log" || fail "snapshot did not refresh the readings"; grep -q '^alive acc-r0 ' <<<"$o" && grep -qx "alive merge-41 pid $sw" <<<"$o" || fail "a handed-over seat lost a lead or a watcher: $o"
 CLAUDE_PID=$s2 AC unlock >/dev/null; ORCHY_HOME="$HB" "$ORCHY" unlock >/dev/null; kill "$sw"; wait "$sw" 2>/dev/null || true

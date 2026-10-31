@@ -1,0 +1,63 @@
+name: keyed
+
+on:
+  workflow_dispatch:
+  pull_request: # no branches: filter: a stacked PR targets its parent branch, not main
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      relevant: ${{ steps.override.outputs.relevant || steps.filter.outputs.relevant }}
+    steps:
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        if: github.event_name != 'workflow_dispatch'
+        id: filter
+        with:
+          filters: |
+            relevant:
+              - 'bin/env-exec'
+              - 'bin/op-remote'
+              - 'tests/smoke-keyed.sh'
+              - 'tests/**'
+              - 'checks/**'
+              - '.github/workflows/keyed.yml'
+      - name: Override for manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        id: override
+        run: echo "relevant=true" >> "$GITHUB_OUTPUT"
+
+  smoke:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install strace
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends strace
+      - name: Pull bash 3.2 for the Mac-side pass
+        env:
+          IMAGE: bash@sha256:0fd7cb8499c63a3c9345e7088a9cd83bb69f6e895e83833859aff838a0312091 # 3.2.57
+        run: docker pull -q "$IMAGE" && docker tag "$IMAGE" bash:3.2
+      - run: bash tests/smoke-keyed.sh
+
+  keyed-status:
+    needs: [changes, smoke]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Fail when a job failed or was cancelled
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
