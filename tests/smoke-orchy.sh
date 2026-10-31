@@ -198,6 +198,10 @@ grep -q '^REFUSED at merge time: .* base=main ' <<<"$o" && [ "$(pm)" = $((n+1)) 
 pr9 '.mergeStateStatus="BEHIND"'; rc=0; o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1) || rc=$?
 [ "$rc" = 5 ] && grep -q 'DIRTY: MERGEABLE BEHIND; bring the base in first$' <<<"$o" || fail "BEHIND (exit $rc): $o"
 printf '%s\n' "$o" > "$HF/watch/merge-9.out"; ORCHY_HOME="$HF" "$ORCHY" state | jq -e '[.watchers[] | {pr, marker}] == [{pr: 9, marker: "DIRTY"}]' >/dev/null || fail "BEHIND does not read DIRTY"
+# the last marker may be LEAD_DONE <lane> <arc>, the report's own key; any other tokens are no marker, so ARC_FAILED stands
+for l in "LEAD_DONE lane-8 a2" "LEAD_DONE lane-9 a3" "LEAD_DONE lane-9 a2 x" "LEAD_DONE lane-9 a2"; do mkpr "$SHA"
+  printf 'ARC_FAILED: a2 red\n%s\nPR #9 t ready checks: green\nHEAD %s\n' "$l" "$SHA" > "$ORCHY_HOME/reports/lane-9-a2.md"; o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 lane-9-a2.md - 2>&1 || true)
+  case $l in *9\ a2) grep -q '^#9 MERGED' <<<"$o" || fail "the report's own key did not end it: $o";; *) grep -q 'TIMEOUT; not merged' <<<"$o" || fail "'$l' ended a failed report: $o";; esac; done
 # a lane's <lane>-* heads merge; archive - neither waits for a plan nor tears the lane down
 touch "$MOCK_DIR/aw.log"; a=$(grep -c '^done' "$MOCK_DIR/aw.log" || true)
 for h in lane-9-a2 lane-9-stats-view; do pr9 ".headRefName=\"$h\""; o=$(wm -); grep -q '^#9 MERGED' <<<"$o" || fail "head $h did not merge: $o"; done

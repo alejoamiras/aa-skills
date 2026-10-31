@@ -100,8 +100,11 @@ orchy_watch_merge() {
 pr_state() { gh pr view "$N" --repo "$REPO" --json state,isDraft,baseRefName,headRefOid,mergeable,mergeStateStatus --jq '"\(.state) \(.isDraft) \(.baseRefName) \(.headRefOid) \(.mergeable) \(.mergeStateStatus)"' 2>/dev/null; }
 report_done() { # the LAST marker line of the report decides; it must be exactly LEAD_DONE, with a PR line for this PR and a full-sha HEAD line equal to the pin
   [ -z "$ACT" ] || return 0
-  local r="$H/reports/$REPORT"; [ -f "$r" ] || return 1
-  [ "$(grep -xE 'LEAD_DONE|LEAD_BLOCKED:.*|ARC_FAILED:.*' "$r" | tail -1)" = "LEAD_DONE" ] || return 1
+  local r="$H/reports/$REPORT" own="" rx='LEAD_DONE|LEAD_BLOCKED:.*|ARC_FAILED:.*' last; [ -f "$r" ] || return 1
+  # or LEAD_DONE <lane> <arc>, the tokens of this report's own key <lane>-<arc>.md: both are this watcher's arguments, so the
+  # line carries no free text, names no other report, and reads as no other marker (each needs its own word first)
+  [[ "$REPORT" == "$LANE"-?*.md ]] && own="LEAD_DONE $LANE ${REPORT:${#LANE}+1:-3}" && rx="$rx|${own//./\\.}"
+  last=$(grep -xE "$rx" "$r" | tail -1); [ "$last" = LEAD_DONE ] || { [ -n "$own" ] && [ "$last" = "$own" ]; } || return 1
   grep -qE "^PR #$N( |$)" "$r" || return 1
   [ "$(grep -oE '^HEAD [0-9a-f]{40}$' "$r" | tail -1 | cut -d' ' -f2)" = "$PIN" ]
 }
