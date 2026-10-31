@@ -25,7 +25,7 @@ jobs:
       - name: Scan the commits this pull request or push adds
         env:
           RANGE: ${{ github.event_name == 'pull_request' && format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) || format('{0}..{1}', github.event.before, github.event.after) }}
-        run: gitleaks git --redact -v --log-opts="--no-merges --first-parent $RANGE"
+        run: gitleaks git --redact -v --log-opts="--no-merges $RANGE"
 
   gitleaks-status:
     needs: [scan]
