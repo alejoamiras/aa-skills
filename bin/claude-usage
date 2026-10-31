@@ -507,7 +507,7 @@ token_probe() {
   # $$ is the top-level shell even in a subshell; this is the process itself.
   me=$(exec sh -c 'echo "$PPID"')
   deadline=$(($(date +%s) + TIMEOUT + 15))
-  until mkdir "${lock}" 2> /dev/null; do
+  until claim_dir "${lock}" 2> /dev/null; do
     if (($(date +%s) >= deadline)); then
       if [[ -n ${rec} ]]; then printf '%s\n' "${rec}"; else token_none "${key}" "another probe is still running"; fi
       return
@@ -1703,7 +1703,7 @@ reservation_live() {
 CFG_LOCK=""
 config_lock() {
   local lock="$1/.claude-usage-config.lock" i=0 hp hs
-  while ! mkdir "${lock}" 2> /dev/null; do
+  while ! claim_dir "${lock}" 2> /dev/null; do
     read -r hp hs < "${lock}/holder" 2> /dev/null || hp=""
     if [[ -n ${hp} ]] && ! alive_as "${hp}" "${hs}"; then
       printf 'claude-usage: %s is held by pid %s, which is no longer running.\n' "${lock}" "${hp}" >&2
