@@ -29,6 +29,8 @@ jobs:
               - 'bin/codex-usage'
               - 'skills/claude/scripts/**'
               - 'tests/smoke-claude-usage.sh'
+              - 'tests/**'
+              - 'checks/**'
               - '.github/workflows/claude-usage.yml'
       - name: Override for manual dispatch
         if: github.event_name == 'workflow_dispatch'

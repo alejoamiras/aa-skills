@@ -40,17 +40,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-shellcheck
-      - name: Install actionlint 1.7.12
-        env:
-          URL: https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
-          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
-        run: |
-          d="$RUNNER_TEMP/actionlint"
-          mkdir -p "$d"
-          curl -fsSL --retry 3 -o "$d/actionlint.tar.gz" "$URL"
-          echo "$SHA256  $d/actionlint.tar.gz" | sha256sum -c -
-          tar -xzf "$d/actionlint.tar.gz" -C "$d" actionlint
-          echo "$d" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/fetch-tool
+        with:
+          url: https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          sha256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          binary: actionlint
       - run: actionlint
 
   actionlint-status:

@@ -68,7 +68,7 @@ Every PR runs one workflow per area. Each skips its jobs when the PR touches non
 |---|---|---|
 | `shell` | shellcheck at warning severity over every shell file, the size budgets, and a check that every smoke and bun test runs in some workflow | any change (a shell file is known by its shebang, whatever its name) |
 | `actionlint` | actionlint | `.github/` |
-| `gitleaks` | secret scan over full history | every PR, and pushes to `main` |
+| `gitleaks` | secret scan of the commits the PR or push adds | every PR, and pushes to `main` |
 | `agent-worktree`, `claude-usage`, `crew`, `keyed`, `start-orchy` | that area's smokes, plus `start-orchy`'s bun test | that area's files |
 
 **Budgets.** A shell file may not grow past 800 lines, a function past 80, and a function name may live in only one file: code two scripts share belongs in a library both source. `checks/budget.json` records today's offenders at their current size, and they can only shrink. A record looser than the code also fails, so a change that shrinks an offender lowers its record in the same PR: `bun checks/budget.ts --write` lowers or drops entries and never raises or adds one. On a PR, CI also compares the record with the base branch's and fails any entry added or raised.
@@ -89,6 +89,6 @@ CI never runs `tests/smoke-memo-guard.sh` (it tests the private `claude/` submod
 ## Secret hygiene
 
 - `hooks/pre-commit` runs `gitleaks` on staged changes (wired by `install.sh`).
-- CI runs gitleaks over full history on every push/PR.
+- CI runs gitleaks over the commits each PR and each push to `main` adds.
 - GitHub secret scanning + push protection enabled on the remote.
 - No transcripts, history, `settings.local.json`, or credentials are ever tracked here.

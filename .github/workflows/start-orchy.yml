@@ -7,8 +7,8 @@ on:
 permissions:
   contents: read
 
-# tests/smoke-orchy.sh runs skills/start-orchy/page/smoke.sh, whose render check skips here: it needs puppeteer in
-# ./node_modules, and this repo installs no npm packages.
+# skills/start-orchy/page/smoke.sh: tests/smoke-orchy.sh runs it, and its render check skips here: that needs
+# puppeteer in ./node_modules, and this repo installs no npm packages.
 
 jobs:
   changes:
@@ -30,12 +30,10 @@ jobs:
               - 'skills/start-orchy/**'
               - 'skills/pause-orchy/**'
               - 'skills/my-stack/**'
-              - 'tests/mocks/orchy/**'
-              - 'tests/smoke-orchy*.sh'
-              - 'tests/orchy-*.test.ts'
-              - 'tests/live-orchy-release.sh'
+              - 'tests/**'
+              - 'checks/**'
               - '.github/workflows/start-orchy.yml'
-              - '.github/actions/setup-bun/**'
+              - '.github/actions/**'
       - name: Override for manual dispatch
         if: github.event_name == 'workflow_dispatch'
         id: override

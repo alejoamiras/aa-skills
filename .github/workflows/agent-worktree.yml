@@ -26,6 +26,8 @@ jobs:
             relevant:
               - 'bin/agent-worktree'
               - 'tests/smoke-agent-worktree.sh'
+              - 'tests/**'
+              - 'checks/**'
               - '.github/workflows/agent-worktree.yml'
       - name: Override for manual dispatch
         if: github.event_name == 'workflow_dispatch'

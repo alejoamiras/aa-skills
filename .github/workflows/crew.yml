@@ -27,6 +27,8 @@ jobs:
               - 'skills/crew/**'
               - 'bin/claude-usage'
               - 'tests/smoke-crew.sh'
+              - 'tests/**'
+              - 'checks/**'
               - '.github/workflows/crew.yml'
       - name: Override for manual dispatch
         if: github.event_name == 'workflow_dispatch'

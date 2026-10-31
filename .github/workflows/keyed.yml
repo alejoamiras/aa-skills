@@ -27,6 +27,8 @@ jobs:
               - 'bin/env-exec'
               - 'bin/op-remote'
               - 'tests/smoke-keyed.sh'
+              - 'tests/**'
+              - 'checks/**'
               - '.github/workflows/keyed.yml'
       - name: Override for manual dispatch
         if: github.event_name == 'workflow_dispatch'
