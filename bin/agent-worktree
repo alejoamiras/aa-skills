@@ -434,7 +434,7 @@ cmd_done() {
   [ "$merged" = 1 ] && [ "$forget" = 1 ] && die "--merged and --forget are different jobs: pick one"
   [ "$merged" = 0 ] && [ -n "$trunk_name" ] && die "--trunk only applies to --merged"
 
-  # The done_* steps read and set these locals of cmd_done.
+  # The done_* steps run in cmd_done's scope and set its locals.
   local fetched_root="" trunk_ref=""
   if [ "$merged" = 1 ]; then
     done_fetch_trunk
@@ -513,9 +513,8 @@ done_fetch_trunk() {
     || die "can't fetch the trunk branch from origin (offline, or pass --trunk <branch>) — the merge can't be proven against a stale trunk. Nothing was removed"
 }
 
-# Proves the worktree's HEAD landed on trunk, then removes it and every local
-# branch of its stack. A stack leaves the worktree on its top branch, so the
-# gate here is the merge proof, not the branch name.
+# A stack leaves the worktree on its top branch, so the gate here is the merge
+# proof, not the branch name.
 done_remove_merged() {
   local mb b tip st doomed
   [ "$root" = "$fetched_root" ] || die "refusing: the row for '$arg' changed while fetching — rerun"

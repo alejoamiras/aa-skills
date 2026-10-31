@@ -45,15 +45,13 @@
 set -uo pipefail
 unset CDPATH   # `cd x && pwd -P` must print one path, not cd's CDPATH echo too
 
-# install.sh links this file into ~/.local/bin; the lib sits beside the real one.
-src=${BASH_SOURCE[0]}
-while [[ -L ${src} ]]; do
-  lnk=$(readlink "${src}")
-  if [[ ${lnk} == /* ]]; then src=${lnk}; else src="$(dirname "${src}")/${lnk}"; fi
-done
+# install.sh links this file into ~/.local/bin; the lib sits beside the real one. cd -P: a logical cd
+# would fold a symlinked bin/.. before following it.
+USAGE_LIB=$(f=${BASH_SOURCE[0]}
+  while [[ -L ${f} ]]; do l=$(readlink "${f}"); [[ ${l} == /* ]] || l="$(dirname "${f}")/${l}"; f=${l}; done
+  cd -P "$(dirname "${f}")/../lib" && pwd -P)/usage.sh || exit 1
 # shellcheck source=SCRIPTDIR/../lib/usage.sh
-. "$(cd "$(dirname "${src}")/../lib" && pwd -P)/usage.sh" || exit 1
-unset src lnk
+. "${USAGE_LIB}" || exit 1
 TOOL=codex-usage
 RESERVED=(best)
 RESERVED_IN='`home` and CODEX_ACCOUNT'
