@@ -9,7 +9,7 @@
 //   close <dir> <rid> <done|withdrawn> <outcome> <now>     "<rid> <status> <ref>", the file moved to closed/
 //   list <dir> <all 0|1> <json 0|1> <now> | show <dir> <rid> <now>
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readdirSync, readSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readdirSync, readSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { args } from "./args.ts";
 import { fromDateIso8601 } from "./holds.ts";
 import { STRERROR } from "./strerror.ts";
@@ -69,7 +69,14 @@ export function str(v: unknown, what: string, max: number, min = 1, nl = false):
   if (badChar(nl ? v.replaceAll("\n", "") : v)) no(`${what} carries a control, line separator or bidi character`);
   return v;
 }
-const date = (v: unknown, what: string) => (typeof v === "string" && fromDateIso8601(v) !== null ? v : no(`${what} is not a UTC time`));
+// what utc_now writes: fromdateiso8601 alone would let a stored time carry any text after a blank
+const date = (v: unknown, what: string) =>
+  (typeof v === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(v) && fromDateIso8601(v) !== null ? v : no(`${what} is not a UTC time`));
+// a waiting record's since, which jq reads more loosely, in the form a request stores
+function utc(v: string): string {
+  const t = fromDateIso8601(v) ?? no("the waiting record's since is not a time");
+  return new Date(t * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
 const int = (v: unknown, what: string, lo: number, hi: number) =>
   (Number.isSafeInteger(v) && (v as number) >= lo && (v as number) <= hi ? (v as number) : no(`${what} is not a whole number from ${lo} to ${hi}`));
 
@@ -275,7 +282,7 @@ function write(dir: Buffer, r: Request): void {
   const tmp = at(dir, `.${r.id}.${process.pid}.tmp`);
   const fd = openSync(tmp, "wx", 0o600);
   try {
-    try { writeSync(fd, `${JSON.stringify(r)}\n`); fsyncSync(fd); } finally { closeSync(fd); }
+    try { writeFileSync(fd, `${JSON.stringify(r)}\n`); fsyncSync(fd); } finally { closeSync(fd); }
     renameSync(tmp, at(dir, `${r.id}.json`));
   } catch (e) { try { unlinkSync(tmp); } catch {} throw e; }
 }
@@ -304,12 +311,16 @@ export function notNow(closed: Request, c: Content): boolean {
 
 export function add(s: Store, ref: string, c: Content, again: boolean, bareSince: string): string {
   const open = settle(s), cur = open.find((r) => r.ref === ref);
-  const bare = bareSince && date(bareSince, "the waiting record's since");
+  const bare = bareSince && utc(bareSince);
   const earlier = (a: string) => (bare && fromDateIso8601(bare)! < fromDateIso8601(a)! ? bare : a);
   if (cur) {
     if (cur.status === "taken") no(`${cur.id} is taken; finish it with request done first`);
     const same = canon(contentOf(cur)) === canon(c);
-    if (same && cur.status === "open") return `${cur.id} r${cur.rev} unchanged\n`;
+    if (same && cur.status === "open") {
+      // the bare row goes after this, so an earlier since it held is kept here, with no new rev
+      if (earlier(cur.since) !== cur.since) write(s.dir, { ...cur, since: earlier(cur.since), updated: s.now });
+      return `${cur.id} r${cur.rev} unchanged\n`;
+    }
     const owed = unanswered(cur);
     if (!same && owed.length) no(`${cur.id} has a reply no note answers; answer it with request note ${cur.id} --re ${owed[0]} first`);
     if (cur.rev >= REV_MAX) no(`${cur.id} has no revision left; withdraw it and open a new one`);

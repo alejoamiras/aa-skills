@@ -57,6 +57,8 @@ jq -c '.waiting += [{ref: "issue:5", text: "Answer the question on issue 5", sin
 "$ORCHY" waiting list --json | jq -e '[.waiting[] | select(.ref == "issue:5")] == [{ref: "issue:5", text: "Which fix for issue 5 do you want?", since: "2025-06-01T00:00:00Z"}]' >/dev/null \
   || flunk "a leftover bare row was not deduped: $("$ORCHY" waiting list --json)"
 "$ORCHY" state | jq -e '[.waiting[] | select(.ref == "issue:5")] | length == 1' >/dev/null || flunk "state shows the ref twice"
+[ "$(RQX add issue:5 "$T/i5.json")" = "rq6 r1 unchanged" ] && jq -e 'all(.waiting[]; .ref != "issue:5")' "$W" >/dev/null \
+  && RQX list --json | jq -e '.requests[] | select(.id == "rq6") | .since == "2025-06-01T00:00:00Z"' >/dev/null || flunk "a re-add did not drop the leftover row and keep its since"
 printf -- '- [ ] Publish the build\n' > "$T/rb.md"; "$ORCHY" runbook add rb-x "$T/rb.md" >/dev/null
 "$ORCHY" waiting add other:peer-kit "The peer lane is quiet until its release" >/dev/null
 
@@ -84,10 +86,12 @@ want='no open request rq99'; nope RQX note rq99 "nothing here"
 
 # --- stale, refresh, withdraw and done: a close moves the file to closed/, drops the row and emits waiting.done
 [ "$(RQX stale rq4 "The locale list changed")" = "rq4 r1 stale" ] && [ "$(RQX add issue:7 "$T/reply.json")" = "rq4 r2 refreshed" ] || flunk "stale, then a refresh"
+jq -c '.waiting += [{ref: "pr:12", text: "Rename the check", since: "2026-01-01T00:00:00Z"}]' "$W" > "$T/w.json" && mv "$T/w.json" "$W"   # a leftover row
 e0=$(wc -l < "$EV")
 [ "$(RQX "done" rq3 "Renamed the check; the watcher is armed again")" = "rq3 done" ] && [ "$(RQX withdraw rq4 "Asked in chat instead")" = "rq4 withdrawn" ] || flunk "done or withdraw"
 [ -f "$RQ/closed/rq3.json" ] && [ -f "$RQ/closed/rq4.json" ] && [ ! -e "$RQ/rq3.json" ] && [ ! -e "$RQ/rq4.json" ] || flunk "a closed request was not moved"
-"$ORCHY" waiting list --json | jq -e 'all(.waiting[]; .ref != "pr:12" and .ref != "issue:7")' >/dev/null || flunk "the projection kept a closed request"
+"$ORCHY" waiting list --json | jq -e 'all(.waiting[]; .ref != "pr:12" and .ref != "issue:7")' >/dev/null && jq -e 'all(.waiting[]; .ref != "pr:12")' "$W" >/dev/null \
+  || flunk "the projection kept a closed request, or its leftover row"
 tail -n +"$((e0 + 1))" "$EV" | jq -se '[.[] | [.kind, .ref]] == [["waiting.done", "pr:12"], ["waiting.done", "issue:7"]]' >/dev/null || flunk "the closes' events"
 RQX show rq4 | grep -qx 'outcome: Asked in chat instead' && RQX list --all --json | jq -e '[.requests[].id] == ["rq1", "rq2", "rq3", "rq4", "rq5", "rq6"]' >/dev/null || flunk "a closed request is not shown"
 want='rq3 is done; done does not apply'; nope RQX "done" rq3 "again"
@@ -98,15 +102,17 @@ GX lock >/dev/null && GX request add other:g1 "$LS" >/dev/null && GX waiting add
 jq -e '[.waiting[].ref] == ["other:x"]' "$GH/waiting.json" >/dev/null || flunk "a ghost row: $(cat "$GH/waiting.json")"
 
 # --- a malformed request is named, never fatal; readers change nothing
-printf '{"schema": "orchy.request/1", "id": "rq900"' > "$RQ/rq900.json"
+printf '{"schema": "orchy.request/1", "id": "rq900"' > "$RQ/rq900.json"; : > "$RQ/rq901.json"; jq -c . "$RQ/rq1.json" "$RQ/rq1.json" > "$RQ/rq902.json"
 prints() { find "$ORCHY_HOME" "$ORCHY_ASKS_DIR" -printf '%p %s %T@ %m\n' | sort; }; b=$(prints)
 "$ORCHY" state | jq -e '(.errors | index("requests")) and any(.waiting[]; .ref == "other:test-path")' >/dev/null || flunk "state over a malformed request: $("$ORCHY" state | jq -c '.waiting, .errors')"
-"$ORCHY" waiting list --json | jq -e '.errors == [{file: "rq900.json", error: "not an orchy.request/1 the waiting list can show"}] and any(.waiting[]; .ref == "other:test-path")' >/dev/null || flunk "waiting list over a malformed request"
+"$ORCHY" waiting list --json | jq -e '[.errors[].file] == ["rq900.json", "rq901.json", "rq902.json"] and any(.waiting[]; .ref == "other:test-path")' >/dev/null \
+  || flunk "waiting list over a malformed request: $("$ORCHY" waiting list --json | jq -c .errors)"
 "$ORCHY" waiting list 2>&1 >/dev/null | grep -qx 'error: rq900.json: not an orchy.request/1 the waiting list can show' || flunk "waiting list text names no bad file"
-RQX list --json | jq -e '.errors == [{file: "rq900.json", error: "not JSON"}] and ([.requests[].id] == ["rq1", "rq2", "rq5", "rq6"])' >/dev/null || flunk "request list over a malformed request: $(RQX list --json | jq -c .errors)"
+RQX list --json | jq -e '[.errors[] | .file + " " + .error] == ["rq900.json not JSON", "rq901.json not JSON", "rq902.json not JSON"] and ([.requests[].id] == ["rq1", "rq2", "rq5", "rq6"])' >/dev/null \
+  || flunk "request list over a malformed request: $(RQX list --json | jq -c .errors)"
 RQX list 2>&1 >/dev/null | grep -qx 'error: rq900.json: not JSON' && RQX show rq2 >/dev/null || flunk "request list text or show"
 [ "$(prints)" = "$b" ] || flunk "a reader changed the home or the ask folder: $(diff <(echo "$b") <(prints))"
-rm "$RQ/rq900.json"
+rm "$RQ"/rq90[0-2].json
 
 # --- the viewers' environment: state needs no bun; request list finds it, and check-public gitleaks, at the install paths
 for t in bun gitleaks; do ! env -i PATH=/usr/bin:/bin bash -c "command -v $t" >/dev/null || flunk "$t is in /usr/bin or /bin, so the bare-PATH check proves nothing"; done
