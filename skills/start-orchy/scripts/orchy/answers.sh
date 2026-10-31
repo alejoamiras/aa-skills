@@ -42,9 +42,10 @@ an_file() {
 an_take() { # an_take <aid> [<reason>]: take it, or with a reason refuse it
   local s row ask rc fx=${2:-}
   s=$(an_ts screen "$1" "$LEDGER" "$(utc_now)"); rc=$?; [ $rc = 0 ] || return $rc
-  row=$(jq -c '.row // empty' <<<"$s")
-  ask=$(with_ledger an_file "$1" "$row"); rc=$?
-  case $rc in 0) ;; 3) echo "warning: $1 changed after its sentences were filed, so it is refused" >&2; fx=${fx:-invalid};; *) return 2;; esac
+  row=$(jq -c '.row // empty' <<<"$s"); ask=
+  # a logged id is a recovery, which files nothing and prints the ask its log names
+  if [ "$(jq -r .logged <<<"$s")" != true ]; then ask=$(with_ledger an_file "$1" "$row"); rc=$?
+    case $rc in 0) ;; 3) echo "warning: $1 changed after its sentences were filed, so it is refused" >&2; fx=${fx:-invalid};; *) return 2;; esac; fi
   RQ_BUSY=2 rq_locked an_ts take "$1" "$(jq -r .sha <<<"$s")" "$(jq -r 'if .flagged then 1 else 0 end' <<<"$s")" "$ask" "$([ -n "${2:-}" ] && echo refuse || echo take)" "$fx" "$(utc_now)"
 }
 orchy_answer() {

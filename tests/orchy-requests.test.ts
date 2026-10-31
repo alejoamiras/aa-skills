@@ -216,6 +216,7 @@ describe("answers", () => {
     // gitleaks reads the free text and any value no grammar vouches for, never a valid binding or choice
     expect(screenText(a("rq2.1", { kind: "approve", go: true, binding: { kind: "text", sha256: B }, note: "ok" }))).toBe("ok");
     expect(screenText(a("rq1.1", { kind: "pick", choice: "AKIA-x", extra: { k: 1 } }))).toBe('AKIA-x\nextra\n{"k":1}');
+    expect(screenText(JSON.parse('{"kind": "pick", "constructor": "c1", "__proto__": "p1"}'))).toBe("constructor\nc1\n__proto__\np1");
     // a current reply is taken and a pick for a past rev refused, and both file their text on no ask
     inbox(s, a("rq4.1", { kind: "reply", text: "Spanish" }));
     inbox(s, a("rq4.2", { kind: "pick", rev: 9, choice: "unit", note: "stale words" }));
@@ -242,10 +243,13 @@ describe("answers", () => {
     const sh = inbox(s, a("rq4.1", { kind: "reply", text: "Spanish" }));
     const first = take(s, GL, "rq4.1", sh, false, "", "");
     expect([first.code, first.out.verdict, r(s, "rq4").answers.length]).toEqual([0, "taken", 1]);
-    inbox(s, a("rq4.1", { kind: "reply", text: "French" }));
+    // a replay of the archived bytes is a recovery that removes it; other bytes under the settled id are refused, both kept
     const ledger = Buffer.from(join(T, "ledger.jsonl"));
-    expect(screen(s, GL, "rq4.1", ledger, at).row).toBeNull();
-    expect(take(s, GL, "rq4.1", "", false, "", "")).toMatchObject({ code: 0, out: { verdict: "taken", recovered: true, answer: { text: "Spanish" } } });
+    const same = inbox(s, a("rq4.1", { kind: "reply", text: "Spanish" }));
+    expect(take(s, GL, "rq4.1", same, false, "", "")).toMatchObject({ code: 0, out: { verdict: "taken", recovered: true, answer: { text: "Spanish" } } });
+    const other = inbox(s, a("rq4.1", { kind: "reply", text: "French" }));
+    expect([screen(s, GL, "rq4.1", ledger, at).row, refusal(() => take(s, GL, "rq4.1", other, false, "", ""))]).toEqual([null, expect.stringMatching(/different files/)]);
+    rmSync(join(s.ans.toString(), "rq4.1.json"));
     // a fresh take replaces what a deposit left in the archive under its name, and prints what it verified
     writeFileSync(join(s.ans.toString(), "refused", "rq4.5.json"), JSON.stringify(a("rq4.5", { kind: "reply", text: "forged" })));
     const s5 = inbox(s, a("rq4.5", { kind: "reply", text: "real" }));
@@ -253,8 +257,8 @@ describe("answers", () => {
     expect(JSON.parse(readFileSync(join(s.ans.toString(), "refused", "rq4.5.json"), "utf8")).text).toBe("real");
     const st = inbox(s, a("rq1.3", { kind: "pick", choice: "unit" }));
     expect(take(s, GL, "rq1.3", st, false, "", "")).toMatchObject({ code: 4, out: { verdict: "refused", reason: "stale" } });
-    inbox(s, a("rq1.3", { kind: "pick", choice: "unit", rev: 2 }));
-    expect(take(s, GL, "rq1.3", "", false, "", "")).toMatchObject({ code: 4, out: { reason: "stale", recovered: true } });
+    rmSync(join(s.ans.toString(), "refused", "rq1.3.json"));
+    expect(take(s, GL, "rq1.3", inbox(s, a("rq1.3", { kind: "pick", choice: "unit", rev: 2 })), false, "", "")).toMatchObject({ code: 4, out: { reason: "stale", recovered: true } });
     expect([r(s, "rq1").status, r(s, "rq1").answers.length, r(s, "rq4").answers.length]).toEqual(["open", 1, 2]);
     // a file that is no JSON object is archived as its stub, never as its bytes, a secret among them or not
     for (const [id, raw] of [["rq4.6", "not json"], ["rq4.7", `{"text": "AKIA${"Q".repeat(16)}"`]]) {

@@ -8,7 +8,8 @@
 //   screen <aid> <ledger> <now>     {where, sha, flagged, row}: the file found and screened, and the ledger row it files
 //   take <aid> <sha> <flagged 0|1> <ask> <take|refuse> <reason or empty> <now>   under the locks: orchy.answer-take/1
 //   list <all 0|1> <json 0|1> <now> | show <aid> <now>
-// Exit 0; 1 refused (take: invalid); 4 take refused stale or closed; 2 could not run, nothing committed; 120 stdout failed
+// Exit 0; 1 refused (take: invalid); 4 take refused stale or closed; 2 could not run, and the same command reruns it to its
+// one outcome; 120 stdout failed
 import { closeSync, constants, fstatSync, fsyncSync, linkSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { split } from "./args.ts";
 import { fromDateIso8601 } from "./holds.ts";
@@ -101,7 +102,8 @@ export function view(o: O | null, name: string, shown: boolean): O {
 export function screenText(o: O): string {
   const f = valid(o) as O, vouched: Record<string, boolean> = { schema: o.schema === "orchy.answer/1", withheld: o.withheld === "secret",
     id: typeof o.id === "string" && AID.test(o.id), request: typeof o.request === "string" && RID.test(o.request) };
-  return Object.entries(o).filter(([k, v]) => (FREE.includes(k) ? v !== null : !(vouched[k] ?? f[k] !== undefined)))
+  // own properties only: a key like constructor or __proto__ must not find a vouch on a prototype
+  return Object.entries(o).filter(([k, v]) => (FREE.includes(k) ? v !== null : !(Object.hasOwn(vouched, k) ? vouched[k] : Object.hasOwn(f, k))))
     .map(([k, v]) => `${FILE_KEYS.includes(k) ? "" : `${k}\n`}${typeof v === "string" ? v : JSON.stringify(v)}`).join("\n");
 }
 // a file that is no JSON object, an oversized one included, is screened as the bytes read
@@ -204,7 +206,7 @@ function find(s: Store, rid: string): { r: Request; closed: boolean; dir: Buffer
   }
   return null;
 }
-function writeNew(path: Buffer, data: string): void {
+function writeNew(path: Buffer, data: string | Buffer): void {
   const fd = openSync(path, "wx", 0o600);
   try { writeFileSync(fd, data); fsyncSync(fd); } finally { closeSync(fd); }
 }
@@ -254,8 +256,9 @@ export function screen(s: Store, gl: string, name: string, ledger: Buffer, now: 
   const f = locate(s.ans, name) ?? no(`no answer ${name}`), r = find(s, name.split(".")[0])?.r ?? null;
   const flagged = leaks(gl, textOf(f.bytes, f.o));
   // an id the log settled is a replay, whose words are never filed
-  const row = f.where === "inbox" && f.o && !flagged && !r?.answers.some((e) => e.id === name) ? ledgerRow(f.o, name, r, askIds(ledger), now) : null;
-  return { where: f.where, sha: sha256(f.bytes), flagged, row };
+  const logged = r?.answers.some((e) => e.id === name) ?? false;
+  const row = f.where === "inbox" && f.o && !flagged && !logged ? ledgerRow(f.o, name, r, askIds(ledger), now) : null;
+  return { where: f.where, sha: sha256(f.bytes), flagged, logged, row };
 }
 
 type Take = { out: O; code: number };
@@ -266,12 +269,34 @@ function report(name: string, o: O | null, shown: boolean, e: Pick<LogEntry, "st
   const code = refuse ? (e.state === "refused" ? 0 : 1) : e.state === "taken" ? 0 : e.reason === "stale" || e.reason === "closed" ? 4 : 1;
   return { out, code };
 }
-// A recovery finishes only the move and prints the outcome as logged, with the archived file screened again, since it is
-// not the file this run screened. An archived file under the name is the one the log settled: the inbox copy is a replay.
-function recover(s: Store, gl: string, name: string, f: { where: Where }, e: Pick<LogEntry, "state" | "reason" | "withheld" | "ask">, r: Request | null, refuse: boolean): Take {
-  const dir = at(s.ans, e.state), file = `${name}.json`;
-  if (f.where === "inbox") { if (present(dir, file)) unlinkSync(at(s.ans, file)); else renameSync(at(s.ans, file), at(dir, file)); }
-  const b = present(r || f.where === "inbox" ? dir : dirOf(s.ans, f.where), file), o = b && parse(b);
+// what a take keeps of a file: its bytes as screened, or, flagged or no answer object, its redacted stub
+function scrub(f: { bytes: Buffer; o: O | null }, name: string, flagged: boolean): { bytes: Buffer; o: O } {
+  if (f.o && !flagged) return { bytes: f.bytes, o: f.o };
+  const o = view(f.o, name, !flagged);
+  return { bytes: Buffer.from(`${JSON.stringify(o)}\n`), o };
+}
+// bytes to <folder>/<name>.json by rename, so no reader sees a partial file; the inbox copy goes once they are archived
+function place(s: Store, name: string, folder: Where, bytes: Buffer): void {
+  const tmp = at(s.ans, ".tmp", `${name}.${process.pid}.${folder}`);
+  writeNew(tmp, bytes);
+  try { renameSync(tmp, at(dirOf(s.ans, folder), `${name}.json`)); } catch (e) { unlinkSync(tmp); throw e; }
+  if (folder !== "inbox") try { unlinkSync(at(s.ans, `${name}.json`)); } catch (e) { if ((e as { code?: string }).code !== "ENOENT") throw e; }
+}
+// A recovery finishes only the move, and prints the outcome as logged. An inbox copy is archived scrubbed, or goes when the
+// archive already holds those bytes; an archive with other bytes leaves both, since either could be a deposit.
+function recover(s: Store, gl: string, name: string, f: { where: Where; bytes: Buffer; o: O | null }, sha: string, flagged: boolean,
+  e: Pick<LogEntry, "state" | "reason" | "withheld" | "ask">, r: Request | null, refuse: boolean): Take {
+  const file = `${name}.json`, dir = at(s.ans, e.state);
+  if (f.where === "inbox") {
+    if (sha256(f.bytes) !== sha) down(`${name} changed since it was screened; take it again`);
+    const c = scrub(f, name, flagged), kept = present(dir, file);
+    if (kept && !kept.equals(c.bytes)) no(`${name}: the inbox and ${e.state}/ hold different files under one settled id; move the wrong one aside`);
+    if (kept) unlinkSync(at(s.ans, file));
+    else place(s, name, e.state as Where, c.bytes);
+    return report(name, c.o, !flagged, e, r, true, refuse);
+  }
+  // not the file this run screened when another folder holds one too, so screened again
+  const b = present(r ? dir : dirOf(s.ans, f.where), file), o = b && parse(b);
   return report(name, o, b === null || !leaks(gl, textOf(b, o)), e, r, true, refuse);
 }
 /** take and refuse under the locks: a logged outcome wins, then the redaction, the verdict, the log entry as the commit, the move.
@@ -279,20 +304,15 @@ function recover(s: Store, gl: string, name: string, f: { where: Where }, e: Pic
 export function take(s: Store, gl: string, name: string, sha: string, flagged: boolean, ask: string, fixed: string, refuse = fixed !== ""): Take {
   const rid = name.split(".")[0], found = find(s, rid), f = locate(s.ans, name) ?? no(`no answer ${name}`);
   const logged = found?.r.answers.find((e) => e.id === name);
-  if (logged) return recover(s, gl, name, f, logged, found!.r, refuse);
+  if (logged) return recover(s, gl, name, f, sha, flagged, logged, found!.r, refuse);
   if (f.where !== "inbox") {
     if (found) no(`${name} is in ${f.where}/, but ${rid} never logged it, so it is no pending answer`);
-    return recover(s, gl, name, f, { state: "refused", reason: "invalid" }, null, refuse);
+    return recover(s, gl, name, f, sha, flagged, { state: "refused", reason: "invalid" }, null, refuse);
   }
   if (sha256(f.bytes) !== sha) down(`${name} changed since it was screened; take it again`);
-  // a flagged file loses its free text, and one that is no answer object its bytes, before any verdict
-  let o = f.o;
-  if (flagged || !o) {
-    o = view(o, name, !flagged);
-    const tmp = at(s.ans, ".tmp", `${name}.${process.pid}.redact`);
-    writeNew(tmp, `${JSON.stringify(o)}\n`);
-    renameSync(tmp, at(s.ans, `${name}.json`));
-  }
+  // the redaction lands before any verdict, so no stop after it leaves the raw text on disk
+  const c = scrub(f, name, flagged), o = c.o;
+  if (c.bytes !== f.bytes) place(s, name, "inbox", c.bytes);
   let v = verdict(o, name, found?.r ?? null, found?.closed ?? false);
   // an answer to no request has no log to keep a reason, so it is invalid on every run
   if (fixed && v.withheld === undefined && found) v = refused(fixed, `refused as ${fixed}`);
@@ -302,8 +322,8 @@ export function take(s: Store, gl: string, name: string, sha: string, flagged: b
     write(found.dir, build({ ...meta(r), status: final ? "taken" : r.status, updated: s.now, taken: final ? { answer: name, at: s.now } : r.taken,
       answers: [...r.answers, e as LogEntry] }, contentOf(r)));
   }
-  // replacing whatever a deposit left under the name, so the archive holds the file this take verified
-  renameSync(at(s.ans, `${name}.json`), at(s.ans, v.state, `${name}.json`));
+  // the verified bytes, never the inbox path, which any process may have replaced since; over whatever a deposit left there
+  place(s, name, v.state, c.bytes);
   return report(name, o, !flagged, e, found ? (find(s, rid)?.r ?? found.r) : null, false, refuse);
 }
 
