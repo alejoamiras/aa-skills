@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Smoke test for bin/claude-usage, bin/clu and the claude skill's reviewer
-# scripts — a stub `claude` on PATH, a fake HOME and a throwaway accounts root.
+# Smoke test for bin/claude-usage, bin/clu, lib/usage.sh and the claude skill's
+# reviewer scripts — a stub `claude` on PATH, a fake HOME and a throwaway accounts root.
 # No real login, keychain, token or ~/.claude is touched.
 # shellcheck disable=SC2016,SC2012,SC2329 # literal $… in sh -c bodies; ls counts names we created; helpers run through t
 set -uo pipefail
@@ -593,5 +593,43 @@ cx --json --cached > "$S/cx.json"; sleep 1
 t "json: every --json reply parses strictly" test ! -s "$S/badjson"
 t "codex cached json: snapshot rows, never a probe or a refresh" sh -c 'grep -q "\"account\":\"cx-a\".*\"week_left_pct\":40" "$1" && ! test -s "$2"' _ "$S/cx.json" "$S/cx.calls"
 t "codex cached json: read with no codex CLI on PATH" sh -c 'env PATH="$1" CODEX_ACCOUNTS_ROOT="$2" XDG_CACHE_HOME="$3" "$4" --json --cached | grep -q "\"account\":\"cx-a\""' _ "$(without codex)" "$S/cx-accounts" "$S/cache-cx" "$ROOT/bin/codex-usage"
+
+# --- lib/usage.sh ---------------------------------------------------------------
+# The helpers, sourced bare: "main=" is a pre-roster slot alias, k2's label is empty, the last line has no newline.
+printf 'main=old\nk1=one\nk10=ten\nk2=\nk3=three' > "$S/labels.conf"
+lib() { bash -uc 'die() { printf "%s\n" "$*" >&2; exit 1; }; LABELS_FILE=$1; . "$2"; shift 2; "$@"' _ "$S/labels.conf" "$ROOT/lib/usage.sh" "$@"; }
+t "lib: labels map both ways, the slot alias and an empty label ignored" sh -c 'test "$*" = "one ten k2 three main k1 old k3"' _ \
+  "$(lib label_for k1)" "$(lib label_for k10)" "$(lib label_for k2)" "$(lib label_for k3)" "$(lib label_for main)" \
+  "$(lib key_for one)" "$(lib key_for old)" "$(lib key_for three)"
+lib drop_label k1
+t "lib: drop_label drops the exact key only" test "$(cat "$S/labels.conf")" = "$(printf 'main=old\nk10=ten\nk2=\nk3=three')"
+t "lib: jq_str escapes quotes and backslashes, drops control chars" test "$(lib jq_str $'a"b\\c\td\ne')" = 'a\"b\\cde'
+t "lib: pad_cell pads to the plain width, not the painted one" test "$(lib pad_cell $'\e[1mab\e[0m' ab 5 left)|$(lib pad_cell x x 3 right)" = $'\e[1mab\e[0m   |  x'
+t "lib: hrule draws two dashes past each width" test "$(lib hrule '<' '+' '>' 1 0)" = '<───+──>'
+r=$("$CU_BIN" add main 2>&1)"|"$(cx add best 2>&1)
+t "lib: each tool's own wording for a reserved name" test "$r" = "'main' is reserved for ~/.claude|'best' is reserved: it means \"pick for me\" in \`home\` and CODEX_ACCOUNT"
+# install.sh reaches the bins through ~/.local/bin links: a relative link to an absolute one, from an unrelated cwd.
+LNR="$S/link-root"; mkdir -p "$LNR/k1" "$S/ln/abs" "$S/ln/rel" "$S/ln/cwd"; echo k1=lab > "$LNR/labels.conf"
+for b in claude-usage codex-usage; do ln -s "$ROOT/bin/$b" "$S/ln/abs/$b"; ln -s "../abs/$b" "$S/ln/rel/$b"; done
+t "bins: both find the lib through a chain of symlinks" sh -c 'cd "$1/cwd" && CLAUDE_ACCOUNTS_ROOT="$2" ../rel/claude-usage list | grep -q "^lab " &&
+  PATH="$3:$PATH" CODEX_ACCOUNTS_ROOT="$2" ../rel/codex-usage list | grep -q "^lab "' _ "$S/ln" "$LNR" "$S/cxbin"
+# Stock macOS runs both bins, and so the lib, on bash 3.2.
+if command -v docker > /dev/null && docker image inspect bash:3.2 > /dev/null 2>&1; then
+  B32="$S/b32"; mkdir -p "$B32/stub" "$B32/acc/k1" "$B32/abs" "$B32/rel" "$B32/cwd"; echo k1=lab > "$B32/acc/labels.conf"
+  for c in claude codex; do printf '#!/bin/sh\nexit 1\n' > "$B32/stub/$c"; done
+  printf '#!/bin/sh\nexit 0\n' > "$B32/stub/jq"; chmod +x "$B32"/stub/*   # codex-usage only checks that jq exists
+  for b in claude-usage codex-usage; do ln -s "/r/bin/$b" "$B32/abs/$b"; ln -s "../abs/$b" "$B32/rel/$b"; done
+  docker run --rm --user "$(id -u):$(id -g)" -v "$ROOT:/r:ro" -v "$B32:/w" bash:3.2 bash -c 'cd /w/cwd &&
+    export HOME=/w XDG_CACHE_HOME=/w/cache PATH=/w/stub:$PATH CLAUDE_USAGE_SKIP_MAIN=1 CLAUDE_ACCOUNTS_ROOT=/w/acc CODEX_ACCOUNTS_ROOT=/w/acc
+    ../rel/claude-usage list; ../rel/codex-usage list; ../rel/claude-usage rename lab lab2; ../rel/codex-usage add best 2>&1
+    ../rel/codex-usage refresh; ls /w/cache/codex-usage/*/; ../rel/codex-usage; ../rel/codex-usage --json --cached; ../rel/codex-usage statusline' \
+    > "$B32/out" 2> "$B32/err"
+  t "bash 3.2: both bins load the lib through the symlink chain" test "$(grep -cx 'lab  *\/w\/acc\/k1' "$B32/out")" -eq 2
+  t "bash 3.2: rename, a reserved name, refresh, table and json run clean" sh -c 'grep -qx "lab → lab2" "$1" &&
+    grep -qx "'\''best'\'' is reserved: it means \"pick for me\" in \`home\` and CODEX_ACCOUNT" "$1" && grep -qx snapshot.tsv "$1" &&
+    ! grep -q refresh.lock "$1" && grep -q "│   lab2  │" "$1" && grep -q "\"account\":\"lab2\"" "$1" && test ! -s "$2"' _ "$B32/out" "$B32/err"
+else
+  echo "skip  bash 3.2 pass (docker or the bash:3.2 image missing)"
+fi
 
 exit "$FAIL"
