@@ -27,6 +27,7 @@ jobs:
               - 'bin/claude-usage'
               - 'bin/clu'
               - 'bin/codex-usage'
+              - 'lib/usage.sh'
               - 'skills/claude/scripts/**'
               - 'tests/smoke-claude-usage.sh'
               - 'tests/**'
