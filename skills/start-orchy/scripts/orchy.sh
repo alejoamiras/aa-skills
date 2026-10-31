@@ -46,8 +46,9 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #                                sequential; refuses an existing slug; teardown proves each against its base
 #   launch [--light] <key> <slug> <account|auto>       start a headless lead on prompts/<key>.md inside the lane worktree; only the
 #                                seat holder launches, on an account the policy allows (auto: the one whose headroom expires soonest)
-#   resume [--light] <key> <slug> <account> <session>  resume a lead's session with prompts/<key>.md, on that session's account
-#                                (both take --force-cap, on the owner's word only: it passes the caps and the heavy floor)
+#   resume [--light] <key> <slug> <account> <session>  resume a lead's session with prompts/<key>.md on a named account
+#                                (claude-usage run carries the session over); both take --force-cap, on the owner's word
+#                                only: it passes the caps and the heavy floors
 #   accounts [--json]            per roster account: week and session left, the weekly reset, and heavy, light or no with the
 #                                reason (orchy.headroom/1 with --json); the account this shell's session runs on is marked
 #   stop <key>                   end a live lead and every process it started

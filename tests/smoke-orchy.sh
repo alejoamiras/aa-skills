@@ -54,14 +54,17 @@ printf 'run it on acct-a\n' > "$T/bad.md"; if "$ORCHY" check-text "$T/bad.md" >/
 tmp=$(mktemp); jq '.prompt_ban="("' "$ORCHY_HOME/local.json" > "$tmp"; cp "$ORCHY_HOME/local.json" "$T/local.bak"; mv "$tmp" "$ORCHY_HOME/local.json"
 if "$ORCHY" check-text "$T/brief.md" >/dev/null 2>&1; then fail "check-text accepted an invalid regex"; fi; cp "$T/local.bak" "$ORCHY_HOME/local.json"
 # launch: never-list, roster, duplicate and cap refusals; a launched lead is alive with its start-time identity
-mkdir -p "$ORCHY_HOME/prompts" ".claude/worktrees/x"; printf 'You are a subagent.\n' > "$ORCHY_HOME/prompts/x-plan.md"; cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/x-a1.md"; cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/x-a2.md"
+mkdir -p "$ORCHY_HOME/prompts" ".claude/worktrees/x"; printf 'You are a subagent.\n' > "$ORCHY_HOME/prompts/x-plan.md"; for k in x-m1 x-m2 x-a1 x-ARC2 X-a1; do cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/$k.md"; done
 o=$("$ORCHY" launch x-plan x acct-main 2>&1 || true); grep -q 'acct-main: on a never-list' <<<"$o" || fail "launch did not refuse the policy's never-list: $o"
 o=$("$ORCHY" launch x-plan x acct-z 2>&1 || true); grep -q 'not on the claude-usage roster' <<<"$o" || fail "launch did not refuse an account off the roster: $o"
 "$ORCHY" launch x-plan x acct-a >/dev/null || fail "launch"
 o=$("$ORCHY" launch x-plan x acct-a 2>&1 || true); grep -q 'is alive' <<<"$o" || fail "launch did not refuse a duplicate key: $o"
-"$ORCHY" launch x-a1 x acct-a >/dev/null || fail "second heavy launch"
-o=$("$ORCHY" launch x-a2 x acct-a 2>&1 || true); grep -q 'cap 2' <<<"$o" || fail "launch did not enforce heavy_per_account: $o"
-"$ORCHY" launch --light x-a2 x acct-a >/dev/null || fail "light launch under its own cap"
+# an arc never starts beside its lane's live planner, however its key spells the lane or the arc
+for c in "launch x-a1 x acct-b" "launch X-a1 x acct-b" "resume x-ARC2 x acct-b 00000000-0000-4000-8000-000000000001"; do
+  o=$("$ORCHY" $c 2>&1 || true); grep -q 'refused: planner x-plan is alive' <<<"$o" || fail "$c beside a live planner: $o"; done
+"$ORCHY" launch x-m1 x acct-a >/dev/null || fail "second heavy launch"
+o=$("$ORCHY" launch x-m2 x acct-a 2>&1 || true); grep -q 'cap 2' <<<"$o" || fail "launch did not enforce heavy_per_account: $o"
+"$ORCHY" launch --light x-m2 x acct-a >/dev/null || fail "light launch under its own cap"
 [ "$("$ORCHY" snapshot 2>/dev/null | grep -c '^alive x-')" = 3 ] || fail "snapshot does not list the three live leads"
 [ "$("$ORCHY" session-id x-plan)" = 00000000-0000-4000-8000-000000000001 ] || fail "session-id"
 # launch: its own process group, auto mode by default, the hook settings and the two writable dirs, banner kept out of the JSON log
@@ -628,6 +631,16 @@ one "$n" ".kind == \"lead.launch\" and .key == \"x-ev\" and .lane == \"x\" and .
 n=$(en); "$ORCHY" stop x-ev >/dev/null; one "$n" '.kind == "lead.stop" and .key == "x-ev"' stop
 n=$(en); MOCK_LEAD_SECS=30 "$ORCHY" resume --force-cap x-ev x acct-b 00000000-0000-4000-8000-000000000009 >/dev/null || fail "resume x-ev"
 one "$n" '.kind == "lead.resume" and .key == "x-ev" and .prior_failed_lines == 2' resume; "$ORCHY" stop x-ev >/dev/null; "$ORCHY" unlock >/dev/null
+# a lead stopped by a usage limit is LIMITED until its reset, and only the account it hit waits for that
+"$ORCHY" lock >/dev/null; printf 'You are a subagent.\n' > "$ORCHY_HOME/prompts/x-lim.md"; rs=$(( ($(date +%s) / 3600 + 2) * 3600 ))
+lim='{"type":"result","subtype":"success","is_error":true,"result":"You have hit your limit · your 5-hour limit resets '"$(date -u -d "@$rs" +%-I%P)"' (UTC)"}'
+lim_gone() { read -r p _ < "$ORCHY_HOME/leads/x-lim.started"; for _ in $(seq 100); do [[ $(ps -o args= -p "$p") == *claude-usage* ]] || return 0; sleep 0.1; done; fail "x-lim never ended"; }
+lim_run() { MOCK_LEAD_SECS=1 MOCK_RESULT=${2-$lim} "$ORCHY" $1 --force-cap x-lim x "${@:3}" >/dev/null && lim_gone || fail "$1 x-lim ${*:3}"; }
+lim_run launch "$lim" acct-b; o=$("$ORCHY" snapshot 2>&1); grep -qx "LIMITED x-lim resets $(date -u -d "@$rs" +%FT%TZ)" <<<"$o" || fail "no LIMITED line: $o"
+o=$("$ORCHY" resume --force-cap x-lim x acct-b 00000000-0000-4000-8000-000000000001 2>&1 || true); grep -q "acct-b's usage limit, which resets $(date -u -d "@$rs" +%FT%TZ)" <<<"$o" || fail "a resume before the reset: $o"
+lim_run resume "$lim" acct-c 00000000-0000-4000-8000-000000000001; touch -d "@$(( $(date +%s) - 86400 ))" "$ORCHY_HOME/leads/x-lim.log"
+o=$("$ORCHY" snapshot 2>&1); grep -qx "LIMITED x-lim resets $(date -u -d "@$(( rs - 86400 ))" +%FT%TZ) (passed)" <<<"$o" || fail "a passed reset: $o"
+lim_run resume "" acct-c 00000000-0000-4000-8000-000000000001; "$ORCHY" unlock >/dev/null
 n=$(en); A add "an event row" >/dev/null; one "$n" '.kind == "ask.row" and (.ask | test("^ask[0-9]+$")) and .state == "open"' "ask add"
 grep -q 'acct-\|event row\|gate red' "$E" && fail "an event carries an account name or text: $(grep 'acct-\|event row\|gate red' "$E")"
 jq -se 'all(.schema == "orchy.event/1" and (.at | test("Z$")))' "$E" >/dev/null || fail "an event without its schema"
@@ -697,6 +710,10 @@ B state | jq -e '.caps == null and (.errors | index("caps"))' >/dev/null || fail
 ln -s "$PA" "$T/lnk.json"; LK() { ORCHY_HOME="$HA" MOCK_CU="$CA" ORCHY_ACCOUNTS="$T/lnk.json" "$ORCHY" "$@"; }
 for c in accounts "launch --light acc-a8 acc auto"; do o=$(LK $c 2>&1) && fail "$c read a symlinked policy"; grep -q 'not a symlink' <<<"$o" || fail "$c on a symlinked policy: $o"; done
 LK state | jq -e '.caps == null' >/dev/null || fail "state read a symlinked policy"
+# a heavy lead needs the session floor too, a light one any headroom
+jq 'map(if .account == "p-bravo" then .session_left_pct = 10 else . end)' "$CA/rows.json" > "$T/r.json" && mv "$T/r.json" "$CA/rows.json"
+o=$(AC launch acc-a8 acc p-bravo 2>&1 || true); grep -qF 'p-bravo takes light leads only: session 10% is under the 30% floor' <<<"$o" || fail "a heavy launch on a low session: $o"
+AC launch --light acc-a8 acc p-bravo >/dev/null || fail "a light launch on a low session"; cu_rows
 # the seat: only its holder spawns; two programs racing for an account's last heavy slot take that one and the next
 for f in "$HA"/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/null || true; done; sleep 1
 for k in r0 r1 r2; do printf 'You are a subagent.\n' > "$HA/prompts/acc-$k.md"; done

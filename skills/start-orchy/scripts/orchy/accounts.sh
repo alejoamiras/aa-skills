@@ -8,13 +8,14 @@ policy() { # orchy.accounts/1 with its defaults filled in; a missing file is the
   if [ -e "$f" ]; then j=$(cat "$f") || { echo "refused: cannot read $f" >&2; return 1; }; fi
   # a present key is checked as written (`//` reads false and null as absent); \z, since $ also matches before a final newline
   jq -sce 'def opt($k; f): (has($k) | not) or (.[$k] | f); def whole: type == "number" and . == floor and . >= 0;
-    select(length == 1) | .[0] | select(type == "object" and (keys - ["schema", "never", "heavy_floor_pct", "heavy_per_account", "light_per_account"]) == []
+    select(length == 1) | .[0] | select(type == "object" and (keys - ["schema", "never", "heavy_floor_pct", "heavy_session_floor_pct", "heavy_per_account", "light_per_account"]) == []
       and opt("schema"; . == "orchy.accounts/1")
       and opt("never"; type == "array" and length <= 64 and all(.[]; type == "string" and test("\\A[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}\\z")))
-      and opt("heavy_floor_pct"; whole and . <= 100) and opt("heavy_per_account"; whole and . <= 9) and opt("light_per_account"; whole and . <= 9))
-    | {schema: "orchy.accounts/1", never: (.never // []), heavy_floor_pct: (.heavy_floor_pct // 25),
+      and opt("heavy_floor_pct"; whole and . <= 100) and opt("heavy_session_floor_pct"; whole and . <= 100)
+      and opt("heavy_per_account"; whole and . <= 9) and opt("light_per_account"; whole and . <= 9))
+    | {schema: "orchy.accounts/1", never: (.never // []), heavy_floor_pct: (.heavy_floor_pct // 25), heavy_session_floor_pct: (.heavy_session_floor_pct // 30),
        heavy_per_account: (.heavy_per_account // 2), light_per_account: (.light_per_account // 3)}' <<<"$j" 2>/dev/null \
-    || { echo "refused: $f is not orchy.accounts/1 (never: names; heavy_floor_pct: 0-100; heavy_per_account, light_per_account: 0-9)" >&2; return 1; }
+    || { echo "refused: $f is not orchy.accounts/1 (never: names; heavy_floor_pct, heavy_session_floor_pct: 0-100; heavy_per_account, light_per_account: 0-9)" >&2; return 1; }
 }
 roster_rows() { # "<key> <label>" per roster account, never the ~/.claude slot: `run =` takes a directory key, the cached rows carry labels
   local out; out=$(claude-usage list 2>/dev/null) || { echo "refused: claude-usage list failed, so the roster is unknown" >&2; return 1; }
@@ -56,6 +57,9 @@ acct_view() { # {policy, orchestrator, known, accounts}: one row per roster acco
            elif ($r.week_left_pct | type) != "number" then ["light", "its week headroom is unknown"]
            elif ($r.session_left_pct | type) != "number" then ["light", "its session headroom is unknown"]
            elif $r.week_left_pct < $pol.heavy_floor_pct then ["light", "week \($r.week_left_pct)% is under the \($pol.heavy_floor_pct)% floor", true]
+           # like a spent session, a low one counts only until its own reset
+           elif $r.session_left_pct < $pol.heavy_session_floor_pct and (($r.session_resets_at | type) != "number" or $r.session_resets_at > $now)
+             then ["light", "session \($r.session_left_pct)% is under the \($pol.heavy_session_floor_pct)% floor", true]
            else ["heavy", "week \($r.week_left_pct)% left"] end) as [$v, $why, $floor]
         | {key: $a.key, label: $a.label, verdict: $v, why: $why, floor: ($floor // false), week_left_pct: $r.week_left_pct, session_left_pct: $r.session_left_pct,
            week_resets_at: $r.week_resets_at, observed_at: $r.observed_at,
@@ -86,7 +90,7 @@ orchy_accounts() {
   jq -r --argjson now "$(date +%s)" 'def reading: "week \(.week_left_pct // "?")% session \(.session_left_pct // "?")%"
       + (if (.week_resets_at | type) != "number" then "" elif .week_resets_at > $now then " resets in \((.week_resets_at - $now) / 3600 | floor)h" else " reset passed" end);
     .policy as $p
-    | "policy: heavy leads need \($p.heavy_floor_pct)% of the week left, light ones any; \($p.heavy_per_account) heavy and \($p.light_per_account) light per account",
+    | "policy: heavy leads need \($p.heavy_floor_pct)% of the week and \($p.heavy_session_floor_pct)% of the session left, light ones any; \($p.heavy_per_account) heavy and \($p.light_per_account) light per account",
       "orchestrator: \(.orchestrator)  \(.me // {} | reading)",
       (.accounts[] | "\(.label)\(if .key != .label then " (\(.key))" else "" end)  \(.verdict)  \(reading)  leads \(.heavy_leads) heavy \(.light_leads) light  \(.why)")' <<<"$v"
 }
