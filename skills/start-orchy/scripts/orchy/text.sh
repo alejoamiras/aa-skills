@@ -17,6 +17,11 @@ orchy_check_text() {
     hits=$(grep -nE "$ban" "$f"); [ $? -le 1 ] || { echo "orchy: cannot scan $f" >&2; rc=2; continue; }
     [ -z "$hits" ] || { echo "orchy: $f carries banned text:"; head -5 <<<"$hits" | cut -c1-160; rc=1; }; done; exit $rc
 }
+public_ok() { # public_ok <file> <what>: check-public, its refusal as one line naming the patterns hit
+  local o; o=$("$0" check-public "$1" 2>&1)
+  case $? in 0) ;; 1) echo "refused: $2 fails check-public ($(grep -oE '^(LEAK|SENSITIVE|SECRET)|copies the owner' <<<"$o" | sort -u | paste -sd, -))" >&2; return 1;;
+    *) echo "refused: check-public could not run" >&2; return 1;; esac
+}
 orchy_check_private() { [ $# -gt 0 ] || { echo "usage: check-private <file>..." >&2; exit 2; }; bash "$OVERLAP" "$LEDGER" "$@"; }
 orchy_check_public() {
   # Fails closed: a check that cannot run refuses (exit 2), unlike scan, which reports what it could read.
