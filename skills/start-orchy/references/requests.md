@@ -1,6 +1,6 @@
 # Requests
 
-A **request** is one question that waits on the owner, in one format: a plain title, a shape, what it holds up, an age and a thread. `orchy.sh` is its only writer; `scripts/orchy/requests.ts` holds the format and `scripts/orchy/requests.sh` the commands.
+A **request** is one question that waits on the owner, in one format: a plain title, a shape, what it holds up, an age and a thread. An **answer** is the owner's reply to one. `orchy.sh` is the only writer of both; `scripts/orchy/requests.ts` and `answers.ts` hold the formats, `requests.sh` and `answers.sh` the commands.
 
 ## Where they live
 
@@ -10,6 +10,10 @@ ${ORCHY_ASKS_DIR:-~/.agents/orchy/asks}/   700, the ask ledger's folder
     <rid>.json                              open, stale or taken; 600, replaced whole (temp file, then rename)
     closed/<rid>.json                       done or withdrawn, moved there by rename and kept
     requests.lock                           the writers' lock, never replaced
+  <owner>-<repo>.answers/                   700
+    <aid>.json                              a pending answer, 600, created whole: written in .tmp/, then link()ed in
+    .tmp/                                   staging on the same file system, so a link is atomic and fails on a taken name
+    taken/<aid>.json, refused/<aid>.json    moved there by take or refuse once the outcome is logged in its request
 ```
 
 Requests sit beside the ledger, not in `$ORCHY_HOME`: a lead may write anywhere in the home as the owner's user, and a request planted there could be shown, answered and acted on. Readers take no lock and create nothing; they refuse a symlinked or foreign-owned folder, and skip a file that is not theirs. A file renamed away between a listing and its read is skipped, not reported.
@@ -60,6 +64,7 @@ The **answerable content** is `shape, title, context, steps, options, recommend,
 |---|---|---|
 | (none) | `request add` | `open`, rev 1 |
 | `open` | `request add` with changed content | `open`, rev+1 |
+| `open` | `answer take` of a final answer for the current `rev` | `taken` |
 | `open` | `request stale <rid> <reason>` (the reason joins the thread) | `stale` |
 | `stale` | `request add` | `open`, rev+1 |
 | `open`, `taken` | `request done <rid> <outcome>` | `done`, in `closed/` |
@@ -83,7 +88,65 @@ A request owns its ref's waiting slot by projection, not by a second write. `wai
 
 ## Readers
 
-- `request list [--json] [--all]`: one line per open request (`rid rev status shape ref age title`), every request with `--all`. `--json` prints `orchy.requests/1`, `{schema, requests: [<request> + {age_s, pending, answered, unanswered}], errors}`, golden in `tests/mocks/orchy/requests.v1.json`. `unanswered` lists the taken replies no note answers; `pending` and `answered` stay `[]` and `false`, since nothing writes answers yet.
+- `request list [--json] [--all]`: one line per open request (`rid rev status shape ref age [answered] title`), every request with `--all`. `--json` prints `orchy.requests/1`, `{schema, requests: [<request> + {age_s, pending: [{id, rev, kind, at}], answered, unanswered}], errors}`, golden in `tests/mocks/orchy/requests.v1.json`. `pending` lists the answers in the inbox; `answered` (sent, not yet taken) is a pending final answer for the current `rev`, or a pending reply; `unanswered` lists the taken replies no note answers.
 - `request show <rid>`: one request, open or closed, as text.
 
 A request holds only the orchestrator's text, so these feeds print no owner words. `request list` runs on bun, found as `ORCHY_BUN`, else on PATH, else `~/.bun/bin/bun`; `check-public` finds gitleaks the same way, at `ORCHY_GITLEAKS` or `~/.local/bin/gitleaks`.
+
+## Answers, `orchy.answer/1`
+
+`answer put` is the one sanctioned writer, and the viewer's one write. Any process of the owner's can still drop a file in the inbox, so `take` validates every file again, and every reader screens the text it prints.
+
+| Field | Rule |
+|---|---|
+| `schema`, `id` | `"orchy.answer/1"`; `<rid>.<seq>`, seq 1–99, the file's name, allocated by `put` as one more than the highest seq the request's log, the inbox, `taken/` and `refused/` hold |
+| `request`, `rev` | the request, and the revision the owner saw |
+| `kind` | `pick`, `approve`, `done` or `reply`; it equals the request's shape, except `reply`, which every shape takes. `sign` is refused: a page is signed on its Artifact. |
+| `at` | stamped by `put` |
+| `choice` | `pick`: an option id, or `other` with `text` |
+| `go` | `approve`: `true`, or `false` for Not now |
+| `binding` | `approve` with `go: true`: the request's binding, copied unchanged |
+| `text` | `reply` (required), or a pick's Other text: 1–2000 code points |
+| `note` | `pick`, `approve`, `done`, optional: 1–1000 |
+| `log` | `done`, optional: 1–6000, tabs allowed; pasted material |
+| `withheld` | `"secret"`, set by `take` alone, with the free text `null` |
+
+Free text (`text`, `note`, `log`) is well-formed UTF-8 with no control character but `\n` (and `\t` in a log) and no bidi character. A file is at most 16 KiB, and unknown keys are refused. gitleaks screens the free text, and anything else a strict reader would refuse, at `put`, at `take` and `refuse`, and in every reader: a flagged answer's free text prints as `null` with `withheld: "secret"`. gitleaks is found as `ORCHY_GITLEAKS`, else on PATH, else `~/.local/bin/gitleaks`; a screen that cannot run refuses.
+
+### `answer put`
+
+One answer on stdin, read up to 16 KiB and screened before `requests.lock` is taken. Every verdict exits 0 with `orchy.answer-put/1` on stdout, `{schema, state: "pending" | "refused", id?, request, rev, reason?}`; exit 2 with nothing on stdout means it could not run (a busy lock, an unsafe store, no bun or gitleaks). Under the lock, first refusal wins:
+
+| Reason | When |
+|---|---|
+| `invalid` | the grammar, no such request, a kind its shape refuses, an option it does not offer, a binding not its own |
+| `secret` | gitleaks flagged the text; no file is written |
+| `closed` | the request is done or withdrawn |
+| `stale` | a final answer (not a reply) for another `rev`, or while the request is not `open` |
+| `full` | a reply on content past 40 KiB, 100 answers pending in the home, or the request's seq would pass 99 |
+| `conflict` | a final answer while one is pending; a reply while one is pending or taken and unanswered |
+| `policy` | the caller runs below a live lead |
+
+A reply never blocks a final answer. `put` needs no seat, and creates nothing in `$ORCHY_HOME`.
+
+### `answer take <aid>` and `answer refuse <aid> <reason>`
+
+The seat holder's, never a lead's. In order:
+
+1. Find the file (inbox, `taken/` or `refused/`): regular, the user's own, at most 16 KiB; screen it.
+2. Under the ledger lock alone, file the owner's sentences (`text` and `note`, never `log`) once, keyed by `answer: <aid>`: a `said` row on the ask the request's ref, else its first block, names, or else a row with no ask id, which opens no ask and emits no event. A withheld or flagged answer files nothing.
+3. Under `requests.lock` and the seat's takeover lock: a log entry for `<aid>` makes this a recovery, which only finishes the move and prints the logged outcome. Otherwise a flagged file is rewritten in place with its free text `null` and `withheld: "secret"`, then the verdict, first match wins: withheld → `invalid`; the file's grammar, or no request → `invalid`; a closed request → `closed`; a final answer for another rev, or on a request not `open` → `stale`, the request unchanged; a misfit against the request → `invalid`; a reply while another taken reply is unanswered, or on content past 40 KiB → `invalid`; else taken. `refuse` fixes the reason, except that a secret still makes it `invalid`.
+4. Log the outcome from the fields that pass their grammar (`id, state, at, rev, kind, go, reason, withheld, ask`); a taken final answer makes the request `taken`, a reply leaves its status. That write is the commit.
+5. Move the file to `taken/` or `refused/`; an inbox copy of an id already logged is a replay and goes.
+6. Print `orchy.answer-take/1`, `{schema, verdict, reason, withheld, request: {id, rev, shape, ref, blocks, binding}, answer, ask, recovered}`.
+
+`take` exits 0 taken, 1 invalid, 4 stale or closed, 2 could not run (the answer stays pending); `refuse` exits 0. A rerun after any stop ends in the same one outcome. The orchestrator reads the owner's words from this output alone, and never types them into a command.
+
+`request done` and `withdraw` refuse while an answer of the request is pending. `ask add --from <aid>` opens an ask whose text is a taken answer's sentences as the take filed them, once per answer; a refused or withheld answer opens none.
+
+### Readers, `wait` and the snapshot
+
+- `answer list [--json] [--all]`: the pending answers and the logged ones of open requests, every request's with `--all`. `--json` prints `orchy.answers/1`, `{schema, answers: [<answer> + {state, reason?, ask?}], errors}`, golden in `tests/mocks/orchy/answers.v1.json`: the owner's words, for a local reader only, never to publish. Text mode, and `answer show <aid>` on a pending answer, print ids, kinds and states, never the words.
+- `wait` reports `CHANGED (answers):` and one `> <aid>` per answer new in the inbox since the last report; a removal (a take) wakes nothing. Only names in the answer-id grammar count.
+- The snapshot's `-- requests` lists each taken request and each unanswered reply, ids and age, `UNSETTLED` past 30 minutes.
+- The copy check counts no run that also occurs in the ledger's stored restatements or in a request's text: those passed `check-public` when written, so an owner's echo of them is not a copy.
