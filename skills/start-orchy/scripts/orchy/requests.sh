@@ -7,7 +7,7 @@ rq_dirs_ro() { # the readers' check: creates nothing; a missing folder holds no 
   local p; for p in "$ASKS_DIR" "$RQ" "$RQ/closed"; do
     if [ -L "$p" ] || { [ -e "$p" ] && { [ ! -d "$p" ] || [ ! -O "$p" ]; }; }; then echo "refused: $p must be a directory owned by $(id -un), not a symlink" >&2; return 1; fi; done
 }
-rq_dirs_ok() { # the writers': the folders created owner-only, and checked again once they exist
+rq_dirs_ok() {
   rq_dirs_ro && mkdir -p "$RQ/closed" && chmod 700 "$ASKS_DIR" "$RQ" "$RQ/closed" && rq_dirs_ro || { echo "refused: cannot create $RQ" >&2; return 1; }
 }
 lead_below() { # the pid of the lead this process runs under: an ancestor whose pid and start time a leads/*.started records
@@ -18,16 +18,19 @@ lead_below() { # the pid of the lead this process runs under: an ancestor whose 
     q=$(ps -o ppid= -p "$q" 2>/dev/null | tr -d ' '); [ -n "$q" ] || q=1
   done; return 1
 }
-# One request file as its waiting row; empty when closed, an error when it is not a request the waiting grammar can show.
-# The ref check refuses any byte outside printable ASCII first, since jq's $ also matches before a final newline.
-RQ_ROW='if type != "object" or .schema != "orchy.request/1" or .id != $id then error("x")
+# One request file, slurped so it must hold exactly one value, as its waiting row: empty when closed, an error when it
+# is not a request the waiting grammar can show. Refs and times are held to printable ASCII and a fixed length first,
+# since jq's $ also matches before a final newline and fromdateiso8601 ignores what follows a blank.
+RQ_ROW='if length != 1 then error("x") else .[0] end
+  | if type != "object" or .schema != "orchy.request/1" or .id != $id then error("x")
   elif .status == "done" or .status == "withdrawn" then empty
   elif (.status == "open" or .status == "stale" or .status == "taken")
     and (.ref | type) == "string" and (.ref | explode | all(. > 32 and . < 127)) and (.ref | test($wref))
     and (.title | type) == "string" and (.title | length) >= 1 and (.title | length) <= 160
     and (.title | explode | all(. >= 32 and (. < 127 or . >= 160) and . != 1564 and . != 8206 and . != 8207
       and (. < 8232 or . > 8238) and (. < 8294 or . > 8297)))
-    and (.since | type) == "string" and (.since | try fromdateiso8601 catch null) != null
+    and (.since | type) == "string" and (.since | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$") and length == 20)
+    and (.since | try fromdateiso8601 catch null) != null
   then {id, ref, text: .title, since} else error("x") end'
 rq_rows() { # {rows: [{id, ref, text, since}], errors: [{file, error}]} of the requests not closed; jq alone, so a viewer without bun reads it
   rq_dirs_ro || return 1
@@ -36,7 +39,7 @@ rq_rows() { # {rows: [{id, ref, text, since}], errors: [{file, error}]} of the r
     [[ $b =~ ^rq[1-9][0-9]{0,8}\.json$ ]] || continue
     if [ -L "$f" ] || [ ! -f "$f" ] || [ ! -O "$f" ]; then e="not a regular file owned by $(id -un)"
     elif [ "$(stat -c %s -- "$f" 2>/dev/null || echo 0)" -gt 65536 ]; then e="over 65536 bytes"
-    elif r=$(jq -c --arg id "${b%.json}" --arg wref "$WREF" "$RQ_ROW" "$f" 2>/dev/null); then [ -z "$r" ] || rows+=("$r"); continue
+    elif r=$(jq -sc --arg id "${b%.json}" --arg wref "$WREF" "$RQ_ROW" "$f" 2>/dev/null); then [ -z "$r" ] || rows+=("$r"); continue
     else e="not an orchy.request/1 the waiting list can show"; fi
     [ -e "$f" ] || [ -L "$f" ] || continue   # renamed away since the listing: closed, not broken
     errs+=("$(jq -nc --arg f "$b" --arg e "$e" '{file: $f, error: $e}')")
@@ -46,31 +49,35 @@ rq_rows() { # {rows: [{id, ref, text, since}], errors: [{file, error}]} of the r
     '{rows: ($r | sort_by(.id | ltrimstr("rq") | tonumber) | unique_by(.ref) | sort_by(.id | ltrimstr("rq") | tonumber)), errors: $e}'
 }
 rq_holder() { local q; q=$(rq_rows 2>/dev/null) || return 1; jq -r --arg r "$1" 'first(.rows[] | select(.ref == $r) | .id) // empty' <<<"$q"; }
+rq_ref() { local q; q=$(rq_rows 2>/dev/null) || return 1; jq -r --arg i "$1" 'first(.rows[] | select(.id == $i) | .ref) // empty' <<<"$q"; }
 rq_locked() { # rq_locked <fn> <arg>...: the seat is rechecked under the takeover lock that lock and unlock take to remove a seat, so it holds until the write commits
   ( flock -w 30 5 || { echo "refused: requests.lock is busy for 30 s" >&2; exit 1; }
     ( flock -w 5 4 || { echo "refused: the seat's takeover lock is busy" >&2; exit 1; }
       seat_held || exit 1; "$@" ) 4>>"$H/orchestrator.lock.takeover" ) 5>>"$RQ/requests.lock"
 }
 rq_op() { ts_run requests "$1" "$WREF" "$RQ" "${@:2}" "$(utc_now)"; }
-rq_drop_bare() { # the bare row of a ref a request holds, dropped with no event: the item never stopped waiting. A row left
-  # by a failure here is harmless, since the projection shows the request in its place, and the next add or close retries.
+rq_drop_bare() { # the bare row of a ref a request holds, dropped with no event: the item never stopped waiting
   ( flock -w 30 8 && w=$(waiting_read) || exit 1
     jq -e --arg r "$1" 'any(.waiting[]; .ref == $r)' <<<"$w" >/dev/null || exit 0
     w=$(jq -c --arg r "$1" '.waiting |= map(select(.ref != $r))' <<<"$w") && waiting_write "$w" ) 8>>"$H/waiting.lock" 2>/dev/null \
-    || echo "warning: the bare waiting row of $1 stays beside its request" >&2
+    || { echo "warning: the bare waiting row of $1 stays beside its request" >&2; return 1; }
 }
 rq_add() { # under rq_locked: a bare record of the ref gives its since, and its row goes once the request holds the ref
   local w since o
   w=$(waiting_read) || return 1
   since=$(jq -r --arg r "$1" 'first(.waiting[] | select(.ref == $r) | .since) // empty' <<<"$w")
   o=$(rq_op add "$1" "$2" "$3" "$since") || return 1
-  [ -z "$since" ] || rq_drop_bare "$1"
+  # always, so a waiting add that checked before the file existed leaves no row; one left by a failure here shows as the
+  # request until the close drops it
+  rq_drop_bare "$1"
   [ -n "$since" ] || [ "${o##* }" != created ] || ev waiting.add ref="$1"
   echo "$o"
 }
-rq_close() { # under rq_locked: rq_close <done|withdrawn> <rid> <outcome>
-  local o id st r; o=$(rq_op close "$2" "$1" "$3") || return 1; read -r id st r <<<"$o"
-  rq_drop_bare "$r"   # a row a crash left beside the request would show again once it closes
+rq_close() { # under rq_locked: rq_close <done|withdrawn> <rid> <outcome>. A leftover bare row goes before the status
+  # commits: once the request is closed nothing would drop it, and it would show again.
+  local o id st r; r=$(rq_ref "$2") || return 1
+  [ -z "$r" ] || rq_drop_bare "$r" || { echo "refused: $2 stays open until its bare waiting row can go" >&2; return 1; }
+  o=$(rq_op close "$2" "$1" "$3") || return 1; read -r id st r <<<"$o"
   ev waiting.done ref="$r"; echo "$id $st"
 }
 public_text() { # public_text <what> <text>: the text as a file through check-public
@@ -107,7 +114,7 @@ orchy_request() {
   stale|done|withdraw) id=${1:-}; shift || true
     [[ "$id" =~ ^rq[1-9][0-9]{0,8}$ ]] && [ $# -gt 0 ] || { echo "usage: request $sub <rid> <$([ "$sub" = "done" ] && echo outcome || echo reason)>" >&2; exit 1; }
     # the ref too: the close's event carries it, and a name banned since the add must not reach events.jsonl
-    r=$(jq -r --arg i "$id" 'first(.rows[] | select(.id == $i) | .ref) // empty' <<<"$(rq_rows 2>/dev/null || echo '{"rows": []}')")
+    r=$(rq_ref "$id") || r=
     public_text "the $([ "$sub" = stale ] && echo reason || echo outcome)" "${r:+$r$'\n'}$*" || exit 1
     case "$sub" in stale) rq_locked rq_op stale "$id" "$*";; done) rq_locked rq_close "done" "$id" "$*";; *) rq_locked rq_close withdrawn "$id" "$*";; esac;;
   esac

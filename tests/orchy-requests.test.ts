@@ -86,15 +86,17 @@ describe("store", () => {
   test("rev: an identical spec is unchanged; an option, blocks or picture change bumps it; a thread note does not", () => {
     const s = store();
     shot("first");
-    expect(add(s, "pr:12", spec(pick), false, "")).toBe("rq1 r1 created\n");
-    expect(add(s, "pr:12", spec(pick), false, "")).toBe("rq1 r1 unchanged\n");
+    expect(add(s, "pr:12", spec(pick), false, "2026-1-5T1:2:3Z")).toBe("rq1 r1 created\n");
+    expect(file(s, "rq1.json").since).toBe("2026-01-05T01:02:03Z");
+    expect(add(s, "pr:12", spec(pick), false, "2025-06-01T00:00:00Z")).toBe("rq1 r1 unchanged\n");
+    expect(file(s, "rq1.json")).toMatchObject({ rev: 1, since: "2025-06-01T00:00:00Z" });
     expect(add(s, "pr:12", spec({ ...pick, options: [pick.options[0], { ...pick.options[1], label: "Browser runs" }] }), false, "")).toBe("rq1 r2 refreshed\n");
     expect(add(s, "pr:12", spec({ ...pick, blocks: [] }), false, "")).toBe("rq1 r3 refreshed\n");
     shot("second");
     expect(add(s, "pr:12", spec({ ...pick, blocks: [] }), false, "")).toBe("rq1 r4 refreshed\n");
     expect(note(s, "rq1", "", "Asked in the tick")).toBe("rq1 r4 noted\n");
     expect(add(s, "pr:12", spec({ ...pick, blocks: [] }), false, "")).toBe("rq1 r4 unchanged\n");
-    expect(file(s, "rq1.json")).toMatchObject({ rev: 4, since: s.now, thread: [{ at: s.now, text: "Asked in the tick" }] });
+    expect(file(s, "rq1.json")).toMatchObject({ rev: 4, since: "2025-06-01T00:00:00Z", thread: [{ at: s.now, text: "Asked in the tick" }] });
   });
 
   test("size: a maximal log entry is at most 200 bytes, and the largest request the caps allow fits in 64 KiB", () => {
@@ -126,9 +128,11 @@ describe("store", () => {
     expect(close(s, "rq2", "withdrawn", "asked in chat instead")).toBe("rq2 withdrawn issue:7\n");
     plant(s, "rq3.json", { schema: "orchy.request/1", id: "rq3" });
     writeFileSync(join(s.dir.toString(), "rq4.json"), "{not json");
+    plant(s, "rq5.json", { ...file(s, "rq1.json"), id: "rq5", since: "2026-10-31T10:00:00Z \u001b[31m" });
     const open = list(s, false);
     expect(open.requests.map((r) => [r.id, r.status, r.age_s, r.unanswered])).toEqual([["rq1", "open", 0, []]]);
-    expect(open.errors).toEqual([{ file: "rq3.json", error: "its ref is not text" }, { file: "rq4.json", error: "not JSON" }]);
+    expect(open.errors).toEqual([{ file: "rq3.json", error: "its ref is not text" }, { file: "rq4.json", error: "not JSON" },
+      { file: "rq5.json", error: "its since is not a UTC time" }]);
     expect(list(s, true).requests.map((r) => [r.id, r.status, r.outcome])).toEqual([["rq1", "open", undefined], ["rq2", "withdrawn", "asked in chat instead"]]);
   });
 
