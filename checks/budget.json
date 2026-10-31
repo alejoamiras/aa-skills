@@ -6,8 +6,7 @@
   },
   "functions": {
     "bin/agent-worktree": {
-      "cmd_new": 88,
-      "cmd_done": 178
+      "cmd_new": 88
     },
     "bin/claude-usage": {
       "token_fetch": 98,
