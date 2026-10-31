@@ -26,6 +26,7 @@ jobs:
             relevant:
               - 'skills/crew/**'
               - 'bin/claude-usage'
+              - 'lib/usage.sh'
               - 'tests/smoke-crew.sh'
               - 'tests/**'
               - 'checks/**'

@@ -37,7 +37,7 @@ Each skill directory has a `README.md` explaining the concepts (blueprint and ha
 | [`bin/env-exec`](bin/env-exec) | Host half of **keyed runs** (my-stack → Keyed runs): an agent files `request` for a command that needs 1Password secrets and `wait`s on it; the owner approves on the Mac. No secret touches disk or an argv. |
 | [`bin/op-remote`](bin/op-remote) | Mac half of keyed runs: shows exactly what a request will run (commit, argv, secret refs), and only on `y` streams the `op read` values over ssh into that one process. `create` builds the request template's 1Password item from its `# op:` directives. |
 
-`install.sh` symlinks `bin/*` into `~/.local/bin`.
+`install.sh` symlinks `bin/*` into `~/.local/bin`. `claude-usage` and `codex-usage` share `lib/usage.sh`, which each finds beside its real path through that link.
 
 ## Install
 
@@ -73,7 +73,7 @@ Every PR runs one workflow per area. Each skips its jobs when the PR touches non
 
 **Budgets.** A shell file may not grow past 800 lines, a function past 80, and a function name may live in only one file: code two scripts share belongs in a library both source. `checks/budget.json` records today's offenders at their current size, and they can only shrink. A record looser than the code also fails, so a change that shrinks an offender lowers its record in the same PR: `bun checks/budget.ts --write` lowers or drops entries and never raises or adds one. On a PR, CI also compares the record with the base branch's and fails any entry added or raised.
 
-Locally, from the repo root (needs shellcheck, actionlint, bun 1.4+, jq and python3; `crew` needs tmux, `keyed` needs strace and, for its bash 3.2 pass, docker with the `bash:3.2` image):
+Locally, from the repo root (needs shellcheck, actionlint, bun 1.4+, jq and python3; `crew` needs tmux, `keyed` needs strace, and the bash 3.2 passes of `keyed` and `claude-usage` need docker with the `bash:3.2` image):
 
 ```sh
 checks/shellcheck.sh
