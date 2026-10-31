@@ -700,6 +700,10 @@ B state | jq -e '.caps == null and (.errors | index("caps"))' >/dev/null || fail
 ln -s "$PA" "$T/lnk.json"; LK() { ORCHY_HOME="$HA" MOCK_CU="$CA" ORCHY_ACCOUNTS="$T/lnk.json" "$ORCHY" "$@"; }
 for c in accounts "launch --light acc-a8 acc auto"; do o=$(LK $c 2>&1) && fail "$c read a symlinked policy"; grep -q 'not a symlink' <<<"$o" || fail "$c on a symlinked policy: $o"; done
 LK state | jq -e '.caps == null' >/dev/null || fail "state read a symlinked policy"
+# a heavy lead needs the session floor too, a light one any headroom
+jq 'map(if .account == "p-bravo" then .session_left_pct = 10 else . end)' "$CA/rows.json" > "$T/r.json" && mv "$T/r.json" "$CA/rows.json"
+o=$(AC launch acc-a8 acc p-bravo 2>&1 || true); grep -qF 'p-bravo takes light leads only: session 10% is under the 30% floor' <<<"$o" || fail "a heavy launch on a low session: $o"
+AC launch --light acc-a8 acc p-bravo >/dev/null || fail "a light launch on a low session"; cu_rows
 # the seat: only its holder spawns; two programs racing for an account's last heavy slot take that one and the next
 for f in "$HA"/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/null || true; done; sleep 1
 for k in r0 r1 r2; do printf 'You are a subagent.\n' > "$HA/prompts/acc-$k.md"; done
