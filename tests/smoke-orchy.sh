@@ -202,6 +202,19 @@ printf '%s\n' "$o" > "$HF/watch/merge-9.out"; ORCHY_HOME="$HF" "$ORCHY" state | 
 for l in "LEAD_DONE lane-8 a2" "LEAD_DONE lane-9 a3" "LEAD_DONE lane-9 a2 x" "LEAD_DONE lane-9 a2"; do mkpr "$SHA"
   printf 'ARC_FAILED: a2 red\n%s\nPR #9 t ready checks: green\nHEAD %s\n' "$l" "$SHA" > "$ORCHY_HOME/reports/lane-9-a2.md"; o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 lane-9-a2.md - 2>&1 || true)
   case $l in *9\ a2) grep -q '^#9 MERGED' <<<"$o" || fail "the report's own key did not end it: $o";; *) grep -q 'TIMEOUT; not merged' <<<"$o" || fail "'$l' ended a failed report: $o";; esac; done
+# a required check with no run waits while the head's other checks run (a suite with no runs is no sign) and the grace after; then MISSING
+cp "$MOCK_DIR/checks.json" "$T/checks.bak"; cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak"; jq 'del(.check_runs[] | select(.name == "e2e-status"))' "$T/checks.bak" > "$MOCK_DIR/checks.json"
+echo '{"check_suites":[{"id":1,"status":"in_progress","latest_check_runs_count":3}]}' > "$MOCK_DIR/suites.json"; mkpr "$SHA"; o=$(wm -)
+grep -qE '^[0-9:]{5}Z waiting on required checks not started yet: e2e-status; other checks on the head still run$' <<<"$o" && ! grep -q MISSING <<<"$o" || fail "a check not started yet: $o"
+echo '{"check_suites":[{"id":2,"status":"queued","latest_check_runs_count":0}]}' > "$MOCK_DIR/suites.json"; jq '.merge.check_grace_sec=1' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"; mkpr "$SHA"; o=$(wm -)
+grep -q 'not started yet: e2e-status; until ' <<<"$o" && grep -qE '^[0-9:]{5}Z MISSING REQUIRED CHECK .*: e2e-status;' <<<"$o" || fail "a check missing past the grace: $o"
+# a cancelled run is judged by the newer run that supersedes it; with none in the grace it fails as before
+jq '.check_runs += [{id:7,name:"e2e-status",status:"completed",conclusion:"cancelled"}]' "$T/checks.bak" > "$MOCK_DIR/checks.json"; cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"
+jq '.check_runs += [{id:8,name:"e2e-status",status:"completed",conclusion:"success"}]' "$MOCK_DIR/checks.json" > "$MOCK_DIR/checks.next"; rm "$MOCK_DIR/suites.json"; mkpr "$SHA"; o=$(wm -)
+grep -q 'cancelled, for a newer run: e2e-status; until ' <<<"$o" && grep -q '^#9 MERGED' <<<"$o" || fail "a cancelled run that a newer one superseded: $o"
+jq '.check_runs += [{id:7,name:"e2e-status",status:"completed",conclusion:"cancelled"}]' "$T/checks.bak" > "$MOCK_DIR/checks.json"; jq '.merge.check_grace_sec=0' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"
+mkpr "$SHA"; rc=0; o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md - 2>&1) || rc=$?; cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"; mv "$T/checks.bak" "$MOCK_DIR/checks.json"
+[ "$rc" = 1 ] && grep -q 'REQUIRED FAILED: e2e-status$' <<<"$o" || fail "a cancellation nothing superseded (exit $rc): $o"
 # a lane's <lane>-* heads merge; archive - neither waits for a plan nor tears the lane down
 touch "$MOCK_DIR/aw.log"; a=$(grep -c '^done' "$MOCK_DIR/aw.log" || true)
 for h in lane-9-a2 lane-9-stats-view; do pr9 ".headRefName=\"$h\""; o=$(wm -); grep -q '^#9 MERGED' <<<"$o" || fail "head $h did not merge: $o"; done

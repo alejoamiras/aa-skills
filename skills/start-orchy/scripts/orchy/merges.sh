@@ -60,6 +60,7 @@ orchy_watch_merge() {
     method=$(cfg '.merge.method // "squash"'); case $method in squash|merge|rebase) ;; *) echo "REFUSED: merge.method must be squash, merge or rebase"; exit 4;; esac
   fi
   rounds=$(cfg '.merge.watch_rounds // 300'); WS=${ORCHY_WATCH_SLEEP:-60}
+  grace=$(cfg '.merge.check_grace_sec // 600'); [[ "$grace" =~ ^[0-9]{1,6}$ ]] || { echo "REFUSED: merge.check_grace_sec must be whole seconds"; exit 4; }
   echo "$$ $(pid_start $$)" > "$H/watch/merge-$N.pid"   # the watcher's own identity, whatever wrapper started it
   trunk_said=""
   st=$(pr_state) || { echo "REFUSED: cannot read #$N"; exit 4; }
@@ -121,19 +122,23 @@ trunk_ok() {
   [ "$trunk_said" = "$tsha" ] || echo "$(date -u +%H:%MZ) TRUNK RED at ${tsha:0:8}: $(paste -sd, <<<"$failed"); waiting"; trunk_said=$tsha; return 1
 }
 wm_poll() { # polls until the PR may merge or the rounds run out, m holding its last merge state; every other hand-back exits
-  m=""; ok=0; missing_rounds=0; api_fail=0
+  m=""; ok=0; api_fail=0; quiet=""; said_wait=""; said_missing=""
   while [ "$i" -lt "$rounds" ]; do i=$((i+1))
     st=$(pr_state) || { api_fail=$((api_fail+1)); [ "$api_fail" = 10 ] && echo "$(date -u +%H:%MZ) API FAILURE: gh pr view failed 10 rounds running"; sleep "$WS"; continue; }; read -r state draft base head _ <<<"$st"
     [ "$state" = OPEN ] || { echo "#$N is $state; watcher stopped"; exit 4; }
     [ "$head" = "$PIN" ] || { echo "HEAD MOVED to $head (scanned $PIN); rescan before merging"; exit 2; }
-    runs=$(checks "$head") || { api_fail=$((api_fail+1)); [ "$api_fail" = 10 ] && echo "$(date -u +%H:%MZ) API FAILURE: check-runs unreadable 10 rounds running"; sleep "$WS"; continue; }; api_fail=0; ok=0; bad=""; absent=""
+    runs=$(checks "$head") || { api_fail=$((api_fail+1)); [ "$api_fail" = 10 ] && echo "$(date -u +%H:%MZ) API FAILURE: check-runs unreadable 10 rounds running"; sleep "$WS"; continue; }; api_fail=0; ok=0; bad=""; absent=""; cx=""
     for name in "${REQ[@]}"; do
       line=$(awk -F'\t' -v n="$name" '$1==n' <<<"$runs" | tail -1)
-      case "$line" in "") absent="$absent $name";; *$'\t'completed$'\t'success) ok=$((ok+1));; *$'\t'completed$'\t'failure|*$'\t'completed$'\t'cancelled|*$'\t'completed$'\t'timed_out) bad="$bad $name";; esac
+      case "$line" in "") absent="$absent $name";; *$'\t'completed$'\t'success) ok=$((ok+1));; *$'\t'completed$'\t'cancelled) cx="$cx $name";; *$'\t'completed$'\t'failure|*$'\t'completed$'\t'timed_out) bad="$bad $name";; esac
     done
+    [ -n "$absent" ] || said_missing=""
+    if [ -z "$absent$cx" ]; then quiet=""; said_wait=""
+    elif [ -z "$bad" ] && ! not_started; then bad=$cx   # past the grace: absent is missing, cancelled is failed
+      [ -z "$absent" ] || [ -n "$said_missing" ] || { echo "$(date -u +%H:%MZ) MISSING REQUIRED CHECK (no run or status, nothing else running on the head for ${grace}s):$absent; a renamed check waits here until the timeout"; said_missing=1; }
+    fi
     # the table is indented: a check name is untrusted and may carry a newline, and no line of it may start a marker
     [ -n "$bad" ] && { echo "$(date -u +%H:%MZ) REQUIRED FAILED:$bad"; printf '  %s\n' "${runs//$'\n'/$'\n  '}"; exit 1; }
-    if [ -n "$absent" ]; then missing_rounds=$((missing_rounds+1)); [ "$missing_rounds" = 10 ] && echo "$(date -u +%H:%MZ) MISSING REQUIRED CHECK (no run or status after 10 rounds):$absent; a renamed check waits here until the timeout"; else missing_rounds=0; fi
     # a hold waits and never ends the watcher; an unreadable holds.json holds too
     hr=$(held "$HS") || hr="holds.json, unreadable"
     if [ -n "$hr" ]; then [ "$hr" = "$said_held" ] || echo "$(date -u +%H:%MZ) HELD: $hr; waiting"; said_held=$hr; sleep "$WS"; continue; fi
@@ -146,6 +151,18 @@ wm_poll() { # polls until the PR may merge or the rounds run out, m holding its 
     fi
     sleep "$WS"
   done
+}
+not_started() { # 0 while a required check may still start: anything else on the head queued or running, or within the grace after
+  local now why; now=$(date +%s)
+  # a suite with no runs is an app that may never report, so it holds nothing; the grace covers a real suite's first run
+  if awk -F'\t' 'NF && $2 != "completed"' <<<"$runs" | grep -q . || [ -n "$(gh api "repos/$REPO/commits/$head/check-suites" --paginate \
+      --jq '.check_suites[] | select(.status != "completed" and .latest_check_runs_count > 0) | .id' 2>/dev/null)" ]; then
+    quiet=""; why="other checks on the head still run"
+  else
+    quiet=${quiet:-$now}; [ $((now - quiet)) -lt "$grace" ] || return 1; why="until $(date -u -d "@$((quiet + grace))" +%H:%MZ)"
+  fi
+  [ "$absent$cx|$why" = "$said_wait" ] || echo "$(date -u +%H:%MZ) waiting on required checks${absent:+ not started yet:$absent;}${cx:+ cancelled, for a newer run:$cx;} $why"
+  said_wait="$absent$cx|$why"
 }
 wm_merge() { # up to three merge calls; 1 when a hold landed after the last poll, so polling resumes
   for try in 1 2 3; do

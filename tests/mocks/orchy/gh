@@ -34,7 +34,9 @@ case "$1 $2" in
   */git/ref/tags/*) f="$MOCK_DIR/tag-${2##*/git/ref/tags/}.json"; [ -f "$f" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }; cat "$f";;
   */milestones"?"*) f="$MOCK_DIR/milestones.json"; if [ -f "$f" ]; then jq -r "${jqexpr:-.}" "$f"; else echo '[]'; fi;;
   */releases/tags/*) f="$MOCK_DIR/release-${2##*/releases/tags/}.json"; [ -f "$f" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }; jq -r "${jqexpr:-.}" "$f";;
-  *check-runs) f="$MOCK_DIR/checks-$s.json"; [ -f "$f" ] || f="$MOCK_DIR/checks.json"; jq -r "${jqexpr:-.}" "$f";;
+  *check-runs) f="$MOCK_DIR/checks-$s.json"; [ -f "$f" ] || f="$MOCK_DIR/checks.json"; jq -r "${jqexpr:-.}" "$f"   # checks.next replaces checks.json after one read
+    [ ! -f "$MOCK_DIR/checks.next" ] || mv "$MOCK_DIR/checks.next" "$MOCK_DIR/checks.json";;
+  *check-suites) { cat "$MOCK_DIR/suites.json" 2>/dev/null || echo '{"check_suites":[]}'; } | jq -r "${jqexpr:-.}";;
   *status) f="$MOCK_DIR/status-$s.json"; [ -f "$f" ] || f="$MOCK_DIR/status.json"; jq -r "${jqexpr:-.}" "$f";;
   */compare/*) b=${2##*/compare/}; l=${b%%...*}; r=${b##*...}
     if [[ ! "$l" =~ ^[0-9a-f]{40}$ ]]; then
