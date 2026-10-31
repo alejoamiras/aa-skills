@@ -14,8 +14,7 @@ orchy_runbook() {
   if [ "$sub" = show ]; then j=$(rb_read) || exit 1; rb_line <<<"$j" | nl -w1 -s'. ' | sed -E 's/^([0-9]+)\. - /\1. /'; exit 0; fi
   need flock
   if [ "$sub" = add ]; then new=$(rb_parse "$3" --new) || exit 1
-    o=$("$0" check-public "$3" 2>&1); case $? in 0) ;; 1) echo "refused: the runbook fails check-public ($(grep -oE '^(LEAK|SENSITIVE|SECRET)|copies the owner' <<<"$o" | sort -u | paste -sd, -))" >&2; exit 1;;
-      *) echo "refused: check-public could not run" >&2; exit 1;; esac; fi
+    public_ok "$3" "the runbook" || exit 1; fi
   [ "$sub" != tick ] || [[ "$3" =~ ^[1-9][0-9]?$ ]] || { echo "refused: a step is numbered 1 to 20" >&2; exit 1; }
   [ "$sub" != check ] || { need gh; need timeout; }
   [ ! -L "$RUNBOOKS" ] && mkdir -p "$RUNBOOKS" || { echo "refused: $RUNBOOKS must be a directory, not a symlink" >&2; exit 1; }

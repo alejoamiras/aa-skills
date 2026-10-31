@@ -10,6 +10,7 @@ waiting_read() { # orchy.waiting/1 on stdout, a missing file as empty; a symlink
       and ([.waiting[].ref] | length == (unique | length)))
     | {schema, waiting: [.waiting[] | {ref, text, since}]}' "$WAITING" 2>/dev/null || { echo "refused: $WAITING is not orchy.waiting/1" >&2; return 1; }
 }
+waiting_write() { local tmp; if ! tmp=$(mktemp "$H/.waiting.XXXXXX") || ! printf '%s\n' "$1" > "$tmp" || ! mv -f "$tmp" "$WAITING"; then rm -f "${tmp:-}"; echo "refused: cannot write $WAITING" >&2; return 1; fi; }
 waiting_text_ok() { ts_run text "$1"; }   # one line of 1-160 code points; TypeScript, since jq silently replaces invalid UTF-8
 orchy_waiting() {
   sub=${1:-}; shift || true
@@ -25,9 +26,7 @@ orchy_waiting() {
     [ "$sub" = "done" ] || waiting_text_ok "$t" || exit 1
     # done checks the ref too: a name banned after its add must not reach events.jsonl
     tf=$(mktemp "$H/scratch/waiting.XXXXXX") || exit 1; { printf '%s\n' "$r"; [ "$sub" = "done" ] || printf '%s\n' "$t"; } > "$tf"
-    o=$("$0" check-public "$tf" 2>&1); rc=$?; rm -f "$tf"
-    case $rc in 0) ;; 1) echo "refused: the ref or text fails check-public ($(grep -oE '^(LEAK|SENSITIVE|SECRET)|copies the owner' <<<"$o" | sort -u | paste -sd, -))" >&2; exit 1;;
-      *) echo "refused: check-public could not run" >&2; exit 1;; esac
+    public_ok "$tf" "the ref or text"; rc=$?; rm -f "$tf"; [ $rc = 0 ] || exit 1
     # the lock file is never replaced, so one writer at a time spans the read, the rename and the event
     ( flock -w 30 8 || { echo "refused: the waiting lock is busy for 30 s" >&2; exit 1; }
       w=$(waiting_read) || exit 1
@@ -37,7 +36,7 @@ orchy_waiting() {
         jq -e --arg r "$r" 'any(.waiting[]; .ref == $r)' <<<"$w" >/dev/null || { echo "refused: nothing waits on $r" >&2; exit 1; }
         w=$(jq -c --arg r "$r" '.waiting |= map(select(.ref != $r))' <<<"$w") || exit 1
       fi
-      if ! tmp=$(mktemp "$H/.waiting.XXXXXX") || ! printf '%s\n' "$w" > "$tmp" || ! mv -f "$tmp" "$WAITING"; then rm -f "${tmp:-}"; echo "refused: cannot write $WAITING" >&2; exit 1; fi
+      waiting_write "$w" || exit 1
       ev "waiting.$sub" ref="$r"; echo "waiting $sub $r" ) 8>>"$H/waiting.lock";;
   *) echo "usage: waiting add <ref> <text> | done <ref> | list [--json]" >&2; exit 1;;
   esac
