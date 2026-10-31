@@ -61,6 +61,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
+      - uses: ./.github/actions/fetch-tool
+        with:
+          url: https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz
+          sha256: 9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c
+          binary: gitleaks
       - run: bash tests/smoke-orchy.sh
 
   smoke-orchy-release:
