@@ -82,8 +82,20 @@ jobs:
       - uses: ./.github/actions/setup-bun
       - run: bash tests/smoke-orchy-release.sh
 
+  smoke-orchy-requests:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      - run: bash tests/smoke-orchy-requests.sh
+
   start-orchy-status:
-    needs: [changes, test, smoke-orchy, smoke-orchy-release]
+    needs: [changes, test, smoke-orchy, smoke-orchy-release, smoke-orchy-requests]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2
