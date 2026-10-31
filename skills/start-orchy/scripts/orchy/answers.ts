@@ -6,7 +6,7 @@
 //   put-check <now>                 stdin, after the arguments: one answer; its put verdict, or {input} for put
 //   put <input> <now>               under requests.lock: the put verdict, the file linked into the inbox when pending
 //   screen <aid> <ledger> <now>     {where, sha, flagged, row}: the file found and screened, and the ledger row it files
-//   take <aid> <sha> <flagged 0|1> <ask> <reason or empty> <now>   under the locks: orchy.answer-take/1
+//   take <aid> <sha> <flagged 0|1> <ask> <take|refuse> <reason or empty> <now>   under the locks: orchy.answer-take/1
 //   list <all 0|1> <json 0|1> <now> | show <aid> <now>
 // Exit 0; 1 refused (take: invalid); 4 take refused stale or closed; 2 could not run, nothing committed; 120 stdout failed
 import { closeSync, constants, fstatSync, fsyncSync, linkSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
@@ -97,9 +97,15 @@ export function view(o: O | null, name: string, shown: boolean): O {
   if (held) v.withheld = "secret";
   return ordered(v);
 }
-// what gitleaks reads: the free text, and anything a strict reader would refuse, so a secret anywhere in a file is caught
-export const screenText = (o: O) => Object.entries(o).filter(([k, v]) => (FREE.includes(k) ? v !== null : !FILE_KEYS.includes(k)))
-  .map(([, v]) => (typeof v === "string" ? v : JSON.stringify(v))).join("\n");
+// what gitleaks reads: the free text and every value no grammar vouches for, so a secret anywhere in a file is caught
+export function screenText(o: O): string {
+  const f = valid(o) as O, vouched: Record<string, boolean> = { schema: o.schema === "orchy.answer/1", withheld: o.withheld === "secret",
+    id: typeof o.id === "string" && AID.test(o.id), request: typeof o.request === "string" && RID.test(o.request) };
+  return Object.entries(o).filter(([k, v]) => (FREE.includes(k) ? v !== null : !(vouched[k] ?? f[k] !== undefined)))
+    .map(([k, v]) => `${FILE_KEYS.includes(k) ? "" : `${k}\n`}${typeof v === "string" ? v : JSON.stringify(v)}`).join("\n");
+}
+// a file that is no JSON object, an oversized one included, is screened as the bytes read
+const textOf = (b: Buffer, o: O | null) => (o ? screenText(o) : b.toString());
 
 /** gitleaks over text; exit 3 is its finding, as check-public runs it, and any other failure means the check did not run. */
 export function leaks(gl: string, text: string): boolean {
@@ -245,58 +251,60 @@ export function put(s: Store, input: O, now: string): PutVerdict {
 
 /** take's unlocked steps: the file found and screened, and the ledger row its sentences go in while it is pending. */
 export function screen(s: Store, gl: string, name: string, ledger: Buffer, now: string): O {
-  const f = locate(s.ans, name) ?? no(`no answer ${name}`);
-  const flagged = f.o !== null && leaks(gl, screenText(f.o));
-  const row = f.where === "inbox" && f.o && !flagged ? ledgerRow(f.o, name, find(s, name.split(".")[0])?.r ?? null, askIds(ledger), now) : null;
+  const f = locate(s.ans, name) ?? no(`no answer ${name}`), r = find(s, name.split(".")[0])?.r ?? null;
+  const flagged = leaks(gl, textOf(f.bytes, f.o));
+  // an id the log settled is a replay, whose words are never filed
+  const row = f.where === "inbox" && f.o && !flagged && !r?.answers.some((e) => e.id === name) ? ledgerRow(f.o, name, r, askIds(ledger), now) : null;
   return { where: f.where, sha: sha256(f.bytes), flagged, row };
 }
 
-// the file to taken/ or refused/; a destination already there means the move happened, and an inbox copy of an id the
-// log settled is a replay, which goes
-function move(ans: Buffer, name: string, state: string): void {
-  const src = at(ans, `${name}.json`), dst = at(ans, state, `${name}.json`);
-  if (present(at(ans, state), `${name}.json`)) { try { unlinkSync(src); } catch (e) { if ((e as { code?: string }).code !== "ENOENT") throw e; } return; }
-  renameSync(src, dst);
-}
 type Take = { out: O; code: number };
-function report(s: Store, name: string, e: Pick<LogEntry, "state" | "reason" | "withheld" | "ask">, r: Request | null, recovered: boolean, fixed: string): Take {
-  const f = locate(s.ans, name), rq = r && { id: r.id, rev: r.rev, shape: r.shape, ref: r.ref, blocks: r.blocks, binding: r.binding ?? null };
+function report(name: string, o: O | null, shown: boolean, e: Pick<LogEntry, "state" | "reason" | "withheld" | "ask">, r: Request | null, recovered: boolean, refuse: boolean): Take {
+  const rq = r && { id: r.id, rev: r.rev, shape: r.shape, ref: r.ref, blocks: r.blocks, binding: r.binding ?? null };
   const out = { schema: "orchy.answer-take/1", verdict: e.state, reason: e.reason ?? null, withheld: e.withheld ?? null, request: rq,
-    answer: view(f?.o ?? null, name, e.withheld === undefined), ask: e.ask ?? null, recovered };
-  const code = fixed ? (e.state === "refused" ? 0 : 1) : e.state === "taken" ? 0 : e.reason === "stale" || e.reason === "closed" ? 4 : 1;
+    answer: view(o, name, shown && e.withheld === undefined), ask: e.ask ?? null, recovered };
+  const code = refuse ? (e.state === "refused" ? 0 : 1) : e.state === "taken" ? 0 : e.reason === "stale" || e.reason === "closed" ? 4 : 1;
   return { out, code };
 }
-/** take and refuse under the locks: a logged outcome wins, then the redaction, the verdict, the log entry as the commit, the move. */
-export function take(s: Store, name: string, sha: string, flagged: boolean, ask: string, fixed: string): Take {
+// A recovery finishes only the move and prints the outcome as logged, with the archived file screened again, since it is
+// not the file this run screened. An archived file under the name is the one the log settled: the inbox copy is a replay.
+function recover(s: Store, gl: string, name: string, f: { where: Where }, e: Pick<LogEntry, "state" | "reason" | "withheld" | "ask">, r: Request | null, refuse: boolean): Take {
+  const dir = at(s.ans, e.state), file = `${name}.json`;
+  if (f.where === "inbox") { if (present(dir, file)) unlinkSync(at(s.ans, file)); else renameSync(at(s.ans, file), at(dir, file)); }
+  const b = present(r || f.where === "inbox" ? dir : dirOf(s.ans, f.where), file), o = b && parse(b);
+  return report(name, o, b === null || !leaks(gl, textOf(b, o)), e, r, true, refuse);
+}
+/** take and refuse under the locks: a logged outcome wins, then the redaction, the verdict, the log entry as the commit, the move.
+ * fixed, a reason, refuses whatever the verdict; refuse sets the exit a refuse command has. */
+export function take(s: Store, gl: string, name: string, sha: string, flagged: boolean, ask: string, fixed: string, refuse = fixed !== ""): Take {
   const rid = name.split(".")[0], found = find(s, rid), f = locate(s.ans, name) ?? no(`no answer ${name}`);
   const logged = found?.r.answers.find((e) => e.id === name);
-  if (logged) {
-    if (f.where === "inbox") move(s.ans, name, logged.state);
-    return report(s, name, logged, found!.r, true, fixed);
-  }
+  if (logged) return recover(s, gl, name, f, logged, found!.r, refuse);
   if (f.where !== "inbox") {
-    if (found) down(`${name} is in ${f.where}/, but ${rid} never logged it`);
-    return report(s, name, { state: "refused", reason: "invalid" }, null, true, fixed);
+    if (found) no(`${name} is in ${f.where}/, but ${rid} never logged it, so it is no pending answer`);
+    return recover(s, gl, name, f, { state: "refused", reason: "invalid" }, null, refuse);
   }
   if (sha256(f.bytes) !== sha) down(`${name} changed since it was screened; take it again`);
+  // a flagged file loses its free text, and one that is no answer object its bytes, before any verdict
   let o = f.o;
-  if (flagged) {
-    o = view(o, name, false);
+  if (flagged || !o) {
+    o = view(o, name, !flagged);
     const tmp = at(s.ans, ".tmp", `${name}.${process.pid}.redact`);
     writeNew(tmp, `${JSON.stringify(o)}\n`);
     renameSync(tmp, at(s.ans, `${name}.json`));
   }
   let v = verdict(o, name, found?.r ?? null, found?.closed ?? false);
-  if (fixed && v.withheld === undefined) v = refused(fixed, `refused as ${fixed}`);
+  // an answer to no request has no log to keep a reason, so it is invalid on every run
+  if (fixed && v.withheld === undefined && found) v = refused(fixed, `refused as ${fixed}`);
+  const e = found ? entry(o, name, v, ask, s.now) : v;
   if (found) {
-    const e = entry(o, name, v, ask, s.now), r = found.r, final = v.state === "taken" && e.kind !== "reply";
+    const r = found.r, final = v.state === "taken" && (e as LogEntry).kind !== "reply";
     write(found.dir, build({ ...meta(r), status: final ? "taken" : r.status, updated: s.now, taken: final ? { answer: name, at: s.now } : r.taken,
-      answers: [...r.answers, e] }, contentOf(r)));
-    move(s.ans, name, v.state);
-    return report(s, name, e, find(s, rid)?.r ?? r, false, fixed);
+      answers: [...r.answers, e as LogEntry] }, contentOf(r)));
   }
-  move(s.ans, name, v.state);
-  return report(s, name, v, null, false, fixed);
+  // replacing whatever a deposit left under the name, so the archive holds the file this take verified
+  renameSync(at(s.ans, `${name}.json`), at(s.ans, v.state, `${name}.json`));
+  return report(name, o, !flagged, e, found ? (find(s, rid)?.r ?? found.r) : null, false, refuse);
 }
 
 type Row = { o: O | null; name: string; state: string; reason?: string; ask?: string; text: string };
@@ -356,9 +364,9 @@ function run(op: string, wref: RegExp, a: Buffer[], body: Buffer): { out: string
     case "put": { const v = put(store(t(1)), obj(JSON.parse(t(0)), "the input"), t(1)); return { out: json(v), err: v.reason ? `refused: ${v.reason}\n` : "" }; }
     case "screen": return { out: json(screen(store(t(2)), gl, aid(0), b[1], t(2))) };
     case "take": {
-      const fixed = t(4);
+      const fixed = t(5);
       if (fixed && !REASONS.includes(fixed)) no(`a refusal's reason is one of ${REASONS.join(", ")}`);
-      const r = take(store(t(5)), aid(0), t(1), t(2) === "1", /^ask[0-9]{1,9}$/.test(t(3)) ? t(3) : "", fixed);
+      const r = take(store(t(6)), gl, aid(0), t(1), t(2) === "1", /^ask[0-9]{1,9}$/.test(t(3)) ? t(3) : "", fixed, t(4) === "refuse");
       return { out: json(r.out), code: r.code };
     }
     case "list": {

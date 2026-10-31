@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { answer, entry, ledgerRow, linked, misfit, screen, take, verdict } from "../skills/start-orchy/scripts/orchy/answers.ts";
+import { answer, entry, ledgerRow, linked, misfit, screen, screenText, take, verdict } from "../skills/start-orchy/scripts/orchy/answers.ts";
 import {
   add, close, type Content, CONTENT_MAX, contentBytes, FILE_MAX, list, logEntry, note, type O, type Request, type Store, specFile, stored,
 } from "../skills/start-orchy/scripts/orchy/requests.ts";
@@ -213,6 +213,9 @@ describe("answers", () => {
       .toEqual({ id: "ask1", at, said: "the smoke\ntoday", answer: "rq1.1" });
     expect(ledgerRow(a("rq3.1", { kind: "done", note: "renamed", log: "e2e\tok" }), "rq3.1", r(s, "rq3"), asks, at)).toEqual({ id: "ask2", at, said: "renamed", answer: "rq3.1" });
     expect(ledgerRow(a("rq3.1", { kind: "done", log: "e2e\tok" }), "rq3.1", r(s, "rq3"), asks, at)).toBeNull();
+    // gitleaks reads the free text and any value no grammar vouches for, never a valid binding or choice
+    expect(screenText(a("rq2.1", { kind: "approve", go: true, binding: { kind: "text", sha256: B }, note: "ok" }))).toBe("ok");
+    expect(screenText(a("rq1.1", { kind: "pick", choice: "AKIA-x", extra: { k: 1 } }))).toBe('AKIA-x\nextra\n{"k":1}');
     // a current reply is taken and a pick for a past rev refused, and both file their text on no ask
     inbox(s, a("rq4.1", { kind: "reply", text: "Spanish" }));
     inbox(s, a("rq4.2", { kind: "pick", rev: 9, choice: "unit", note: "stale words" }));
@@ -237,14 +240,31 @@ describe("answers", () => {
     expect(v(bad, "rq4")).toBe("invalid");
     expect(entry(bad, "rq4.1", verdict(bad, "rq4.1", r(s, "rq4"), false), "", at)).toEqual({ id: "rq4.1", state: "refused", at, reason: "invalid" });
     const sh = inbox(s, a("rq4.1", { kind: "reply", text: "Spanish" }));
-    const first = take(s, "rq4.1", sh, false, "", "");
+    const first = take(s, GL, "rq4.1", sh, false, "", "");
     expect([first.code, first.out.verdict, r(s, "rq4").answers.length]).toEqual([0, "taken", 1]);
-    inbox(s, a("rq4.1", { kind: "reply", text: "Spanish" }));
-    expect(take(s, "rq4.1", "", false, "", "")).toMatchObject({ code: 0, out: { verdict: "taken", recovered: true } });
+    inbox(s, a("rq4.1", { kind: "reply", text: "French" }));
+    const ledger = Buffer.from(join(T, "ledger.jsonl"));
+    expect(screen(s, GL, "rq4.1", ledger, at).row).toBeNull();
+    expect(take(s, GL, "rq4.1", "", false, "", "")).toMatchObject({ code: 0, out: { verdict: "taken", recovered: true, answer: { text: "Spanish" } } });
+    // a fresh take replaces what a deposit left in the archive under its name, and prints what it verified
+    writeFileSync(join(s.ans.toString(), "refused", "rq4.5.json"), JSON.stringify(a("rq4.5", { kind: "reply", text: "forged" })));
+    const s5 = inbox(s, a("rq4.5", { kind: "reply", text: "real" }));
+    expect(take(s, GL, "rq4.5", s5, false, "", "").out).toMatchObject({ reason: "invalid", answer: { text: "real" } });
+    expect(JSON.parse(readFileSync(join(s.ans.toString(), "refused", "rq4.5.json"), "utf8")).text).toBe("real");
     const st = inbox(s, a("rq1.3", { kind: "pick", choice: "unit" }));
-    expect(take(s, "rq1.3", st, false, "", "")).toMatchObject({ code: 4, out: { verdict: "refused", reason: "stale" } });
+    expect(take(s, GL, "rq1.3", st, false, "", "")).toMatchObject({ code: 4, out: { verdict: "refused", reason: "stale" } });
     inbox(s, a("rq1.3", { kind: "pick", choice: "unit", rev: 2 }));
-    expect(take(s, "rq1.3", "", false, "", "")).toMatchObject({ code: 4, out: { reason: "stale", recovered: true } });
-    expect([r(s, "rq1").status, r(s, "rq1").answers.length, r(s, "rq4").answers.length]).toEqual(["open", 1, 1]);
+    expect(take(s, GL, "rq1.3", "", false, "", "")).toMatchObject({ code: 4, out: { reason: "stale", recovered: true } });
+    expect([r(s, "rq1").status, r(s, "rq1").answers.length, r(s, "rq4").answers.length]).toEqual(["open", 1, 2]);
+    // a file that is no JSON object is archived as its stub, never as its bytes, a secret among them or not
+    for (const [id, raw] of [["rq4.6", "not json"], ["rq4.7", `{"text": "AKIA${"Q".repeat(16)}"`]]) {
+      writeFileSync(join(s.ans.toString(), `${id}.json`), raw);
+      const x = screen(s, GL, id, ledger, at), y = take(s, GL, id, x.sha as string, x.flagged as boolean, "", "");
+      expect([y.code, readFileSync(join(s.ans.toString(), "refused", `${id}.json`), "utf8").includes(raw.slice(0, 8))]).toEqual([1, false]);
+    }
+    // a secret dropped straight into refused/, which no take ever redacted, is withheld from the output too
+    writeFileSync(join(s.ans.toString(), "refused", "rq99.1.json"), JSON.stringify(a("rq99.1", { kind: "reply", text: `the token is AKIA${"Q".repeat(16)}` })));
+    const sc = screen(s, GL, "rq99.1", ledger, at);
+    expect(take(s, GL, "rq99.1", "", sc.flagged as boolean, "", "").out).toMatchObject({ recovered: true, answer: { text: null, withheld: "secret" } });
   });
 });
