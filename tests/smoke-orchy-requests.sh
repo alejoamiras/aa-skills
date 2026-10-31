@@ -85,7 +85,10 @@ want='no open request rq99'; nope RQX note rq99 "nothing here"
   == ["0 of 1 done; next: Publish the build", "The peer lane is quiet until its release"]' >/dev/null || flunk "a runbook or peer row changed: $("$ORCHY" waiting list --json)"
 
 # --- stale, refresh, withdraw and done: a close moves the file to closed/, drops the row and emits waiting.done
-[ "$(RQX stale rq4 "The locale list changed")" = "rq4 r1 stale" ] && [ "$(RQX add issue:7 "$T/reply.json")" = "rq4 r2 refreshed" ] || flunk "stale, then a refresh"
+[ "$(RQX stale rq4 "The locale list changed")" = "rq4 r1 stale" ] || flunk "request stale"
+jq -c '.waiting += [{ref: "issue:7", text: "Which locale?", since: "2026-01-01T00:00:00Z"}]' "$W" > "$T/w.json" && mv "$T/w.json" "$W"; b=$(md5sum "$W")
+want='rq4 is stale; done does not apply'; nope RQX "done" rq4 "shipped"; [ "$(md5sum "$W")" = "$b" ] || flunk "a refused close dropped the bare row"
+[ "$(RQX add issue:7 "$T/reply.json")" = "rq4 r2 refreshed" ] && jq -e 'all(.waiting[]; .ref != "issue:7")' "$W" >/dev/null || flunk "a refresh of a stale request"
 jq -c '.waiting += [{ref: "pr:12", text: "Rename the check", since: "2026-01-01T00:00:00Z"}]' "$W" > "$T/w.json" && mv "$T/w.json" "$W"   # a leftover row
 e0=$(wc -l < "$EV")
 [ "$(RQX "done" rq3 "Renamed the check; the watcher is armed again")" = "rq3 done" ] && [ "$(RQX withdraw rq4 "Asked in chat instead")" = "rq4 withdrawn" ] || flunk "done or withdraw"
@@ -100,9 +103,13 @@ want='rq3 is done; done does not apply'; nope RQX "done" rq3 "again"
 GH="$ORCHY_CAPACITY_ROOT/ghost"; mkdir -p "$GH"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$GH/"; GX() { ORCHY_HOME="$GH" ORCHY_REPO=example/ghost "$ORCHY" "$@"; }
 GX lock >/dev/null && GX request add other:g1 "$LS" >/dev/null && GX waiting add other:x "Log in to the registry yourself" >/dev/null && GX request withdraw rq1 "not needed" >/dev/null || flunk "the ghost case"
 jq -e '[.waiting[].ref] == ["other:x"]' "$GH/waiting.json" >/dev/null || flunk "a ghost row: $(cat "$GH/waiting.json")"
+# request add holds the waiting lock from reading the ref's bare row to its write: held elsewhere, no file appears
+( flock 8; sleep 3 ) 8>>"$GH/waiting.lock" & hp=$!; sleep 0.5; GX request add other:g2 "$LS" > "$T/g2.out" & ap=$!; sleep 1.5
+[ ! -e "$ORCHY_ASKS_DIR/example-ghost.requests/rq2.json" ] || flunk "request add wrote before it held the waiting lock"
+wait "$ap" && wait "$hp" && grep -qx 'rq2 r1 created' "$T/g2.out" || flunk "request add after the waiting lock: $(cat "$T/g2.out")"
 
 # --- a malformed request is named, never fatal; readers change nothing
-printf '{"schema": "orchy.request/1", "id": "rq900"' > "$RQ/rq900.json"; : > "$RQ/rq901.json"; jq -c . "$RQ/rq1.json" "$RQ/rq1.json" > "$RQ/rq902.json"
+printf '{"schema": "orchy.request/1", "id": "rq900"' > "$RQ/rq900.json"; : > "$RQ/rq901.json"; jq -c '.id = "rq902"' "$RQ/rq1.json" "$RQ/rq1.json" > "$RQ/rq902.json"
 prints() { find "$ORCHY_HOME" "$ORCHY_ASKS_DIR" -printf '%p %s %T@ %m\n' | sort; }; b=$(prints)
 "$ORCHY" state | jq -e '(.errors | index("requests")) and any(.waiting[]; .ref == "other:test-path")' >/dev/null || flunk "state over a malformed request: $("$ORCHY" state | jq -c '.waiting, .errors')"
 "$ORCHY" waiting list --json | jq -e '[.errors[].file] == ["rq900.json", "rq901.json", "rq902.json"] and any(.waiting[]; .ref == "other:test-path")' >/dev/null \

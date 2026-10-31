@@ -56,28 +56,29 @@ rq_locked() { # rq_locked <fn> <arg>...: the seat is rechecked under the takeove
       seat_held || exit 1; "$@" ) 4>>"$H/orchestrator.lock.takeover" ) 5>>"$RQ/requests.lock"
 }
 rq_op() { ts_run requests "$1" "$WREF" "$RQ" "${@:2}" "$(utc_now)"; }
-rq_drop_bare() { # the bare row of a ref a request holds, dropped with no event: the item never stopped waiting
-  ( flock -w 30 8 && w=$(waiting_read) || exit 1
-    jq -e --arg r "$1" 'any(.waiting[]; .ref == $r)' <<<"$w" >/dev/null || exit 0
-    w=$(jq -c --arg r "$1" '.waiting |= map(select(.ref != $r))' <<<"$w") && waiting_write "$w" ) 8>>"$H/waiting.lock" 2>/dev/null \
-    || { echo "warning: the bare waiting row of $1 stays beside its request" >&2; return 1; }
+# rq_waiting <fn> <arg>...: also under the waiting lock, so no waiting add or done falls between reading a ref's bare row
+# and the write that takes the ref over or gives it up
+rq_waiting() { ( flock -w 30 8 || { echo "refused: the waiting lock is busy for 30 s" >&2; exit 1; }; "$@" ) 8>>"$H/waiting.lock"; }
+bare_drop() { # under rq_waiting: the bare row of a ref a request holds goes, with no event, since the item never stopped waiting
+  local w; w=$(waiting_read) || return 1
+  jq -e --arg r "$1" 'any(.waiting[]; .ref == $r)' <<<"$w" >/dev/null || return 0
+  w=$(jq -c --arg r "$1" '.waiting |= map(select(.ref != $r))' <<<"$w") && waiting_write "$w"
 }
-rq_add() { # under rq_locked: a bare record of the ref gives its since, and its row goes once the request holds the ref
+rq_add() { # the ref's bare row gives its since, and goes once the request holds the ref
   local w since o
   w=$(waiting_read) || return 1
   since=$(jq -r --arg r "$1" 'first(.waiting[] | select(.ref == $r) | .since) // empty' <<<"$w")
   o=$(rq_op add "$1" "$2" "$3" "$since") || return 1
-  # always, so a waiting add that checked before the file existed leaves no row; one left by a failure here shows as the
-  # request until the close drops it
-  rq_drop_bare "$1"
+  bare_drop "$1" || echo "warning: the bare waiting row of $1 stays beside its request, which shows in its place" >&2
   [ -n "$since" ] || [ "${o##* }" != created ] || ev waiting.add ref="$1"
   echo "$o"
 }
-rq_close() { # under rq_locked: rq_close <done|withdrawn> <rid> <outcome>. A leftover bare row goes before the status
-  # commits: once the request is closed nothing would drop it, and it would show again.
-  local o id st r; r=$(rq_ref "$2") || return 1
-  [ -z "$r" ] || rq_drop_bare "$r" || { echo "refused: $2 stays open until its bare waiting row can go" >&2; return 1; }
-  o=$(rq_op close "$2" "$1" "$3") || return 1; read -r id st r <<<"$o"
+rq_close() { # rq_close <done|withdrawn> <rid> <outcome>: checked, then a leftover bare row dropped, then the status
+  # committed, since nothing would drop that row once the request is closed
+  local o id st r
+  o=$(rq_op close "$2" "$1" "$3" 1) || return 1; read -r id st r <<<"$o"
+  bare_drop "$r" || { echo "refused: $2 stays open until the bare waiting row of $r can go" >&2; return 1; }
+  rq_op close "$2" "$1" "$3" 0 >/dev/null || return 1
   ev waiting.done ref="$r"; echo "$id $st"
 }
 public_text() { # public_text <what> <text>: the text as a file through check-public
@@ -106,7 +107,7 @@ orchy_request() {
       echo "refused: runbook ${r#other:} keeps $r; it rewrites that record on every check" >&2; exit 1; fi
     abs_path sp; j=$(ts_run requests spec "$WREF" "$r" "$sp" "$H/page/shots") || exit 1
     public_text "the request" "$(jq -r .text <<<"$j")" || exit 1
-    rq_locked rq_add "$r" "$(jq -c .content <<<"$j")" "$again";;
+    rq_locked rq_waiting rq_add "$r" "$(jq -c .content <<<"$j")" "$again";;
   note) id=${1:-}; re=; shift || true
     if [ "${1:-}" = --re ] && [ $# -ge 2 ]; then re=$2; shift 2; [[ "$re" =~ ^rq[1-9][0-9]{0,8}\.[1-9][0-9]?$ ]] || re=-; fi
     [[ "$id" =~ ^rq[1-9][0-9]{0,8}$ ]] && [ $# -gt 0 ] && [ "$re" != - ] || { echo "usage: request note <rid> [--re <aid>] <text>" >&2; exit 1; }
@@ -116,6 +117,6 @@ orchy_request() {
     # the ref too: the close's event carries it, and a name banned since the add must not reach events.jsonl
     r=$(rq_ref "$id") || r=
     public_text "the $([ "$sub" = stale ] && echo reason || echo outcome)" "${r:+$r$'\n'}$*" || exit 1
-    case "$sub" in stale) rq_locked rq_op stale "$id" "$*";; done) rq_locked rq_close "done" "$id" "$*";; *) rq_locked rq_close withdrawn "$id" "$*";; esac;;
+    case "$sub" in stale) rq_locked rq_op stale "$id" "$*";; done) rq_locked rq_waiting rq_close "done" "$id" "$*";; *) rq_locked rq_waiting rq_close withdrawn "$id" "$*";; esac;;
   esac
 }
