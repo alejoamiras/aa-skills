@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { calendarDate } from "../skills/start-orchy/scripts/orchy/calendar.ts";
@@ -122,6 +122,18 @@ describe("render", () => {
     };
     expect(merged(`${"é".repeat(4092)}<YYY>`)).toStartWith("orchy: unrendered tokens: <YYY>\n");   // 8189 bytes
     expect(merged(`${"é".repeat(4094)}<YYY>`)).toEndWith("<YYY>orchy: unrendered tokens: <YYY>\n");   // 8193 bytes
+  });
+  test("reads a template through /proc/self/cwd, directly or by a relative link, as the caller's directory", () => {
+    file("p.md", "hello <X>");
+    symlinkSync("/proc/self/cwd/p.md", join(T, "plink.md"));
+    const sh = '. "$1/orchy/plumbing.sh"; . "$1/orchy/text.sh"; SCRIPTS=$1; shift; orchy_render "$@"';
+    for (const t of ["/proc/self/cwd/p.md", "plink.md"])
+      expect(Bun.spawnSync(["bash", "-c", sh, "_", SCRIPTS, t, "X=v"], { cwd: T }).stdout.toString()).toBe("hello v");
+  });
+  test("exits 120 with Python's report when its buffered stdout cannot be flushed", () => {
+    const r = Bun.spawnSync(["bash", "-c", `${SH} >/dev/full`, "_", SCRIPTS, "render", file("full.md", "x"), ""]);
+    expect([r.exitCode, r.stderr.toString()]).toEqual([120,
+      "Exception ignored in: <_io.TextIOWrapper name='<stdout>' mode='w' encoding='utf-8'>\nOSError: [Errno 28] No space left on device\n"]);
   });
   test("passes bytes outside UTF-8 through as Python's argv did, never joining two into a character", () => {
     expect(cli("render", file("f.md", "<FOO>!"), "", "FOO=\\xff")).toMatchObject({ code: 0, bytes: [0xff, 0x21] });

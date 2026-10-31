@@ -106,11 +106,30 @@ if [ $ro = 0 ]; then
   mkdir -p "$H"/{briefs,prompts,reports,leads,watch,wt,scratch,inbox,page/shots,page/build}
   chmod 700 "$H"; [ $under = 1 ] && chmod 700 "$CAP"
 fi
-# The parts define functions and globals only: they are sourced for every subcommand, readers included.
-for part in "$SCRIPTS"/orchy/*.sh; do
-  [ -r "$part" ] || { echo "orchy: cannot read $part" >&2; exit 1; }
+# The parts define functions and globals only, and every subcommand, a reader too, sources each of them in this order.
+# Named, never globbed, so a stray file in orchy/ never runs.
+parts=(
+  accounts
+  acts
+  asks
+  authority
+  goals
+  holds
+  leads
+  ledger
+  merges
+  plumbing
+  receipts
+  runbooks
+  seat
+  status
+  text
+  waiting
+)
+for part in "${parts[@]}"; do [ -r "$SCRIPTS/orchy/$part.sh" ] || { echo "orchy: cannot read $SCRIPTS/orchy/$part.sh" >&2; exit 1; }; done
+for part in "${parts[@]}"; do
   # shellcheck source=/dev/null
-  . "$part"
+  . "$SCRIPTS/orchy/$part.sh"
 done
 case "$cmd" in
 config) cfg "$1";;

@@ -3,6 +3,7 @@
 // Usage: ts_run runbook <file> [--new]   (--new: every step starts unticked; exit 1 with the refusal on stderr)
 import { readFileSync } from "node:fs";
 import { args } from "./args.ts";
+import { STRERROR } from "./strerror.ts";
 import { badChar, utf8 } from "./text.ts";
 
 export type Step = [boolean, string, string, string];
@@ -33,14 +34,6 @@ export function parseRunbook(raw: string, fresh: boolean): Step[] | string {
   if (steps.length < 1 || steps.length > 20) return `refused: a runbook holds 1 to 20 steps, not ${steps.length}`;
   return steps;
 }
-
-// strerror(3)'s words for what a read can fail with, as Python's OSError carries them
-const STRERROR: Record<string, string> = {
-  ENOENT: "No such file or directory", EACCES: "Permission denied", EISDIR: "Is a directory", ENOTDIR: "Not a directory",
-  ELOOP: "Too many levels of symbolic links", ENAMETOOLONG: "File name too long", EIO: "Input/output error",
-  ENXIO: "No such device or address", EMFILE: "Too many open files", ENFILE: "Too many open files in system",
-  ENOMEM: "Cannot allocate memory", EPERM: "Operation not permitted", EINVAL: "Invalid argument",
-};
 
 if (import.meta.main) {
   const [path, ...rest] = await args();

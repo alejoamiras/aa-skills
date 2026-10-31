@@ -31,6 +31,9 @@ cd "$T/repo"
 if "$ORCHY" config .trunk >/dev/null 2>&1; then fail "config before bootstrap must refuse"; fi
 mkdir -p "$ORCHY_HOME"; jq '.install="true"' "$K/examples/orchy.example.json" > "$ORCHY_HOME/orchy.json"; cp "$K/examples/local.example.json" "$ORCHY_HOME/local.json"
 [ "$("$ORCHY" config .trunk)" = dev ] || fail "config .trunk"
+# the loader sources its named parts only: a stray file beside them never runs
+cp -r "$K/scripts" "$T/scripts-copy"; printf 'echo STRAY-SOURCED; exit 9\n' > "$T/scripts-copy/orchy/zzz.sh"
+o=$("$T/scripts-copy/orchy.sh" config .trunk 2>&1) && [ "$o" = dev ] || fail "a stray orchy/zzz.sh was sourced: $o"
 "$ORCHY" lock >/dev/null || fail "lock"
 # render: every token substituted; a token left over is exit 1
 out=$("$ORCHY" render common-brief.md REPO=example/app PRODUCT="the app" TRUNK=dev WORKTREE=/w/x BRANCH=worktree-x LANE=x KEY=x-plan PLANS_DIR=plans ARCHIVE_DIR=plans/archive ORCHY_HOME="$ORCHY_HOME" CODEX_EFFORT=high CODEX_MODEL=gpt-6.1-sol CODEX_MODEL_SHORT=sol LEAD_MODEL=opus LEAD_MODEL_NAME="Claude Opus 5.5" QUALITY_BAR=production GATES="lint, test" PROTECTED=main KNOWN_LIMIT_LABEL=known-limit DELEGATIONS="" NEVER_OPEN="")

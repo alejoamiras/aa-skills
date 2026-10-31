@@ -4,6 +4,7 @@
 // Usage: ts_run render <template> <K,K,...> K=V...   (the rendering on stdout; exit 1 on a token left over)
 import { readFileSync } from "node:fs";
 import { args } from "./args.ts";
+import { pyOSError } from "./strerror.ts";
 
 const STRICT = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
@@ -52,7 +53,14 @@ if (import.meta.main) {
   // only from 8 KiB, or on a terminal when the text held a line end
   const outFirst = out.length >= 8192 || (process.stdout.isTTY && /[\n\r]/.test(text));
   if (!outFirst) process.stderr.write(err);
-  await Bun.write(Bun.stdout, out);
-  if (outFirst) process.stderr.write(err);
-  if (err) process.exitCode = 1;
+  try {
+    await Bun.write(Bun.stdout, out);
+    if (outFirst) process.stderr.write(err);
+    if (err) process.exitCode = 1;
+  } catch (e) {
+    // Python raised a failed write it had made at once, and only reported, with 120, one its exit flush made
+    process.stderr.write(outFirst ? `Traceback (most recent call last):\n  File "<stdin>", line 5, in <module>\n${pyOSError(e)}\n`
+      : `Exception ignored in: <_io.TextIOWrapper name='<stdout>' mode='w' encoding='utf-8'>\n${pyOSError(e)}\n`);
+    process.exitCode = outFirst ? 1 : 120;
+  }
 }
