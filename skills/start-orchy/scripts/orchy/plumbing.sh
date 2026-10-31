@@ -34,10 +34,14 @@ session_pid() { # the orchestrator session: $CLAUDE_PID while it is a live claud
 # tool <set> <name> <fallback>: a tool as the viewer's unit finds it, whose PATH lacks ~/.bun/bin and ~/.local/bin and
 # which sets no tool variable: the variable, else the name on PATH, else the install's own path
 tool() { if [ -n "$1" ]; then echo "$1"; elif command -v "$2" >/dev/null 2>&1; then command -v "$2"; elif [ -x "$3" ]; then echo "$3"; else echo "$2"; fi; }
+bun_path() { tool "${ORCHY_BUN:-}" bun "${HOME:-}/.bun/bin/bun"; }
+gitleaks_path() { tool "${ORCHY_GITLEAKS:-}" gitleaks "${HOME:-}/.local/bin/gitleaks"; }
 # ts_run <module> <arg>...: orchy/<module>.ts under bun, from its own directory, so no bunfig.toml or .env of the caller's
 # repo reaches it; the arguments go NUL-separated on stdin (args.ts). Never on the path of state, ask list or receipt:
 # those viewers run where bun may not be installed at all.
-ts_run() { local b; b=$(tool "${ORCHY_BUN:-}" bun "${HOME:-}/.bun/bin/bun"); printf '%s\0' "${@:2}" | (cd "$SCRIPTS/orchy" && exec "$b" "./$1.ts"); }
+ts_run() { local b; b=$(bun_path); printf '%s\0' "${@:2}" | (cd "$SCRIPTS/orchy" && exec "$b" "./$1.ts"); }
+# ts_body <module> <arg>...: ts_run with this shell's stdin after the arguments, so a body never passes through a variable
+ts_body() { local b; b=$(bun_path); { printf '%s\0' "${@:2}"; cat; } | (cd "$SCRIPTS/orchy" && exec "$b" "./$1.ts"); }
 # abs_path <var>: the path in var made to name its file from ts_run's directory: an existing file's real path, since a
 # path through /proc/self/cwd resolves against the reader's directory, unless that lies under /proc/<pid>, which for
 # /proc/self is realpath's own; else anchored at pwd -P, so a missing file fails as it did. The . keeps $(...) from

@@ -53,7 +53,8 @@ ledger_append() { # inside the ledger lock (fd 9); a torn last line is ended fir
   [ "$(printf '%s' "$1" | wc -c)" -le 16384 ] || { echo "refused: a ledger row is at most 16 KiB; restate or split the ask" >&2; return 1; }
   [ -z "$(tail -c 1 "$LEDGER")" ] || printf '\n' >&9
   printf '%s\n' "$1" >&9 || return 1
-  local e; mapfile -t e < <(jq -r '"ask=\(.id)", "state:=\(.state // null | tojson)", "lane:=\(.lane // null | tojson)"' <<<"$1" 2>/dev/null)
+  # a row with no ask id (an answer's sentences no ask links) opens no ask, so it is no ask.row
+  local e; mapfile -t e < <(jq -r 'select((.id | type) == "string") | "ask=\(.id)", "state:=\(.state // null | tojson)", "lane:=\(.lane // null | tojson)"' <<<"$1" 2>/dev/null)
   if [ ${#e[@]} = 3 ]; then ev ask.row "${e[@]}"; fi
 }
 with_ledger() { ( flock -w 60 9 || { echo "refused: ask ledger lock busy for 60 s" >&2; exit 1; }; "$@" ) 9>>"$LEDGER"; }

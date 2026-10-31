@@ -4,11 +4,12 @@
 // the open folder is a close that stopped before its move, and the next write finishes it.
 // Usage: ts_run requests <op> <waiting-ref-regex> ...   (a refusal is one line on stderr, exit 1)
 //   spec <ref> <spec-file> <shots-dir>                     {content, text}: the stored content, and the text check-public reads
-//   add <dir> <ref> <content> <again 0|1> <bare since> <now>   "<rid> r<rev> created|refreshed|unchanged"
-//   note <dir> <rid> <re-aid> <text> <now> | stale <dir> <rid> <reason> <now>   "<rid> r<rev> noted|stale"
-//   close <dir> <rid> <done|withdrawn> <outcome> <check 0|1> <now>   "<rid> <status> <ref>", the file moved to closed/;
+// and, each after <dir> <answers-dir>:
+//   add <ref> <content> <again 0|1> <bare since> <now>     "<rid> r<rev> created|refreshed|unchanged"
+//   note <rid> <re-aid> <text> <now> | stale <rid> <reason> <now>   "<rid> r<rev> noted|stale"
+//   close <rid> <done|withdrawn> <outcome> <check 0|1> <now>   "<rid> <status> <ref>", the file moved to closed/;
 //                                                          with check 1, only the checks, writing nothing
-//   list <dir> <all 0|1> <json 0|1> <now> | show <dir> <rid> <now>
+//   list <all 0|1> <json 0|1> <now> | show <rid> <now>
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readdirSync, readSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { args } from "./args.ts";
@@ -19,11 +20,12 @@ import { badChar, utf8 } from "./text.ts";
 export const FILE_MAX = 64 * 1024, CONTENT_MAX = 40 * 1024, LOG_MAX = 99, REV_MAX = 999999999;
 const SHAPES = ["pick", "approve", "done", "reply", "sign"] as const;
 const STATUSES = ["open", "stale", "taken", "done", "withdrawn"] as const;
-const KINDS = ["pick", "approve", "done", "reply"], REASONS = ["stale", "closed", "invalid", "policy", "withdrawn"];
-const CLOSED: ReadonlySet<string> = new Set(["done", "withdrawn"]);
+export const KINDS = ["pick", "approve", "done", "reply"], REASONS = ["stale", "closed", "invalid", "policy", "withdrawn"];
+export const CLOSED: ReadonlySet<string> = new Set(["done", "withdrawn"]);
 const FILE = /^rq[1-9][0-9]{0,8}\.json$/;
 export const RID = /^rq[1-9][0-9]{0,8}$/, AID = /^rq[1-9][0-9]{0,8}\.[1-9][0-9]?$/;
-const OPTION = /^[a-z0-9][a-z0-9-]{0,23}$/, PICTURE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.(png|jpe?g|webp)$/;
+export const OPTION = /^[a-z0-9][a-z0-9-]{0,23}$/;
+const PICTURE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.(png|jpe?g|webp)$/;
 // a backstop for the obvious remote-exec shapes, not a boundary: a command is the orchestrator's own, never copied in
 const REMOTE_EXEC = /\|\s*(?:sudo\s+(?:-\S+\s+)*)?(?:env\s+)?(?:\S*\/)?(?:ba|da|z|k|c|tc|fi)?sh\b|\beval\b|\$\(|`|<\(/;
 const CONTENT_KEYS = ["shape", "title", "context", "steps", "blocks", "options", "recommend", "wording", "binding", "page"];
@@ -41,25 +43,25 @@ export type Note = { at: string; re?: string; text: string };
 export type LogEntry = { id: string; rev?: number; kind?: string; go?: boolean; state: "taken" | "refused"; reason?: string; withheld?: string; ask?: string; at: string };
 export type Request = { schema: "orchy.request/1"; id: string; rev: number; ref: string } & Content
   & { status: Status; since: string; updated: string; taken?: { answer: string; at: string }; outcome?: string; thread: Note[]; answers: LogEntry[] };
-export type Store = { dir: Buffer; wref: RegExp; now: string };
+export type Store = { dir: Buffer; ans: Buffer; wref: RegExp; now: string };
 
 export class Refused extends Error {}
-const no = (m: string): never => { throw new Refused(`refused: ${m}`); };
-type O = Record<string, unknown>;
-const isObj = (v: unknown): v is O => typeof v === "object" && v !== null && !Array.isArray(v);
+export const no = (m: string): never => { throw new Refused(`refused: ${m}`); };
+export type O = Record<string, unknown>;
+export const isObj = (v: unknown): v is O => typeof v === "object" && v !== null && !Array.isArray(v);
 const cps = (s: string) => [...s].length;
-const sha256 = (b: string | Uint8Array) => createHash("sha256").update(b).digest("hex");
-const at = (dir: Buffer, ...names: string[]) => Buffer.concat([dir, Buffer.from(`/${names.join("/")}`)]);
-const num = (id: string) => Number(id.slice(2).split(".")[0]);
+export const sha256 = (b: string | Uint8Array) => createHash("sha256").update(b).digest("hex");
+export const at = (dir: Buffer, ...names: string[]) => Buffer.concat([dir, Buffer.from(`/${names.join("/")}`)]);
+export const num = (id: string) => Number(id.slice(2).split(".")[0]);
 
-function obj(v: unknown, what: string): O {
+export function obj(v: unknown, what: string): O {
   return isObj(v) ? v : no(v === undefined ? `${what} is required` : `${what} is not an object`);
 }
-function arr(v: unknown, what: string, max: number, min = 0): unknown[] {
+export function arr(v: unknown, what: string, max: number, min = 0): unknown[] {
   if (!Array.isArray(v)) return no(`${what} is not a list`);
   return v.length < min || v.length > max ? no(`${what} holds ${min} to ${max}, not ${v.length}`) : v;
 }
-function known(o: O, what: string, allowed: string[], strict: boolean): void {
+export function known(o: O, what: string, allowed: string[], strict: boolean): void {
   if (strict) for (const k of Object.keys(o)) if (!allowed.includes(k)) no(`${what} has an unknown field ${JSON.stringify(k)}`);
 }
 /** Text of min..max code points, well-formed, no control, line separator or bidi character; nl lets \n through. */
@@ -71,18 +73,18 @@ export function str(v: unknown, what: string, max: number, min = 1, nl = false):
   return v;
 }
 // what utc_now writes: fromdateiso8601 alone would let a stored time carry any text after a blank
-const date = (v: unknown, what: string) =>
+export const date = (v: unknown, what: string) =>
   (typeof v === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(v) && fromDateIso8601(v) !== null ? v : no(`${what} is not a UTC time`));
 // a waiting record's since, which jq reads more loosely, in the form a request stores
 function utc(v: string): string {
   const t = fromDateIso8601(v) ?? no("the waiting record's since is not a time");
   return new Date(t * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
 }
-const int = (v: unknown, what: string, lo: number, hi: number) =>
+export const int = (v: unknown, what: string, lo: number, hi: number) =>
   (Number.isSafeInteger(v) && (v as number) >= lo && (v as number) <= hi ? (v as number) : no(`${what} is not a whole number from ${lo} to ${hi}`));
 
 // at most cap + 1 bytes, so a caller can tell a file over its cap from one at it
-function readCapped(fd: number, cap: number): Buffer {
+export function readCapped(fd: number, cap: number): Buffer {
   const b = Buffer.alloc(cap + 1);
   let n = 0;
   for (let k = 1; k > 0 && n <= cap; n += k) k = readSync(fd, b, n, cap + 1 - n, null);
@@ -224,12 +226,12 @@ export function stored(v: unknown, id: string, wref: RegExp): Request {
 
 type Meta = Pick<Request, "id" | "rev" | "ref" | "status" | "since" | "updated" | "thread" | "answers" | "taken" | "outcome">;
 // the one key order every write uses, so two writes of the same request are the same bytes
-function build(m: Meta, c: Content): Request {
+export function build(m: Meta, c: Content): Request {
   const { id, rev, ref, status, since, updated, taken, outcome, thread, answers } = m;
   return { schema: "orchy.request/1", id, rev, ref, ...c, status, since, updated, ...(taken ? { taken } : {}), ...(outcome !== undefined ? { outcome } : {}), thread, answers };
 }
-const meta = (r: Request): Meta => r;
-const contentOf = (r: Request) => Object.fromEntries(CONTENT_KEYS.filter((k) => k in r).map((k) => [k, (r as O)[k]])) as Content;
+export const meta = (r: Request): Meta => r;
+export const contentOf = (r: Request) => Object.fromEntries(CONTENT_KEYS.filter((k) => k in r).map((k) => [k, (r as O)[k]])) as Content;
 export const canon = (v: unknown): string =>
   JSON.stringify(v, (_, x) => (isObj(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x));
 /** What a request's caps measure: the file without its answers log and its lifecycle fields. */
@@ -265,8 +267,8 @@ export function readRequest(dir: Buffer, name: string, wref: RegExp): Read {
   } finally { closeSync(fd); }
 }
 
-function names(dir: Buffer): string[] {
-  try { return readdirSync(dir).filter((n) => FILE.test(n)).sort((a, b) => num(a) - num(b)); }
+export function names(dir: Buffer, file = FILE): string[] {
+  try { return readdirSync(dir).filter((n) => file.test(n)).sort((a, b) => num(a) - num(b) || seq(a) - seq(b)); }
   catch (e) { if ((e as { code?: string }).code === "ENOENT") return []; throw e; }
 }
 export function scan(dir: Buffer, wref: RegExp, prefix = ""): { ok: Request[]; errors: { file: string; error: string }[] } {
@@ -279,7 +281,7 @@ export function scan(dir: Buffer, wref: RegExp, prefix = ""): { ok: Request[]; e
   return { ok, errors };
 }
 
-function write(dir: Buffer, r: Request): void {
+export function write(dir: Buffer, r: Request): void {
   const tmp = at(dir, `.${r.id}.${process.pid}.tmp`);
   const fd = openSync(tmp, "wx", 0o600);
   try {
@@ -363,6 +365,8 @@ export function close(s: Store, rid: string, to: string, outcome: string, check 
   const from = to === "done" ? ["open", "taken"] : to === "withdrawn" ? ["open", "stale"] : no("a request closes as done or withdrawn");
   const cur = current(s, rid, to === "done" ? "done" : "withdraw"), t = str(outcome, "the outcome", 300), owed = unanswered(cur);
   if (!from.includes(cur.status)) no(`${rid} is ${cur.status}; ${to === "done" ? "done" : "withdraw"} does not apply`);
+  const waiting = pending(s.ans, rid);
+  if (waiting.length) no(`${waiting[0].id} waits in the inbox; take or refuse it first`);
   if (owed.length) no(`${rid} has a reply no note answers; answer it with request note ${rid} --re ${owed[0]} first`);
   if (check) return `${rid} ${to} ${cur.ref}\n`;
   write(s.dir, build({ ...meta(cur), status: to as Status, updated: s.now, taken: undefined, outcome: t }, contentOf(cur)));
@@ -371,13 +375,39 @@ export function close(s: Store, rid: string, to: string, outcome: string, check 
   return `${rid} ${to} ${cur.ref}\n`;
 }
 
+export const ANSWER_FILE = /^rq[1-9][0-9]{0,8}\.[1-9][0-9]?\.json$/;
+export const seq = (name: string) => Number(name.split(".")[1] ?? 0);
+export type Pending = { id: string; rev?: number; kind?: string; at?: string };
+/** The answers of rid waiting in the inbox, each with its rev, kind and time where they pass their grammar. */
+export function pending(ans: Buffer, rid: string): Pending[] {
+  return names(ans, ANSWER_FILE).filter((n) => n.startsWith(`${rid}.`)).map((n) => {
+    const p: Pending = { id: n.slice(0, -5) };
+    let fd: number;
+    try { fd = openSync(at(ans, n), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch { return p; }
+    try {
+      const st = fstatSync(fd), t = st.isFile() && st.uid === process.getuid?.() ? utf8(readCapped(fd, ANSWER_MAX)) : null;
+      const o = t === null ? null : (() => { try { return JSON.parse(t) as unknown; } catch { return null; } })();
+      if (!isObj(o)) return p;
+      if (Number.isSafeInteger(o.rev) && (o.rev as number) >= 1) p.rev = o.rev as number;
+      if (KINDS.includes(o.kind as string)) p.kind = o.kind as string;
+      if (typeof o.at === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(o.at)) p.at = o.at;
+      return p;
+    } finally { closeSync(fd); }
+  });
+}
+export const ANSWER_MAX = 16 * 1024;
+/** Sent and not yet taken: a pending final answer for the current rev, or a pending reply. */
+export const answered = (r: Request, ps: Pending[]) => ps.some((p) => p.kind === "reply" || (p.kind !== undefined && p.rev === r.rev));
+
 const age = (s: number) => (s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h`);
-export function list(s: Store, all: boolean): { requests: (Request & { age_s: number; pending: never[]; answered: boolean; unanswered: string[] })[]; errors: { file: string; error: string }[] } {
+export function list(s: Store, all: boolean): { requests: (Request & { age_s: number; pending: Pending[]; answered: boolean; unanswered: string[] })[]; errors: { file: string; error: string }[] } {
   const a = scan(s.dir, s.wref), c = all ? scan(at(s.dir, "closed"), s.wref, "closed/") : { ok: [], errors: [] };
   const now = fromDateIso8601(s.now)!;
   const rs = [...a.ok.filter((r) => all || !CLOSED.has(r.status)), ...c.ok].sort((x, y) => num(x.id) - num(y.id));
-  // the pending answers live in the answers inbox, which nothing reads yet
-  return { requests: rs.map((r) => ({ ...r, age_s: now - fromDateIso8601(r.since)!, pending: [], answered: false, unanswered: unanswered(r) })), errors: [...a.errors, ...c.errors] };
+  return { requests: rs.map((r) => {
+    const ps = pending(s.ans, r.id);
+    return { ...r, age_s: now - fromDateIso8601(r.since)!, pending: ps, answered: answered(r, ps), unanswered: unanswered(r) };
+  }), errors: [...a.errors, ...c.errors] };
 }
 
 export function render(r: Request, now: string): string {
@@ -398,25 +428,29 @@ export function render(r: Request, now: string): string {
 }
 
 function run(op: string, wref: RegExp, a: Buffer[]): { out: string; err?: string } {
-  const t = (i: number, what: string) => utf8(a[i] ?? Buffer.alloc(0)) ?? no(`${what} is not UTF-8`);
-  const store = (now: number): Store => ({ dir: a[0], wref, now: date(t(now, "the time"), "the time") });
+  if (op === "spec") {
+    const ref = utf8(a[0] ?? Buffer.alloc(0)) ?? no("the ref is not UTF-8"), c = specFile(a[1], ref, wref, a[2]);
+    return { out: `${JSON.stringify({ content: c, text: publicText(ref, c) })}\n` };
+  }
+  const [dir, ans, ...b] = a;
+  const t = (i: number, what: string) => utf8(b[i] ?? Buffer.alloc(0)) ?? no(`${what} is not UTF-8`);
+  const store = (now: number): Store => ({ dir, ans, wref, now: date(t(now, "the time"), "the time") });
   switch (op) {
-    case "spec": { const c = specFile(a[1], t(0, "the ref"), wref, a[2]); return { out: `${JSON.stringify({ content: c, text: publicText(t(0, "the ref"), c) })}\n` }; }
     case "add": {
-      const ref = t(1, "the ref"), c = content(obj(JSON.parse(t(2, "the content")), "the content"), ref, wref);
-      return { out: add(store(5), ref, c, t(3, "") === "1", t(4, "the since")) };
+      const ref = t(0, "the ref"), c = content(obj(JSON.parse(t(1, "the content")), "the content"), ref, wref);
+      return { out: add(store(4), ref, c, t(2, "") === "1", t(3, "the since")) };
     }
-    case "note": return { out: note(store(4), t(1, "the id"), t(2, "the answer id"), t(3, "the note")) };
-    case "stale": return { out: stale(store(3), t(1, "the id"), t(2, "the reason")) };
-    case "close": return { out: close(store(5), t(1, "the id"), t(2, "the status"), t(3, "the outcome"), t(4, "") === "1") };
+    case "note": return { out: note(store(3), t(0, "the id"), t(1, "the answer id"), t(2, "the note")) };
+    case "stale": return { out: stale(store(2), t(0, "the id"), t(1, "the reason")) };
+    case "close": return { out: close(store(4), t(0, "the id"), t(1, "the status"), t(2, "the outcome"), t(3, "") === "1") };
     case "list": {
-      const s = store(3), l = list(s, t(1, "") === "1");
-      if (t(2, "") === "1") return { out: `${JSON.stringify({ schema: "orchy.requests/1", ...l })}\n` };
-      return { out: l.requests.map((r) => `${r.id}  r${r.rev}  ${r.status}  ${r.shape}  ${r.ref}  ${age(r.age_s)}  ${r.title}\n`).join(""),
+      const s = store(2), l = list(s, t(0, "") === "1");
+      if (t(1, "") === "1") return { out: `${JSON.stringify({ schema: "orchy.requests/1", ...l })}\n` };
+      return { out: l.requests.map((r) => `${r.id}  r${r.rev}  ${r.status}  ${r.shape}  ${r.ref}  ${age(r.age_s)}${r.answered ? "  answered" : ""}  ${r.title}\n`).join(""),
         err: l.errors.map((e) => `error: ${e.file}: ${e.error}\n`).join("") };
     }
     case "show": {
-      const s = store(2), rid = t(1, "the id");
+      const s = store(1), rid = t(0, "the id");
       if (!RID.test(rid)) no("a request id is rq<n>");
       const x = readRequest(s.dir, `${rid}.json`, wref) ?? readRequest(at(s.dir, "closed"), `${rid}.json`, wref);
       return x && "r" in x ? { out: render(x.r, s.now) } : no(x ? `${rid}: ${x.error}` : `no request ${rid}`);

@@ -40,6 +40,12 @@ orchy_snapshot() {
   else echo "(gh issue list failed)"; fi
   echo "-- unsigned pages"; [ -f "$H/page/unsigned.json" ] && jq -r --argjson now "$(date +%s)" --slurpfile u "$H/page/unsigned.json" '.pages[] | select(.no as $n | $u[0] | index($n)) |
     "page \(.no) \(.name): " + (if .added_at then (($now - (.added_at | fromdateiso8601)) | "waiting \(. / 86400 | floor)d\(. % 86400 / 3600 | floor)h") else "age unknown" end)' "$H/page/decisions.json" 2>/dev/null
+  # what a take left to settle: ids and ages only, UNSETTLED once the 30 minutes a take may stay unacted are up
+  echo "-- requests"; "$0" request list --json 2>/dev/null | jq -r --argjson now "$(date +%s)" '
+    def age(t): ($now - (t | fromdateiso8601? // $now)) as $s
+      | (if $s < 3600 then "\($s / 60 | floor)m" else "\($s / 3600 | floor)h" end) + (if $s > 1800 then " UNSETTLED" else "" end);
+    .requests[] | . as $r | (select(.status == "taken") | "\(.id) taken \(.taken.answer // "?") \(age(.taken.at))"),
+      (.unanswered[] as $a | "\($r.id) reply \($a) unanswered \(age(first($r.answers[] | select(.id == $a) | .at)))")' || echo "(request list failed)"
   echo "-- waiting"; "$0" waiting list 2>&1
   echo "-- grants"; "$0" grants 2>&1
   echo "-- holds"; "$0" hold list 2>&1
@@ -129,15 +135,21 @@ orchy_wait() {
   # so seen/ only ever holds reported values: a second concurrent wait can report a change twice, never lose one.
   SEEN="$H/seen"; mkdir -p "$SEEN"
   declare -A last=() new=() unread=(); srcs=(prs issues trunk)
-  for s in local "${srcs[@]}"; do [ -f "$SEEN/$s" ] && last[$s]=$(cat "$SEEN/$s"); done
+  for s in local answers "${srcs[@]}"; do [ -f "$SEEN/$s" ] && last[$s]=$(cat "$SEEN/$s"); done
   report() { local s l
     for s in "$@"; do l=$s; [ "$s" = local ] && l="reports/leads/watchers"
-      echo "CHANGED ($l):" || return 1; diff <(echo "${last[$s]:-}") <(echo "${new[$s]}") | grep '^[<>]' | head -20; done
+      echo "CHANGED ($l):" || return 1
+      if [ "$s" = answers ]; then an_added "${last[$s]:-}" "${new[$s]}" | sed 's/^/> /'; else diff <(echo "${last[$s]:-}") <(echo "${new[$s]}") | grep '^[<>]' | head -20; fi; done
     for s in "$@"; do printf '%s\n' "${new[$s]}" > "$SEEN/.$s.$$" && mv "$SEEN/.$s.$$" "$SEEN/$s" || return 1; done; }
   t0=$(date +%s); n=0
   while :; do
     sleep "$tick"; n=$((n+1)); changed=()
     new[local]=$(snap); { [ -n "${last[local]+x}" ] && [ "${new[local]}" = "${last[local]}" ]; } || changed+=(local)
+    # answers wake on an arrival only: the orchestrator's own take removes one, and that is recorded without a report
+    new[answers]=$(an_names)
+    if [ -n "$(an_added "${last[answers]:-}" "${new[answers]}")" ]; then changed+=(answers)
+    elif [ "${new[answers]}" != "${last[answers]:-}" ]; then
+      printf '%s\n' "${new[answers]}" > "$SEEN/.answers.$$" && mv "$SEEN/.answers.$$" "$SEEN/answers" && last[answers]=${new[answers]}; fi
     # the first tick polls too: local events re-arm the wait, and a burst of them must not starve GitHub
     if [ "$n" = 1 ] || [ $((n % every)) -eq 0 ]; then
       for s in "${srcs[@]}"; do
