@@ -110,10 +110,10 @@ file_age() {
   printf '%s' "$((now - mt))"
 }
 
-# Create a lock dir, failing if it exists. uutils mkdir 0.10.0 (Ubuntu 26.04) reports success to both
-# sides of a creation race; perl's mkdir is one mkdir(2), and BSD and GNU mkdir(1) are already atomic.
+# One mkdir(2): uutils mkdir 0.10.0 (Ubuntu 26.04) tells both sides of a creation race they won. With no
+# /usr/bin/perl it is mkdir(1), exclusive on BSD, GNU and BusyBox. An inherited PERL5OPT could skip the -e.
 claim_dir() {
-  if [[ -x /usr/bin/perl ]]; then /usr/bin/perl -e 'mkdir $ARGV[0] or exit 1' -- "$1"; else mkdir "$1"; fi
+  if [[ -x /usr/bin/perl ]]; then PERL5OPT='' /usr/bin/perl -e 'mkdir $ARGV[0] or exit 1' -- "$1"; else mkdir "$1"; fi
 }
 
 # Drop the lock only while we still hold it: one stolen after a stall belongs

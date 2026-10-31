@@ -609,8 +609,8 @@ t "lib: hrule draws two dashes past each width" test "$(lib hrule '<' '+' '>' 1 
 mkdir -p "$S/race"
 won=$(bash -c '. "$1"; n=0; for ((i = 0; i < 200; i++)); do
   claim_dir "$2/$i" 2> /dev/null & a=$!; claim_dir "$2/$i" 2> /dev/null & b=$!
-  wait "$a"; x=$?; wait "$b"; y=$?; ((x + y == 1)) && n=$((n + 1)); done; echo "$n"' _ "$ROOT/lib/usage.sh" "$S/race")
-t "lib: claim_dir has one winner in each of 200 races (only a uutils host, whose mkdir(1) can let both win, catches a regression)" test "$won" -eq 200
+  wait "$a"; x=$?; wait "$b"; y=$?; ((x + y == 1)) && [ -d "$2/$i" ] && n=$((n + 1)); done; echo "$n"' _ "$ROOT/lib/usage.sh" "$S/race")
+t "lib: claim_dir lets one of two paired claims win, 200 times (a mkdir(1) regression fails only on uutils)" test "$won" -eq 200
 r=$("$CU_BIN" add main 2>&1)"|"$(cx add best 2>&1)
 t "lib: each tool's own wording for a reserved name" test "$r" = "'main' is reserved for ~/.claude|'best' is reserved: it means \"pick for me\" in \`home\` and CODEX_ACCOUNT"
 # install.sh reaches the bins through ~/.local/bin links: a relative link to an absolute one, from an unrelated cwd,
