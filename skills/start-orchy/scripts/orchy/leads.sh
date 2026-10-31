@@ -96,10 +96,10 @@ launch_spawn() {
   exec 9>"$CAP/.spawn.lock"; flock -w 30 9 || { echo "refused: spawn lock busy for 30 s" >&2; exit 1; }
   seat_held || exit 1
   la=; if [ -f "$H/leads/$k.started" ]; then read -r pid st la _ < "$H/leads/$k.started"; alive "$pid" "$st" && { echo "refused: lead $k is alive (pid $pid)" >&2; exit 1; }; fi
-  # an arc follows its planner and resumes the planner's session, so never beside a live one: the slug's planner and the key's
-  if [[ "${k,,}" =~ -(a|arc)[0-9]+$ ]]; then for pl in "$w-plan" "${k%-*}-plan"; do
-    [ -f "$H/leads/$pl.started" ] && read -r pid st _ < "$H/leads/$pl.started" && alive "$pid" "$st" \
-      && { echo "refused: planner $pl is alive (pid $pid); the lane's arcs start after it ends" >&2; exit 1; }; done; fi
+  # an arc waits for its lane's planner: any -plan key run in this slug, or named for the slug or the key's own lane, in any case
+  if [[ "${k,,}" =~ -(a|arc)[0-9]+$ ]]; then kl=${k,,}; kl=${kl%-*}; for f in "$H"/leads/*.started; do pl=${f##*/}; pl=${pl%.started}; [[ "${pl,,}" == *-plan ]] || continue
+    read -r pid st _ _ _ _ _ pw _ < "$f"; [[ "${pw:-}" == "$w" || "${pl,,}" == "${w,,}-plan" || "${pl,,}" == "$kl-plan" ]] || continue
+    alive "$pid" "$st" && { echo "refused: planner $pl is alive (pid $pid); the lane's arcs start after it ends" >&2; exit 1; }; done; fi
   # a usage limit binds the account it hit; on another one the session resumes at once, since claude-usage run carries it over
   if [ "$cmd" = resume ] && [ -n "$la" ] && jq -e --arg x "$la" '.key == $x or .label == $x' <<<"$acc" >/dev/null; then
     read -r _ rs rt < <(python3 -I "$SCRIPTS/orchy/limit.py" "$L"); [[ "${rs:-}" =~ ^[0-9]+$ ]] && [ "$rs" -gt "$(date +%s)" ] \

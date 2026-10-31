@@ -27,12 +27,14 @@ def reset(text, anchor):
             h = h % 12 + (12 if m["ap"].lower() == "pm" else 0)
         if h > 23 or mi > 59 or (m["mon"] and m["mon"].lower() not in MON): return None
         try:
-            a = datetime.fromtimestamp(anchor, ZoneInfo(m["tz"])) if m["tz"] else datetime.fromtimestamp(anchor).astimezone()
+            # naive without a zone: timestamp() then applies the local offset of the reset's own date, not the anchor's
+            a = datetime.fromtimestamp(anchor, ZoneInfo(m["tz"])) if m["tz"] else datetime.fromtimestamp(anchor)
             d = a.replace(hour=h, minute=mi, second=0, microsecond=0)
             if m["mon"]:
                 d = d.replace(month=MON.index(m["mon"].lower()) + 1, day=int(m["day"]))
                 if d.timestamp() < anchor - 86400: d = d.replace(year=d.year + 1)
-            # a bare clock time is its next occurrence; one under an hour back is a rounded reset already due
+            # a bare clock time is its next occurrence after the log's last write, so a later read never rolls a due
+            # reset forward; one under an hour back is a rounded reset already due
             elif d.timestamp() < anchor - 3600: d += timedelta(days=1)
         except (ValueError, KeyError, OSError): return None
         t = int(d.timestamp())
