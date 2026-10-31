@@ -37,7 +37,7 @@ Each skill directory has a `README.md` explaining the concepts (blueprint and ha
 | [`bin/env-exec`](bin/env-exec) | Host half of **keyed runs** (my-stack → Keyed runs): an agent files `request` for a command that needs 1Password secrets and `wait`s on it; the owner approves on the Mac. No secret touches disk or an argv. |
 | [`bin/op-remote`](bin/op-remote) | Mac half of keyed runs: shows exactly what a request will run (commit, argv, secret refs), and only on `y` streams the `op read` values over ssh into that one process. `create` builds the request template's 1Password item from its `# op:` directives. |
 
-`install.sh` symlinks `bin/*` into `~/.local/bin`.
+`install.sh` symlinks `bin/*` into `~/.local/bin`. `claude-usage` and `codex-usage` share `lib/usage.sh`, which each finds beside its real path through that link.
 
 ## Install
 
