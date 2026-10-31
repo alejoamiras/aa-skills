@@ -203,8 +203,8 @@ puts() { grep -c "^PUT repos/example/app/pulls/9/update-branch .*expected_head_s
 for l in "LEAD_DONE lane-8 a2" "LEAD_DONE lane-9 a3" "LEAD_DONE lane-9 a2 x" "LEAD_DONE lane-9 a2"; do mkpr "$SHA"
   printf 'ARC_FAILED: a2 red\n%s\nPR #9 t ready checks: green\nHEAD %s\n' "$l" "$SHA" > "$ORCHY_HOME/reports/lane-9-a2.md"; o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 lane-9-a2.md - 2>&1 || true)
   case $l in *9\ a2) grep -q '^#9 MERGED' <<<"$o" || fail "the report's own key did not end it: $o";; *) grep -q 'TIMEOUT; not merged' <<<"$o" || fail "'$l' ended a failed report: $o";; esac; done
-# a required check with no run waits while the head's other checks run (a suite with no runs is no sign) and the grace after; then MISSING
-cp "$MOCK_DIR/checks.json" "$T/checks.bak"; cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak"; jq 'del(.check_runs[] | select(.name == "e2e-status"))' "$T/checks.bak" > "$MOCK_DIR/checks.json"
+# a required check with no run waits while the head's other checks run (no suite without runs, no forged row) and the grace after; then MISSING
+cp "$MOCK_DIR/checks.json" "$T/checks.bak"; cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak"; jq 'del(.check_runs[] | select(.name == "e2e-status")) | .check_runs += [{id:5,name:"zz\nx\tin_progress\tnull",status:"completed",conclusion:"success"}]' "$T/checks.bak" > "$MOCK_DIR/checks.json"
 echo '{"check_suites":[{"id":1,"status":"in_progress","latest_check_runs_count":3}]}' > "$MOCK_DIR/suites.json"; mkpr "$SHA"; o=$(wm -)
 grep -qE '^[0-9:]{5}Z waiting on required checks not started yet: e2e-status; other checks on the head still run$' <<<"$o" && ! grep -q MISSING <<<"$o" || fail "a check not started yet: $o"
 echo '{"check_suites":[{"id":2,"status":"queued","latest_check_runs_count":0}]}' > "$MOCK_DIR/suites.json"; jq '.merge.check_grace_sec=1' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"; mkpr "$SHA"; o=$(wm -)
@@ -222,9 +222,11 @@ mc() { git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit-tree 
 B0=$(git rev-parse dev); P=$(mc "$(mt a)" -p "$B0"); X=$(mc "$(mt b)" -p "$B0"); M=$(mc "$(mt a b)" -p "$P" -p "$X"); E=$(mc "$(mt a b c)" -p "$P" -p "$X")
 git push -q origin "$M:refs/smoke/m" "$E:refs/smoke/e"; printf 'LEAD_DONE\nPR #9 t ready checks: green\nHEAD %s\n' "$P" > "$ORCHY_HOME/reports/lane-9-a2.md"
 upd() { pr9 ".headRefOid=\"$P\" | .mergeStateStatus=\"BEHIND\""; printf '.headRefOid="%s" | .mergeStateStatus="CLEAN"\n' "$1" > "$MOCK_DIR/pr-9.update.jq"
+  [ -z "${2:-}" ] || echo "{\"status\":\"$2\"}" > "$MOCK_DIR/compare-dev.json"
   rc=0; o=$("$ORCHY" watch-merge 9 "$P" lane-9 lane-9-a2.md - 2>&1) || rc=$?; }
 upd "$M"; grep -q "re-pinned to $M" <<<"$o" && grep -q '^#9 MERGED' <<<"$o" && grep -q -- "--match-head-commit $M" "$MOCK_DIR/gh.log" || fail "GitHub's update was not re-pinned: $o"
 upd "$E"; [ "$rc" = 2 ] && grep -q "^HEAD MOVED to $E " <<<"$o" || fail "a merge carrying more than the base was re-pinned (exit $rc): $o"
+upd "$M" diverged; [ "$rc" = 2 ] && grep -q "^HEAD MOVED to $M " <<<"$o" || fail "a merge with a commit off the base was re-pinned (exit $rc): $o"
 n=$(puts); echo '{"protected":true}' > "$MOCK_DIR/branch-worktree-lane-9.json"; upd "$M"; rm "$MOCK_DIR/branch-worktree-lane-9.json" "$MOCK_DIR/pr-9.update.jq"
 [ "$rc" = 5 ] && grep -q 'not updating worktree-lane-9: protected' <<<"$o" && [ "$(puts)" = "$n" ] || fail "a protected branch was updated (exit $rc): $o"
 # a lane's <lane>-* heads merge; archive - neither waits for a plan nor tears the lane down
