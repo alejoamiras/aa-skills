@@ -631,6 +631,16 @@ one "$n" ".kind == \"lead.launch\" and .key == \"x-ev\" and .lane == \"x\" and .
 n=$(en); "$ORCHY" stop x-ev >/dev/null; one "$n" '.kind == "lead.stop" and .key == "x-ev"' stop
 n=$(en); MOCK_LEAD_SECS=30 "$ORCHY" resume --force-cap x-ev x acct-b 00000000-0000-4000-8000-000000000009 >/dev/null || fail "resume x-ev"
 one "$n" '.kind == "lead.resume" and .key == "x-ev" and .prior_failed_lines == 2' resume; "$ORCHY" stop x-ev >/dev/null; "$ORCHY" unlock >/dev/null
+# a lead stopped by a usage limit is LIMITED until its reset, and only the account it hit waits for that
+"$ORCHY" lock >/dev/null; printf 'You are a subagent.\n' > "$ORCHY_HOME/prompts/x-lim.md"; rs=$(( ($(date +%s) / 3600 + 2) * 3600 ))
+lim='{"type":"result","subtype":"success","is_error":true,"result":"You have hit your limit · your 5-hour limit resets '"$(date -u -d "@$rs" +%-I%P)"' (UTC)"}'
+lim_gone() { read -r p _ < "$ORCHY_HOME/leads/x-lim.started"; for _ in $(seq 100); do [[ $(ps -o args= -p "$p") == *claude-usage* ]] || return 0; sleep 0.1; done; fail "x-lim never ended"; }
+lim_run() { MOCK_LEAD_SECS=1 MOCK_RESULT=${2-$lim} "$ORCHY" $1 --force-cap x-lim x "${@:3}" >/dev/null && lim_gone || fail "$1 x-lim ${*:3}"; }
+lim_run launch "$lim" acct-b; o=$("$ORCHY" snapshot 2>&1); grep -qx "LIMITED x-lim resets $(date -u -d "@$rs" +%FT%TZ)" <<<"$o" || fail "no LIMITED line: $o"
+o=$("$ORCHY" resume --force-cap x-lim x acct-b 00000000-0000-4000-8000-000000000001 2>&1 || true); grep -q "acct-b's usage limit, which resets $(date -u -d "@$rs" +%FT%TZ)" <<<"$o" || fail "a resume before the reset: $o"
+lim_run resume "$lim" acct-c 00000000-0000-4000-8000-000000000001; touch -d "@$(( $(date +%s) - 86400 ))" "$ORCHY_HOME/leads/x-lim.log"
+o=$("$ORCHY" snapshot 2>&1); grep -qx "LIMITED x-lim resets $(date -u -d "@$(( rs - 86400 ))" +%FT%TZ) (passed)" <<<"$o" || fail "a passed reset: $o"
+lim_run resume "" acct-c 00000000-0000-4000-8000-000000000001; "$ORCHY" unlock >/dev/null
 n=$(en); A add "an event row" >/dev/null; one "$n" '.kind == "ask.row" and (.ask | test("^ask[0-9]+$")) and .state == "open"' "ask add"
 grep -q 'acct-\|event row\|gate red' "$E" && fail "an event carries an account name or text: $(grep 'acct-\|event row\|gate red' "$E")"
 jq -se 'all(.schema == "orchy.event/1" and (.at | test("Z$")))' "$E" >/dev/null || fail "an event without its schema"
