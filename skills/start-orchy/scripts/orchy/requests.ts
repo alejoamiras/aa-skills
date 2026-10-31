@@ -6,7 +6,8 @@
 //   spec <ref> <spec-file> <shots-dir>                     {content, text}: the stored content, and the text check-public reads
 //   add <dir> <ref> <content> <again 0|1> <bare since> <now>   "<rid> r<rev> created|refreshed|unchanged"
 //   note <dir> <rid> <re-aid> <text> <now> | stale <dir> <rid> <reason> <now>   "<rid> r<rev> noted|stale"
-//   close <dir> <rid> <done|withdrawn> <outcome> <now>     "<rid> <status> <ref>", the file moved to closed/
+//   close <dir> <rid> <done|withdrawn> <outcome> <check 0|1> <now>   "<rid> <status> <ref>", the file moved to closed/;
+//                                                          with check 1, only the checks, writing nothing
 //   list <dir> <all 0|1> <json 0|1> <now> | show <dir> <rid> <now>
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readdirSync, readSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -358,11 +359,12 @@ export function stale(s: Store, rid: string, reason: string): string {
   return `${rid} r${r.rev} stale\n`;
 }
 
-export function close(s: Store, rid: string, to: string, outcome: string): string {
+export function close(s: Store, rid: string, to: string, outcome: string, check = false): string {
   const from = to === "done" ? ["open", "taken"] : to === "withdrawn" ? ["open", "stale"] : no("a request closes as done or withdrawn");
   const cur = current(s, rid, to === "done" ? "done" : "withdraw"), t = str(outcome, "the outcome", 300), owed = unanswered(cur);
   if (!from.includes(cur.status)) no(`${rid} is ${cur.status}; ${to === "done" ? "done" : "withdraw"} does not apply`);
   if (owed.length) no(`${rid} has a reply no note answers; answer it with request note ${rid} --re ${owed[0]} first`);
+  if (check) return `${rid} ${to} ${cur.ref}\n`;
   write(s.dir, build({ ...meta(cur), status: to as Status, updated: s.now, taken: undefined, outcome: t }, contentOf(cur)));
   // the status is the commit: a move that fails here is finished by the next write
   try { renameSync(at(s.dir, `${rid}.json`), at(s.dir, "closed", `${rid}.json`)); } catch {}
@@ -406,7 +408,7 @@ function run(op: string, wref: RegExp, a: Buffer[]): { out: string; err?: string
     }
     case "note": return { out: note(store(4), t(1, "the id"), t(2, "the answer id"), t(3, "the note")) };
     case "stale": return { out: stale(store(3), t(1, "the id"), t(2, "the reason")) };
-    case "close": return { out: close(store(4), t(1, "the id"), t(2, "the status"), t(3, "the outcome")) };
+    case "close": return { out: close(store(5), t(1, "the id"), t(2, "the status"), t(3, "the outcome"), t(4, "") === "1") };
     case "list": {
       const s = store(3), l = list(s, t(1, "") === "1");
       if (t(2, "") === "1") return { out: `${JSON.stringify({ schema: "orchy.requests/1", ...l })}\n` };

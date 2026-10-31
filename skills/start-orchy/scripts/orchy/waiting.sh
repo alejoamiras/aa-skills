@@ -40,7 +40,7 @@ orchy_waiting() {
     # the lock file is never replaced, so one writer at a time spans the read, the rename and the event
     ( flock -w 30 8 || { echo "refused: the waiting lock is busy for 30 s" >&2; exit 1; }
       w=$(waiting_read) || exit 1
-      # under this lock, so a request add that has written its file finds no bare row left behind once it takes the lock
+      # under this lock, which a request add or close holds from reading the ref's bare row to its own write
       q=$(rq_holder "$r") || { echo "refused: the requests cannot be read, so $r may belong to one" >&2; exit 1; }
       [ -z "$q" ] || { echo "refused: request $q holds $r; ORCHY request note, done or withdraw changes it" >&2; exit 1; }
       if [ "$sub" = add ]; then
