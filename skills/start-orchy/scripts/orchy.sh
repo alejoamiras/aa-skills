@@ -36,6 +36,11 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   ask close-lane <slug>        after teardown: each ask laned there is done (delivered, with its PR) or reopened, from the reports' ASKS: lines
 #   waiting add <ref> <text> | done <ref> | list [--json]   what waits on the owner, one item per ref (pr:N issue:N page:N
 #                                ask:askN lane:<slug> other:<slug>); add replaces the text and keeps since; orchy.waiting/1 with --json
+#   request add <ref> <spec-file> [--again]   a question that waits on the owner, from a JSON spec (references/requests.md);
+#                                created, refreshed (rev+1 when its content changed) or unchanged; it owns the ref's waiting row
+#   request note <rid> [--re <aid>] <text> | stale <rid> <reason> | done <rid> <outcome> | withdraw <rid> <reason>
+#                                a note in its thread, or a move; done and withdraw close it into closed/
+#   request list [--json] [--all] | show <rid>   the open requests (every one with --all; orchy.requests/1 with --json); one request
 #   hold add <ref> <all|trunk> | done <ref> | list [--json]   pause the program for a peer or a release freeze, one hold per
 #                                waiting ref: all refuses worktrees, leads and acts and holds every merge; trunk holds trunk merges
 #   runbook add <slug> <file> | tick <slug> <n> | check <slug> | show <slug>   the owner's own steps for a release or a goal, one
@@ -101,7 +106,7 @@ for d in "${ds[@]}"; do [ ! -L "$d" ] && [ -O "$d" ] || { echo "orchy: $d must b
 f=$({ find "$H" -maxdepth 2 ! -user "$EUID"; [ $under = 0 ] || find "$CAP" -maxdepth 1 ! -user "$EUID"; } 2>/dev/null | head -1)
 [ -z "$f" ] || { echo "orchy: $f belongs to another user; refusing a home someone else could write" >&2; exit 1; }
 # Readers keep the ownership checks but create nothing, so a poller never changes the home it reads.
-ro=0; case "$cmd" in state|config|local|session-id|receipt|accounts|grants|goals) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting|hold) case "${1:-}" in list) ro=1;; esac;; runbook) case "${1:-}" in show) ro=1;; esac;; esac
+ro=0; case "$cmd" in state|config|local|session-id|receipt|accounts|grants|goals) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting|hold) case "${1:-}" in list) ro=1;; esac;; request) case "${1:-}" in list|show) ro=1;; esac;; runbook) case "${1:-}" in show) ro=1;; esac;; esac
 if [ $ro = 0 ]; then
   mkdir -p "$H"/{briefs,prompts,reports,leads,watch,wt,scratch,inbox,page/shots,page/build}
   chmod 700 "$H"; [ $under = 1 ] && chmod 700 "$CAP"
@@ -120,6 +125,7 @@ parts=(
   merges
   plumbing
   receipts
+  requests
   runbooks
   seat
   status
@@ -145,6 +151,7 @@ goals) orchy_goals "$@";;
 grants) orchy_grants "$@";;
 waiting) orchy_waiting "$@";;
 hold) orchy_hold "$@";;
+request) orchy_request "$@";;
 runbook) orchy_runbook "$@";;
 wt-new) orchy_wt_new "$@";;
 launch|resume) orchy_launch "$cmd" "$@";;
