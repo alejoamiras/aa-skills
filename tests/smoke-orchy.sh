@@ -410,6 +410,11 @@ V add pr:12 "Fix the branch rules, then re-arm" >/dev/null || fail "waiting add 
 V list --json | jq -e '.waiting | length == 2 and .[0] == {ref: "pr:12", text: "Fix the branch rules, then re-arm", since: "2026-01-01T00:00:00Z"}' >/dev/null || fail "a second add did not replace the text in place and keep since: $(V list --json)"
 V "done" pr:12 >/dev/null && V list --json | jq -e '[.waiting[].ref] == ["page:0"]' >/dev/null || fail "waiting done: $(V list --json)"
 ORCHY_HOME="$HV" "$ORCHY" snapshot 2>&1 | sed -n '/^-- waiting/,/^--/p' | grep -qx 'page:0  [0-9]*m  Sign page 0' || fail "snapshot does not list the waiting record"
+# the snapshot's shell reader and the state's python reader take one marker set: the report's own key line, and no other tokens
+HK="$T/cap/hk"; mkdir -p "$HK/reports"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HK/"
+for a in a1 a2; do printf 'ARC_FAILED: %s red\nLEAD_DONE web-2 a1\n' "$a" > "$HK/reports/web-2-$a.md"; done; o=$(ORCHY_HOME="$HK" "$ORCHY" snapshot 2>&1)
+grep -q ' web-2-a1\.md LEAD_DONE web-2 a1$' <<<"$o" && grep -q ' web-2-a2\.md ARC_FAILED: a2 red$' <<<"$o" && ORCHY_HOME="$HK" "$ORCHY" state \
+  | jq -e '[.reports[] | {key, marker, detail}] == [{key: "web-2-a1", marker: "LEAD_DONE", detail: null}, {key: "web-2-a2", marker: "ARC_FAILED", detail: "a2 red"}]' >/dev/null || fail "the readers disagree: $o"
 e160=$(printf 'é%.0s' $(seq 160)); V add pr:13 "$e160" >/dev/null && V "done" pr:13 >/dev/null || fail "160 code points were refused"
 wb=$(md5sum "$HV/waiting.json" "$HV/events.jsonl")
 bad=("pr:012" x "pr:1x" x "page:" x "lane:-x" x "other:$(printf 'a%.0s' $(seq 33))" x $'pr:1\npr:2' x "ask:7" x "pr:1234567890" x "other:acct-a" x
