@@ -54,14 +54,17 @@ printf 'run it on acct-a\n' > "$T/bad.md"; if "$ORCHY" check-text "$T/bad.md" >/
 tmp=$(mktemp); jq '.prompt_ban="("' "$ORCHY_HOME/local.json" > "$tmp"; cp "$ORCHY_HOME/local.json" "$T/local.bak"; mv "$tmp" "$ORCHY_HOME/local.json"
 if "$ORCHY" check-text "$T/brief.md" >/dev/null 2>&1; then fail "check-text accepted an invalid regex"; fi; cp "$T/local.bak" "$ORCHY_HOME/local.json"
 # launch: never-list, roster, duplicate and cap refusals; a launched lead is alive with its start-time identity
-mkdir -p "$ORCHY_HOME/prompts" ".claude/worktrees/x"; printf 'You are a subagent.\n' > "$ORCHY_HOME/prompts/x-plan.md"; cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/x-a1.md"; cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/x-a2.md"
+mkdir -p "$ORCHY_HOME/prompts" ".claude/worktrees/x"; printf 'You are a subagent.\n' > "$ORCHY_HOME/prompts/x-plan.md"; for k in x-m1 x-m2 x-a1 x-ARC2 X-a1; do cp "$ORCHY_HOME/prompts/x-plan.md" "$ORCHY_HOME/prompts/$k.md"; done
 o=$("$ORCHY" launch x-plan x acct-main 2>&1 || true); grep -q 'acct-main: on a never-list' <<<"$o" || fail "launch did not refuse the policy's never-list: $o"
 o=$("$ORCHY" launch x-plan x acct-z 2>&1 || true); grep -q 'not on the claude-usage roster' <<<"$o" || fail "launch did not refuse an account off the roster: $o"
 "$ORCHY" launch x-plan x acct-a >/dev/null || fail "launch"
 o=$("$ORCHY" launch x-plan x acct-a 2>&1 || true); grep -q 'is alive' <<<"$o" || fail "launch did not refuse a duplicate key: $o"
-"$ORCHY" launch x-a1 x acct-a >/dev/null || fail "second heavy launch"
-o=$("$ORCHY" launch x-a2 x acct-a 2>&1 || true); grep -q 'cap 2' <<<"$o" || fail "launch did not enforce heavy_per_account: $o"
-"$ORCHY" launch --light x-a2 x acct-a >/dev/null || fail "light launch under its own cap"
+# an arc never starts beside its lane's live planner, however its key spells the lane or the arc
+for c in "launch x-a1 x acct-b" "launch X-a1 x acct-b" "resume x-ARC2 x acct-b 00000000-0000-4000-8000-000000000001"; do
+  o=$("$ORCHY" $c 2>&1 || true); grep -q 'refused: planner x-plan is alive' <<<"$o" || fail "$c beside a live planner: $o"; done
+"$ORCHY" launch x-m1 x acct-a >/dev/null || fail "second heavy launch"
+o=$("$ORCHY" launch x-m2 x acct-a 2>&1 || true); grep -q 'cap 2' <<<"$o" || fail "launch did not enforce heavy_per_account: $o"
+"$ORCHY" launch --light x-m2 x acct-a >/dev/null || fail "light launch under its own cap"
 [ "$("$ORCHY" snapshot 2>/dev/null | grep -c '^alive x-')" = 3 ] || fail "snapshot does not list the three live leads"
 [ "$("$ORCHY" session-id x-plan)" = 00000000-0000-4000-8000-000000000001 ] || fail "session-id"
 # launch: its own process group, auto mode by default, the hook settings and the two writable dirs, banner kept out of the JSON log
