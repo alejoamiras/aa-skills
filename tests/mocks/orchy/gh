@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gh mock for the orchy smokes: each call answers from the $MOCK_DIR fixture its case names and is logged to gh.log, each POST with its body to posts.log; MOCK_GH_*_SLEEP delays and MOCK_GH_FAIL fails chosen calls
+# gh mock for the orchy smokes: each call answers from the $MOCK_DIR fixture its case names and is logged to gh.log, each POST or PUT with its body to posts.log; MOCK_GH_*_SLEEP delays and MOCK_GH_FAIL fails chosen calls
 set -u; echo "$*" >> "$MOCK_DIR/gh.log"
 for f in /proc/$$/fd/*; do case $(readlink "$f") in *holds.lock) echo "$*" >> "$MOCK_DIR/locked.log";; esac; done   # no call may hold the holds lock
 jqexpr=""; args=("$@"); for ((i=0;i<${#args[@]};i++)); do [ "${args[i]}" = --jq ] && jqexpr=${args[i+1]}; done
@@ -28,6 +28,9 @@ case "$1 $2" in
     case ${MOCK_GH_FAIL:-} in post) echo "gh: Validation Failed (HTTP 422)" >&2; exit 1;; post-net) echo "Post \"https://api.github.com/$2\": read: connection reset by peer" >&2; exit 1;;
       post-timeout) exit 124;; esac
     case "$2" in */dispatches) [ -f "$MOCK_DIR/dispatch.json" ] && cat "$MOCK_DIR/dispatch.json";; esac; exit 0; fi
+  if [ "$m" = PUT ]; then printf 'PUT %s %s\n' "$2" "${*:3}" >> "$MOCK_DIR/posts.log"; f="$MOCK_DIR/pr-$(cut -d/ -f5 <<<"$2").json"   # update-branch, as GitHub: refused off the expected head
+    printf '%s\n' "$@" | grep -qxF "expected_head_sha=$(jq -r .headRefOid "$f")" || { echo "gh: expected head sha didn't match current head ref (HTTP 422)" >&2; exit 1; }
+    u="${f%.json}.update.jq"; if [ -f "$u" ]; then tmp=$(mktemp); jq -f "$u" "$f" > "$tmp" && mv "$tmp" "$f"; fi; exit 0; fi
   case "$2" in
   */actions/runs/*/pending_deployments) r=${2%/pending_deployments}; f="$MOCK_DIR/pending-${r##*/}.json"; [ -f "$f" ] || exit 1; cat "$f";;
   */actions/runs/*) f="$MOCK_DIR/run-${2##*/}.json"; [ -f "$f" ] || exit 1; if [ -n "$jqexpr" ]; then jq -r "${jqexpr:-.}" "$f"; else cat "$f"; fi;;
@@ -45,6 +48,7 @@ case "$1 $2" in
     else f="$MOCK_DIR/compare.json"; [[ "$r" =~ ^[0-9a-f]{40}$ ]] || { f="$MOCK_DIR/compare-$r.json"; sleep "${MOCK_GH_COMPARE_SLEEP:-0}"; }; fi
     [ -f "$f" ] || exit 1; if [ -n "$jqexpr" ]; then jq -r "${jqexpr:-.}" "$f"; else cat "$f"; fi;;
   */commits/*) f="$MOCK_DIR/commit-${2##*/commits/}.json"; [ -f "$f" ] || f="$MOCK_DIR/trunk.json"; [ -f "$f" ] || exit 1; jq -r "${jqexpr:-.}" "$f";;
+  */branches/*) { cat "$MOCK_DIR/branch-${2##*/branches/}.json" 2>/dev/null || echo '{"protected":false}'; } | jq -r "${jqexpr:-.}";;
   *) exit 1;; esac;;
 *) echo "MOCK gh: unhandled $*" >&2; exit 1;;
 esac

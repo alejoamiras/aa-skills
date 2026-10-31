@@ -194,10 +194,11 @@ grep -qx 'REFUSED: merge.method must be squash, merge or rebase' <<<"$o" || fail
 # a retry reads the PR again: one retargeted while "Base branch was modified" is refused, not merged into
 n=$(pm); pr9 .; echo '.baseRefName="main"' > "$MOCK_DIR/merge-race-9.jq"; o=$(wm)
 grep -q '^REFUSED at merge time: .* base=main ' <<<"$o" && [ "$(pm)" = $((n+1)) ] || fail "a retry merged into a retargeted base: $o"
-# BEHIND never clears with the head pinned: DIRTY at once, not a timeout
+# a BEHIND that the arm's one update leaves standing is DIRTY, not a timeout
 pr9 '.mergeStateStatus="BEHIND"'; rc=0; o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md 2>&1) || rc=$?
 [ "$rc" = 5 ] && grep -q 'DIRTY: MERGEABLE BEHIND; bring the base in first$' <<<"$o" || fail "BEHIND (exit $rc): $o"
 printf '%s\n' "$o" > "$HF/watch/merge-9.out"; ORCHY_HOME="$HF" "$ORCHY" state | jq -e '[.watchers[] | {pr, marker}] == [{pr: 9, marker: "DIRTY"}]' >/dev/null || fail "BEHIND does not read DIRTY"
+puts() { grep -c "^PUT repos/example/app/pulls/9/update-branch .*expected_head_sha=" "$MOCK_DIR/posts.log" || true; }; [ "$(puts)" = 1 ] || fail "one arm updated #9 $(puts) times"
 # the last marker may be LEAD_DONE <lane> <arc>, the report's own key; any other tokens are no marker, so ARC_FAILED stands
 for l in "LEAD_DONE lane-8 a2" "LEAD_DONE lane-9 a3" "LEAD_DONE lane-9 a2 x" "LEAD_DONE lane-9 a2"; do mkpr "$SHA"
   printf 'ARC_FAILED: a2 red\n%s\nPR #9 t ready checks: green\nHEAD %s\n' "$l" "$SHA" > "$ORCHY_HOME/reports/lane-9-a2.md"; o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 lane-9-a2.md - 2>&1 || true)
@@ -215,6 +216,17 @@ grep -q 'cancelled, for a newer run: e2e-status; until ' <<<"$o" && grep -q '^#9
 jq '.check_runs += [{id:7,name:"e2e-status",status:"completed",conclusion:"cancelled"}]' "$T/checks.bak" > "$MOCK_DIR/checks.json"; jq '.merge.check_grace_sec=0' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"
 mkpr "$SHA"; rc=0; o=$("$ORCHY" watch-merge 9 "$SHA" lane-9 r9.md - 2>&1) || rc=$?; cp "$T/orchy.bak" "$ORCHY_HOME/orchy.json"; mv "$T/checks.bak" "$MOCK_DIR/checks.json"
 [ "$rc" = 1 ] && grep -q 'REQUIRED FAILED: e2e-status$' <<<"$o" || fail "a cancellation nothing superseded (exit $rc): $o"
+# BEHIND: the one update is pinned to the scanned head, and only GitHub's clean merge of it with a base commit is re-pinned
+mt() { for f in "$@"; do printf '100644 blob %s\t%s\n' "$(echo "$f" | git hash-object -w --stdin)" "$f"; done | git mktree; }
+mc() { git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit-tree "$@" -m x; }
+B0=$(git rev-parse dev); P=$(mc "$(mt a)" -p "$B0"); X=$(mc "$(mt b)" -p "$B0"); M=$(mc "$(mt a b)" -p "$P" -p "$X"); E=$(mc "$(mt a b c)" -p "$P" -p "$X")
+git push -q origin "$M:refs/smoke/m" "$E:refs/smoke/e"; printf 'LEAD_DONE\nPR #9 t ready checks: green\nHEAD %s\n' "$P" > "$ORCHY_HOME/reports/lane-9-a2.md"
+upd() { pr9 ".headRefOid=\"$P\" | .mergeStateStatus=\"BEHIND\""; printf '.headRefOid="%s" | .mergeStateStatus="CLEAN"\n' "$1" > "$MOCK_DIR/pr-9.update.jq"
+  rc=0; o=$("$ORCHY" watch-merge 9 "$P" lane-9 lane-9-a2.md - 2>&1) || rc=$?; }
+upd "$M"; grep -q "re-pinned to $M" <<<"$o" && grep -q '^#9 MERGED' <<<"$o" && grep -q -- "--match-head-commit $M" "$MOCK_DIR/gh.log" || fail "GitHub's update was not re-pinned: $o"
+upd "$E"; [ "$rc" = 2 ] && grep -q "^HEAD MOVED to $E " <<<"$o" || fail "a merge carrying more than the base was re-pinned (exit $rc): $o"
+n=$(puts); echo '{"protected":true}' > "$MOCK_DIR/branch-worktree-lane-9.json"; upd "$M"; rm "$MOCK_DIR/branch-worktree-lane-9.json" "$MOCK_DIR/pr-9.update.jq"
+[ "$rc" = 5 ] && grep -q 'not updating worktree-lane-9: protected' <<<"$o" && [ "$(puts)" = "$n" ] || fail "a protected branch was updated (exit $rc): $o"
 # a lane's <lane>-* heads merge; archive - neither waits for a plan nor tears the lane down
 touch "$MOCK_DIR/aw.log"; a=$(grep -c '^done' "$MOCK_DIR/aw.log" || true)
 for h in lane-9-a2 lane-9-stats-view; do pr9 ".headRefName=\"$h\""; o=$(wm -); grep -q '^#9 MERGED' <<<"$o" || fail "head $h did not merge: $o"; done
