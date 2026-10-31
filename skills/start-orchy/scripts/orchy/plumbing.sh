@@ -35,5 +35,6 @@ session_pid() { # the orchestrator session: $CLAUDE_PID while it is a live claud
 # repo reaches it; the arguments go NUL-separated on stdin (args.ts). Never on the path of state, ask list or receipt:
 # those viewers run where bun is not installed.
 ts_run() { printf '%s\0' "${@:2}" | (cd "$SCRIPTS/orchy" && exec bun "./$1.ts"); }
-# abs_path <var>: a relative path in var made absolute for ts_run's directory; no $(...), which drops a trailing newline
-abs_path() { local -n _p=$1; [[ -z $_p || $_p == /* ]] || _p="$PWD/$_p"; }
+# abs_path <var>: a relative path in var anchored at the physical working directory, which ts_run leaves. Not $PWD, which
+# may be a link such as /proc/self/cwd; the . keeps $(...) from dropping a trailing newline of the directory's name.
+abs_path() { local -n _p=$1; local d; [[ -z $_p || $_p == /* ]] || { d=$(pwd -P && echo .) && _p="${d%$'\n.'}/$_p"; }; }

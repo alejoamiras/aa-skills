@@ -88,8 +88,9 @@ describe("runbook", () => {
       expect(cli("runbook", p)).toEqual({ code: 1, out: "", err: `refused: cannot read the runbook (${why})\n`, bytes: [] });
     expect(cli("runbook", file("latin1.md", new Uint8Array([0x2d, 0x20, 0x5b, 0x20, 0x5d, 0x20, 0xe9]))).err).toBe("refused: the runbook is not UTF-8\n");
   });
-  test("abs_path anchors a relative path at the working directory and keeps an absolute or empty one", () => {
-    const r = Bun.spawnSync(["bash", "-c", `. "$1/orchy/plumbing.sh"; a=x; b=/y; c=; abs_path a; abs_path b; abs_path c; printf '%s|' "$a" "$b" "$c"`, "_", SCRIPTS], { cwd: T });
+  test("abs_path anchors a relative path at the physical working directory, whatever PWD names, and keeps an absolute or empty one", () => {
+    const sh = `. "$1/orchy/plumbing.sh"; a=x; b=/y; c=; abs_path a; abs_path b; abs_path c; printf '%s|' "$a" "$b" "$c"`;
+    const r = Bun.spawnSync(["bash", "-c", sh, "_", SCRIPTS], { cwd: T, env: { ...process.env, PWD: "/proc/self/cwd" } });
     expect(r.stdout.toString()).toBe(`${realpathSync(T)}/x|/y||`);
   });
 });
@@ -103,10 +104,9 @@ describe("calendar", () => {
 });
 
 describe("render", () => {
-  const kv = (...a: string[]) => a.map((s) => Buffer.from(s));
   test("replaces every token in argument order as plain text, and a key with no = by nothing", () => {
-    expect(render("<A> <A> <B> <C>", "", kv("A=$&|/\\1", "B=<C>", "C=x", "D")).out.toString()).toBe("$&|/\\1 $&|/\\1 x x");
-    expect(render("a<D>b", "", kv("D")).out.toString()).toBe("ab");
+    expect(render("<A> <A> <B> <C>", "", ["A=$&|/\\1", "B=<C>", "C=x", "D"]).text).toBe("$&|/\\1 $&|/\\1 x x");
+    expect(render("a<D>b", "", ["D"]).text).toBe("ab");
   });
   test("lists the tokens left, once each and sorted, except the kept ones", () => {
     expect(render("<ZED> <LANE> <AB> <ZED> <abc> <KEY>", "LANE,,KEY", []).left).toEqual(["<ZED>"]);
@@ -115,8 +115,9 @@ describe("render", () => {
     expect(cli("render", file("t.md", "\ufeffa\r\nb\rc <XX> <YYY>"), "", "XX=v"))
       .toMatchObject({ code: 1, out: "\ufeffa\nb\nc v <YYY>", err: "orchy: unrendered tokens: <YYY>\n" });
   });
-  test("passes a value's bytes outside UTF-8 through unchanged", () => {
+  test("passes bytes outside UTF-8 through as Python's argv did, never joining two into a character", () => {
     expect(cli("render", file("f.md", "<FOO>!"), "", "FOO=\\xff")).toMatchObject({ code: 0, bytes: [0xff, 0x21] });
+    expect(cli("render", file("g.md", "<A><B>"), "", "A=<\\xc3", "B=\\xa9>", "é=no")).toMatchObject({ code: 0, bytes: [0x3c, 0xc3, 0xa9, 0x3e] });
   });
 });
 
