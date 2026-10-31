@@ -365,6 +365,8 @@ ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" state | jq -e '.schema =
 ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" receipt --offline >/dev/null || fail "receipt on a fresh home"
 ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" ask list --json | jq -e '. == {schema: "orchy.asks/1", asks: []}' >/dev/null || fail "ask list on a missing ledger"
 ORCHY_HOME="$HF" "$ORCHY" waiting list --json | jq -e '. == {schema: "orchy.waiting/1", waiting: []}' >/dev/null && [ -z "$(ORCHY_HOME="$HF" "$ORCHY" waiting list)" ] || fail "waiting list on a fresh home"
+ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" request list --json | jq -e '. == {schema: "orchy.requests/1", requests: [], errors: []}' >/dev/null \
+  && [ -z "$(ORCHY_HOME="$HF" ORCHY_ASKS_DIR="$T/asks-none" "$ORCHY" request list 2>&1)" ] || fail "request list on a fresh home"
 [ -z "$(find "$HF" -mindepth 1 ! -name orchy.json ! -name local.json)" ] && [ ! -e "$T/asks-none" ] || fail "a reader created $(find "$HF" -mindepth 1 ! -name orchy.json ! -name local.json) $(ls -d "$T/asks-none" 2>/dev/null)"
 # one bad source never blanks the state: a huge triage list travels as a file, a junk stall setting takes the default
 seq 0 29999 > "$HF/triaged.txt"; jq '.leads.stall_after_min = "oops"' "$HF/orchy.json" > "$T/o.json" && mv "$T/o.json" "$HF/orchy.json"

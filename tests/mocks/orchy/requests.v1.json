@@ -1,0 +1,137 @@
+{
+  "errors": [],
+  "requests": [
+    {
+      "answered": false,
+      "answers": [],
+      "blocks": [
+        "pr:12"
+      ],
+      "context": "Both paths **pass** today.\nOne is `bun test`.",
+      "id": "rq1",
+      "options": [
+        {
+          "consequence": "Fast, no browser",
+          "id": "unit",
+          "label": "Unit tests",
+          "pictures": [
+            {
+              "alt": "The unit run",
+              "file": "unit.png",
+              "sha256": "cbedefba84438920258b80225508e767e9029e201fae0bef524e5b1b3faa8208"
+            }
+          ]
+        },
+        {
+          "consequence": "Slower, closer to what people see",
+          "id": "e2e",
+          "label": "Browser tests",
+          "pictures": []
+        }
+      ],
+      "pending": [],
+      "recommend": {
+        "id": "unit",
+        "why": "The change has no screen"
+      },
+      "ref": "other:test-path",
+      "rev": 1,
+      "schema": "orchy.request/1",
+      "shape": "pick",
+      "status": "open",
+      "steps": [],
+      "thread": [],
+      "title": "Choose the test path for the docs lane",
+      "unanswered": []
+    },
+    {
+      "answered": false,
+      "answers": [],
+      "binding": {
+        "kind": "text",
+        "sha256": "1d1d76d76957d6e0fe6f7f4d7c56ff64527ebe1606b5dda015785a73fb1b6356"
+      },
+      "blocks": [],
+      "context": "",
+      "id": "rq2",
+      "pending": [],
+      "ref": "other:filing-list",
+      "rev": 1,
+      "schema": "orchy.request/1",
+      "shape": "approve",
+      "status": "open",
+      "steps": [],
+      "thread": [],
+      "title": "File the three cleanup issues",
+      "unanswered": [],
+      "wording": "File three issues: the README typo, the stale badge and the broken link."
+    },
+    {
+      "answered": false,
+      "answers": [],
+      "blocks": [],
+      "context": "",
+      "id": "rq3",
+      "pending": [],
+      "ref": "pr:12",
+      "rev": 1,
+      "schema": "orchy.request/1",
+      "shape": "done",
+      "status": "open",
+      "steps": [
+        {
+          "text": "Rename e2e to e2e-status in the branch rules"
+        },
+        {
+          "command": "gh pr checks 12 --repo example/app",
+          "text": "Check that the PR sees it"
+        }
+      ],
+      "thread": [],
+      "title": "Rename the required check, then say done",
+      "unanswered": []
+    },
+    {
+      "answered": false,
+      "answers": [],
+      "blocks": [],
+      "context": "Spanish and French are both translated.",
+      "id": "rq4",
+      "pending": [],
+      "ref": "issue:7",
+      "rev": 1,
+      "schema": "orchy.request/1",
+      "shape": "reply",
+      "status": "open",
+      "steps": [],
+      "thread": [
+        {
+          "text": "Both pass review; the question is only the order"
+        }
+      ],
+      "title": "Which locale ships first?",
+      "unanswered": []
+    },
+    {
+      "answered": false,
+      "answers": [],
+      "blocks": [
+        "lane:docs"
+      ],
+      "context": "",
+      "id": "rq5",
+      "page": 3,
+      "pending": [],
+      "ref": "page:3",
+      "rev": 1,
+      "schema": "orchy.request/1",
+      "shape": "sign",
+      "status": "open",
+      "steps": [],
+      "thread": [],
+      "title": "Sign page 3, the onboarding copy",
+      "unanswered": []
+    }
+  ],
+  "schema": "orchy.requests/1"
+}
