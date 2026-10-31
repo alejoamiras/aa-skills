@@ -41,12 +41,12 @@ function lineCount(text: string): number {
 
 type Frame = { k: "sub" | "bt" | "dq" | "param" | "sq" | "ansi" | "arith" | "index"; depth: number; word: boolean; inDq: boolean; line: number };
 const HEREDOC = /^<<(-?)[ \t]*((?:'[^']*'|"[^"]*"|\\.|[^\s;&|<>()'"`\\])+)/;
-// Bash reads name[ as an arithmetic subscript (so "<<" in it is a shift) only in an assignment at command position,
+// Bash reads name[ as an arithmetic subscript (so "<<" in it is a shift) only in an assignment that starts a command,
 // alone or after others, and the line confirms it with ]= or ]+=. Elsewhere, local and declare included, "[" is text.
-const ASSIGNEE = /(?:^|[;&|(){}!]|\b(?:then|do|else|elif|if|while|until|time))\s*(?:\S+=\S*\s+)*[A-Za-z_]\w*$/;
+const ASSIGNEE = /(?:^|[;&|(){}])\s*(?:(?:then|do|else|elif|if|while|until|time|!)\s+)*(?:\S+=\S*\s+)*[A-Za-z_]\w*$/;
 
 // The text with only shell syntax left, line for line: comments cut, quoted text, parameter expansions and
-// arithmetic blanked, heredoc bodies emptied. A command substitution opens as ";" and closes as "x", so the braces
+// arithmetic blanked to "_" (so a word stays one word), heredoc bodies emptied. A command substitution opens as ";" and closes as "x", so the braces
 // inside it still pair up while its closing paren reads as part of a word, never as a boundary a "}" may follow.
 // Throws when a quote, expansion or heredoc is still open at the end: everything after it would go unmeasured.
 export function codeLines(text: string): string[] {
@@ -70,35 +70,35 @@ export function codeLines(text: string): string[] {
       const k = top?.k ?? "code";
       const c = s[i];
       if (k === "sq" || k === "ansi") {
-        if (k === "ansi" && c === "\\") emit("  ");
+        if (k === "ansi" && c === "\\") emit("__");
         else if (c === "'") { stack.pop(); emit("'"); }
-        else emit(" ");
+        else emit("_");
         continue;
       }
-      if (c === "\\") { emit("  "); continue; }
-      if (s.startsWith("$((", i)) { push("arith", "   "); continue; }
+      if (c === "\\") { emit("__"); continue; }
+      if (s.startsWith("$((", i)) { push("arith", "$__"); continue; }
       if (s.startsWith("$(", i)) { push("sub", " ;"); continue; }
-      if (s.startsWith("${", i)) { push("param", "$ "); continue; }
+      if (s.startsWith("${", i)) { push("param", "$_"); continue; }
       if (c === "`") { if (k === "bt") { stack.pop(); emit("x"); } else push("bt", ";"); continue; }
       if (k === "index") {
         if (c === "]") { stack.pop(); emit("]"); }
         else if (c === '"' || c === "'") push(c === '"' ? "dq" : "sq", c);
-        else emit(" ");
+        else emit("_");
         continue;
       }
       if (k === "arith" && top) {
         if (c === "(") top.depth++;
         else if (c === ")" && top.depth > 0) top.depth--;
         else if (c === ")" && s[i + 1] === ")") { stack.pop(); emit(top.word ? "xx" : "))"); continue; }
-        emit(" ");
+        emit("_");
         continue;
       }
-      if (k === "dq") { if (c === '"') { stack.pop(); emit('"'); } else emit(" "); continue; }
+      if (k === "dq") { if (c === '"') { stack.pop(); emit('"'); } else emit("_"); continue; }
       if (c === '"') { push("dq", '"'); continue; }
       if (k === "param" && top) {
         if (c === "}") { stack.pop(); emit("x"); }
         else if (c === "'" && !top.inDq) push("sq", "'");
-        else emit(" ");
+        else emit("_");
         continue;
       }
       if (c === "#" && (i === 0 || /[\s;&|()<>]/.test(s[i - 1]))) break;

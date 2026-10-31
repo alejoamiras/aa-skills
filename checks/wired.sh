@@ -12,9 +12,13 @@ for y in .github/workflows/*.yml .github/workflows/*.yaml; do
   while IFS= read -r f; do
     runs+="$f"$'\n'
     covered=0
+    # Only an exact path, "**" or "dir/**" counts: their paths-filter meaning needs no glob engine to match.
     while IFS= read -r p; do
-      # shellcheck disable=SC2053 # a filter is a glob, and "**" spans directories as "*" does in [[ ]]
-      [[ -n $p && $f == ${p//\*\*/*} ]] && covered=1
+      case $p in
+        '**') covered=1 ;;
+        */'**') [[ $f == "${p%'**'}"* ]] && covered=1 ;;
+        *) [[ $f == "$p" ]] && covered=1 ;;
+      esac
     done <<< "$pats"
     [ "$covered" = 1 ] || { echo "$y runs $f, but its path filter skips changes to it" >&2; rc=1; }
   done < <(sed -nE 's/^[[:space:]]*(- )?run: (bash|bun test) ([^[:space:]]+)[[:space:]]*$/\3/p' "$y")
