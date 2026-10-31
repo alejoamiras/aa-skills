@@ -48,7 +48,7 @@ case "$1 $2" in
     else f="$MOCK_DIR/compare.json"; [[ "$r" =~ ^[0-9a-f]{40}$ ]] || { f="$MOCK_DIR/compare-$r.json"; sleep "${MOCK_GH_COMPARE_SLEEP:-0}"; }; fi
     [ -f "$f" ] || exit 1; if [ -n "$jqexpr" ]; then jq -r "${jqexpr:-.}" "$f"; else cat "$f"; fi;;
   */commits/*) f="$MOCK_DIR/commit-${2##*/commits/}.json"; [ -f "$f" ] || f="$MOCK_DIR/trunk.json"; [ -f "$f" ] || exit 1; jq -r "${jqexpr:-.}" "$f";;
-  */branches/*) { cat "$MOCK_DIR/branch-${2##*/branches/}.json" 2>/dev/null || echo '{"protected":false}'; } | jq -r "${jqexpr:-.}";;
+  */branches/*) sleep "${MOCK_GH_BRANCH_SLEEP:-0}"; { cat "$MOCK_DIR/branch-${2##*/branches/}.json" 2>/dev/null || echo '{"protected":false}'; } | jq -r "${jqexpr:-.}";;
   *) exit 1;; esac;;
 *) echo "MOCK gh: unhandled $*" >&2; exit 1;;
 esac

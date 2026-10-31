@@ -229,6 +229,11 @@ upd "$E"; [ "$rc" = 2 ] && grep -q "^HEAD MOVED to $E " <<<"$o" || fail "a merge
 upd "$M" diverged; [ "$rc" = 2 ] && grep -q "^HEAD MOVED to $M " <<<"$o" || fail "a merge with a commit off the base was re-pinned (exit $rc): $o"
 n=$(puts); echo '{"protected":true}' > "$MOCK_DIR/branch-worktree-lane-9.json"; upd "$M"; rm "$MOCK_DIR/branch-worktree-lane-9.json" "$MOCK_DIR/pr-9.update.jq"
 [ "$rc" = 5 ] && grep -q 'not updating worktree-lane-9: protected' <<<"$o" && [ "$(puts)" = "$n" ] || fail "a protected branch was updated (exit $rc): $o"
+# a hold that lands after the poll and before the update's call stops it: the call rechecks holds under holds.lock
+brc() { grep -c 'branches/worktree-lane-9' "$MOCK_DIR/gh.log" || true; }; c=$(brc); pr9 ".headRefOid=\"$P\" | .mergeStateStatus=\"BEHIND\""
+MOCK_GH_BRANCH_SLEEP=3 "$ORCHY" watch-merge 9 "$P" lane-9 lane-9-a2.md - > "$T/u.out" 2>&1 & up=$!
+for _ in $(seq 1 100); do [ "$(brc)" -gt "$c" ] && break; sleep 0.1; done; "$ORCHY" hold add other:peer-u trunk >/dev/null; wait "$up" || true
+"$ORCHY" hold "done" other:peer-u >/dev/null; grep -q 'HELD: other:peer-u' "$T/u.out" && [ "$(puts)" = "$n" ] || fail "a hold before the update's call: $(cat "$T/u.out")"
 # a lane's <lane>-* heads merge; archive - neither waits for a plan nor tears the lane down
 touch "$MOCK_DIR/aw.log"; a=$(grep -c '^done' "$MOCK_DIR/aw.log" || true)
 for h in lane-9-a2 lane-9-stats-view; do pr9 ".headRefName=\"$h\""; o=$(wm -); grep -q '^#9 MERGED' <<<"$o" || fail "head $h did not merge: $o"; done
