@@ -115,6 +115,14 @@ describe("render", () => {
     expect(cli("render", file("t.md", "\ufeffa\r\nb\rc <XX> <YYY>"), "", "XX=v"))
       .toMatchObject({ code: 1, out: "\ufeffa\nb\nc v <YYY>", err: "orchy: unrendered tokens: <YYY>\n" });
   });
+  test("puts the leftover line where Python's 8 KiB stdout buffer put it in a merged stream", () => {
+    const merged = (body: string) => {
+      const sh = SH.replace('ts_run "$m"', 'ts_run "$m" 2>&1');
+      return Bun.spawnSync(["bash", "-c", sh, "_", SCRIPTS, "render", file("m.md", body), ""]).stdout.toString();
+    };
+    expect(merged(`${"é".repeat(4092)}<YYY>`)).toStartWith("orchy: unrendered tokens: <YYY>\n");   // 8189 bytes
+    expect(merged(`${"é".repeat(4094)}<YYY>`)).toEndWith("<YYY>orchy: unrendered tokens: <YYY>\n");   // 8193 bytes
+  });
   test("passes bytes outside UTF-8 through as Python's argv did, never joining two into a character", () => {
     expect(cli("render", file("f.md", "<FOO>!"), "", "FOO=\\xff")).toMatchObject({ code: 0, bytes: [0xff, 0x21] });
     expect(cli("render", file("g.md", "<A><B>"), "", "A=<\\xc3", "B=\\xa9>", "é=no")).toMatchObject({ code: 0, bytes: [0x3c, 0xc3, 0xa9, 0x3e] });

@@ -47,10 +47,12 @@ export function render(template: string, keep: string, kvs: string[]): { text: s
 if (import.meta.main) {
   const [path, keep, ...kvs] = await args();
   const { text, left } = render(STRICT.decode(readFileSync(path)), escapedDecode(keep), kvs.map(escapedDecode));
-  const err = left.length ? `orchy: unrendered tokens: ${left.join(" ")}\n` : "";
-  // Python's buffered stdout reached a pipe or file at exit, after this line; a terminal's was flushed first
-  if (!process.stdout.isTTY) process.stderr.write(err);
-  await Bun.write(Bun.stdout, escapedEncode(text));
-  if (process.stdout.isTTY) process.stderr.write(err);
+  const out = escapedEncode(text), err = left.length ? `orchy: unrendered tokens: ${left.join(" ")}\n` : "";
+  // where both streams meet, the order Python's stdout buffer gave: it reached the descriptor before the stderr line
+  // only from 8 KiB, or on a terminal when the text held a line end
+  const outFirst = out.length >= 8192 || (process.stdout.isTTY && /[\n\r]/.test(text));
+  if (!outFirst) process.stderr.write(err);
+  await Bun.write(Bun.stdout, out);
+  if (outFirst) process.stderr.write(err);
   if (err) process.exitCode = 1;
 }
