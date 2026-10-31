@@ -16,6 +16,11 @@ orchy_snapshot() {
     flag=""; [ "$q" -gt "$stall" ] && flag="STALLED? "
     echo "alive $k $a $w pid $p ${flag}quiet $((q / 60))m progress $pa ${newest:+$newest}"
   done
+  # a dead lead stopped by a usage limit, while its lane's worktree stands
+  logs=(); for f in "$H"/leads/*.started; do [ -f "$f" ] || continue; read -r pid st _ _ _ _ _ lane _ < "$f"
+    alive "$pid" "$st" || { [ -n "${lane:-}" ] && [ ! -d "$WT_ROOT/$lane" ]; } || logs+=("${f%.started}.log"); done
+  [ ${#logs[@]} = 0 ] || python3 -I "$SCRIPTS/orchy/limit.py" "${logs[@]}" | while read -r k e t; do
+    echo "LIMITED $k resets $t$([[ "$e" =~ ^[0-9]+$ ]] && [ "$e" -le "$tnow" ] && echo ' (passed)')"; done
   echo "-- inbox"; for f in "$H"/inbox/*.jsonl; do [ -f "$f" ] || continue
     c=$(cat "${f%.jsonl}.cursor" 2>/dev/null); [[ "$c" =~ ^[0-9]{1,15}$ ]] && c=$((10#$c)) || c=0
     n=$(tail -c +"$((c + 1))" "$f" | grep -c ''); [ "$n" -gt 0 ] && echo "$(basename "$f" .jsonl): $n undelivered"; done

@@ -95,11 +95,16 @@ launch_spawn() {
   # Nothing in here touches the network; the lead starts with fd 9 closed, so no descendant ever holds the lock.
   exec 9>"$CAP/.spawn.lock"; flock -w 30 9 || { echo "refused: spawn lock busy for 30 s" >&2; exit 1; }
   seat_held || exit 1
-  if [ -f "$H/leads/$k.started" ]; then read -r pid st _ < "$H/leads/$k.started"; alive "$pid" "$st" && { echo "refused: lead $k is alive (pid $pid)" >&2; exit 1; }; fi
+  la=; if [ -f "$H/leads/$k.started" ]; then read -r pid st la _ < "$H/leads/$k.started"; alive "$pid" "$st" && { echo "refused: lead $k is alive (pid $pid)" >&2; exit 1; }; fi
   # an arc follows its planner and resumes the planner's session, so never beside a live one: the slug's planner and the key's
   if [[ "${k,,}" =~ -(a|arc)[0-9]+$ ]]; then for pl in "$w-plan" "${k%-*}-plan"; do
     [ -f "$H/leads/$pl.started" ] && read -r pid st _ < "$H/leads/$pl.started" && alive "$pid" "$st" \
       && { echo "refused: planner $pl is alive (pid $pid); the lane's arcs start after it ends" >&2; exit 1; }; done; fi
+  # a usage limit binds the account it hit; on another one the session resumes at once, since claude-usage run carries it over
+  if [ "$cmd" = resume ] && [ -n "$la" ] && jq -e --arg x "$la" '.key == $x or .label == $x' <<<"$acc" >/dev/null; then
+    read -r _ rs rt < <(python3 -I "$SCRIPTS/orchy/limit.py" "$L"); [[ "${rs:-}" =~ ^[0-9]+$ ]] && [ "$rs" -gt "$(date +%s)" ] \
+      && { echo "refused: $k stopped at $a's usage limit, which resets $rt; resume it then, or now on another allowed account" >&2; exit 1; }
+  fi
   if [[ "$k" == *-closeout ]]; then other=$(lead_rows | awk -v k="$k" '$1 ~ /-closeout$/ && $1 != k {print $1; exit}')
     [ -z "$other" ] || { echo "refused: close-out lead $other is alive; close-outs run one at a time" >&2; exit 1; }; fi
   cnt=$(lead_counts "$v"); pick=
