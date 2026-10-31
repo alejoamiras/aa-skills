@@ -76,7 +76,7 @@ orchy_launch() { # orchy_launch launch|resume <arg>...
   ask_lines "$w" "$p" "${lb[@]}" || exit 1
   launch_spawn
 }
-launch_spawn() { # the worktree, the settings, then the seat, liveness and cap checks, the spawn and its record under the spawn lock
+launch_spawn() {
   d="$WT_ROOT/$w"; [ -d "$d" ] || { echo "orchy: no worktree $d" >&2; exit 3; }
   model=$(cfg '.leads.model // "opus"'); l1=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo "?")
   case "$(cfg '.leads.permission_mode // "auto"')" in
