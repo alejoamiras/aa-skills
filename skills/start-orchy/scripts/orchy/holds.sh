@@ -5,7 +5,7 @@ holds_read() { # orchy.holds/1 on stdout, a missing file as empty; a symlinked, 
   if [ -L "$HOLDS" ] || { [ -e "$HOLDS" ] && [ ! -f "$HOLDS" ]; }; then echo "refused: $HOLDS must be a regular file, not a symlink" >&2; return 1; fi
   [ -e "$HOLDS" ] || { echo '{"schema":"orchy.holds/1","holds":[]}'; return 0; }
   # jq parses, so a file reads as it always has (nan, a BOM, its depth limit); holds.ts checks the shape
-  local j; j=$(jq -sc . "$HOLDS" 2>/dev/null) && ts_run holds "$WREF" <<<"$j" 2>/dev/null || { echo "refused: $HOLDS is not orchy.holds/1" >&2; return 1; }
+  local j; j=$(jq -sc . "$HOLDS" 2>/dev/null) && ts_run holds "$WREF" "$j" 2>/dev/null || { echo "refused: $HOLDS is not orchy.holds/1" >&2; return 1; }
 }
 held() { # held all|trunk: the ref of the oldest hold that stops this scope (an all hold stops both), else nothing; exit 1 when unreadable
   local h; h=$(holds_read) || return 1

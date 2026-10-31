@@ -1,6 +1,7 @@
 // orchy.holds/1: exactly one value, each hold a ref in the waiting grammar, a scope of all or trunk, and a since that jq's
 // fromdateiso8601 reads. Its input is `jq -sc .` of the file, so jq's parser still decides what parses.
-// Usage: bun holds.ts <ref-regex> < values   (the record, normalized as jq -c prints it; exit 1 when it is not orchy.holds/1)
+// Usage: ts_run holds <ref-regex> <values>   (the record, normalized as jq -c prints it; exit 1 when it is not orchy.holds/1)
+import { args } from "./args.ts";
 
 const SPACE = new Set([" ", "\t", "\n", "\v", "\f", "\r"]);   // isspace(3) in the C locale
 
@@ -50,7 +51,8 @@ export function holds(values: unknown, wref: string): string | null {
 }
 
 if (import.meta.main) {
-  const out = holds(JSON.parse(await Bun.stdin.text()), process.argv[2]);
+  const [wref, values] = await args();
+  const out = holds(JSON.parse(values.toString()), wref.toString());
   if (out === null) process.exitCode = 1;
   else process.stdout.write(`${out}\n`);
 }

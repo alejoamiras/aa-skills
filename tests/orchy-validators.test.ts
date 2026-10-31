@@ -1,33 +1,40 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { calendarDate, dateIn } from "../skills/start-orchy/scripts/orchy/dates.ts";
+import { calendarDate } from "../skills/start-orchy/scripts/orchy/calendar.ts";
 import { fromDateIso8601, holds } from "../skills/start-orchy/scripts/orchy/holds.ts";
 import { render } from "../skills/start-orchy/scripts/orchy/render.ts";
 import { parseRunbook } from "../skills/start-orchy/scripts/orchy/runbook.ts";
 import { textError } from "../skills/start-orchy/scripts/orchy/text.ts";
 
-const MOD = join(import.meta.dir, "../skills/start-orchy/scripts/orchy");
+const SCRIPTS = join(import.meta.dir, "../skills/start-orchy/scripts");
 const T = mkdtempSync(join(tmpdir(), "orchy-validators-"));
 afterAll(() => rmSync(T, { recursive: true, force: true }));
+// through ts_run, so its NUL framing and directory change are what runs; printf %b lets an argument carry any byte
+const SH = 'SCRIPTS=$1; . "$SCRIPTS/orchy/plumbing.sh"; m=$2; shift 2; a=(); for x in "$@"; do a+=("$(printf %b "$x")"); done; ts_run "$m" "${a[@]}"';
 const cli = (mod: string, ...args: string[]) => {
-  const r = Bun.spawnSync([process.execPath, join(MOD, `${mod}.ts`), ...args]);
-  return { code: r.exitCode, out: r.stdout.toString(), err: r.stderr.toString() };
+  const r = Bun.spawnSync(["bash", "-c", SH, "_", SCRIPTS, mod, ...args], { cwd: T });
+  return { code: r.exitCode, out: r.stdout.toString(), err: r.stderr.toString(), bytes: [...r.stdout] };
 };
-const file = (name: string, body: string | Uint8Array) => { const p = join(T, name); writeFileSync(p, body); return p; };
+const file = (name: string | Buffer, body: string | Uint8Array) => {
+  const p = Buffer.concat([Buffer.from(`${T}/`), Buffer.from(name)]);
+  writeFileSync(p, body);
+  return p.toString();
+};
 const enc = (s: string) => new TextEncoder().encode(s);
 
 describe("text", () => {
   test("accepts 1 to 160 code points, a BOM among them, and the characters just outside the banned ranges", () => {
-    for (const t of ["a", "é".repeat(160), `﻿${"a".repeat(159)}`, "a b⁪c"]) expect(textError(enc(t))).toBeNull();
+    for (const t of ["a", "é".repeat(160), `\ufeff${"a".repeat(159)}`, "a b⁪c"]) expect(textError(enc(t))).toBeNull();
   });
   test("refuses bytes that are not UTF-8, a surrogate's or an overlong encoding among them", () => {
     for (const b of [[0xff], [0xed, 0xa0, 0x80], [0xc0, 0x80]]) expect(textError(new Uint8Array(b))).toBe("refused: the text is not UTF-8");
+    expect(cli("text", "a\\xffb")).toMatchObject({ code: 1, err: "refused: the text is not UTF-8\n" });
   });
   test("refuses a length outside 1 to 160 code points", () => {
     expect(textError(enc(""))).toBe("refused: the text is 0 characters; 1 to 160");
-    expect(textError(enc(`﻿${"a".repeat(160)}`))).toBe("refused: the text is 161 characters; 1 to 160");
+    expect(textError(enc(`\ufeff${"a".repeat(160)}`))).toBe("refused: the text is 161 characters; 1 to 160");
   });
   test("refuses a control, line separator or bidi character", () => {
     for (const t of ["a\tb", "\x7f", "\x85", " ", "؜", "‏", "‮", "⁩"])
@@ -42,7 +49,7 @@ describe("runbook", () => {
       [false, "t".repeat(160), "release", "v1.2.0/rc_1"]]);
   });
   test("refuses a line outside the format, a leading BOM included", () => {
-    for (const l of ["* [ ] a", "- [X] a", "- [ ]a", "- [ ] ", "﻿- [ ] a"])
+    for (const l of ["* [ ] a", "- [X] a", "- [ ]a", "- [ ] ", "\ufeff- [ ] a"])
       expect(parseRunbook(l, false)).toMatch(/^refused: line 1 is not '- \[ \] <step>'/);
   });
   test("refuses a control, separator or bidi character: a \\r or \\u2028 stays inside its line", () => {
@@ -72,33 +79,22 @@ describe("runbook", () => {
     expect(parseRunbook("\n\n", false)).toBe("refused: a runbook holds 1 to 20 steps, not 0");
     expect(parseRunbook("- [ ] a\n".repeat(21), false)).toBe("refused: a runbook holds 1 to 20 steps, not 21");
   });
-  test("names a read failure with strerror's words, and a file that is not UTF-8", () => {
+  test("reads a path outside UTF-8, and names a read failure with strerror's words", () => {
+    file(Buffer.from([0x61, 0xff, 0x2e, 0x6d, 0x64]), "- [x] a\n");
+    expect(cli("runbook", `${T}/a\\xff.md`, "--new")).toMatchObject({ code: 1, err: "refused: line 1 is ticked; a step starts unticked\n" });
+    expect(cli("runbook", `${T}/a\\xff.md`)).toMatchObject({ code: 0, out: '[[true,"a","",""]]\n' });
     mkdirSync(join(T, "dir"));
-    expect(cli("runbook", join(T, "missing.md"))).toEqual({ code: 1, out: "", err: "refused: cannot read the runbook (No such file or directory)\n" });
-    expect(cli("runbook", join(T, "dir")).err).toBe("refused: cannot read the runbook (Is a directory)\n");
+    for (const [p, why] of [[join(T, "missing.md"), "No such file or directory"], ["", "No such file or directory"], [join(T, "dir"), "Is a directory"]])
+      expect(cli("runbook", p)).toEqual({ code: 1, out: "", err: `refused: cannot read the runbook (${why})\n`, bytes: [] });
     expect(cli("runbook", file("latin1.md", new Uint8Array([0x2d, 0x20, 0x5b, 0x20, 0x5d, 0x20, 0xe9]))).err).toBe("refused: the runbook is not UTF-8\n");
+  });
+  test("abs_path anchors a relative path at the working directory and keeps an absolute or empty one", () => {
+    const r = Bun.spawnSync(["bash", "-c", `. "$1/orchy/plumbing.sh"; a=x; b=/y; c=; abs_path a; abs_path b; abs_path c; printf '%s|' "$a" "$b" "$c"`, "_", SCRIPTS], { cwd: T });
+    expect(r.stdout.toString()).toBe(`${realpathSync(T)}/x|/y||`);
   });
 });
 
-describe("dates", () => {
-  test("finds each common form of a date", () => {
-    for (const t of ["20260305", "2026-3-05", "5.3.2026", "03/05/2026", "due 3/5", "5/03", "Mar. 5th", "march, 05", "5th of march", "5 mar"])
-      expect([t, dateIn(t, ["2026-03-05"])]).toEqual([t, true]);
-  });
-  test("ignores a yearless dotted or dashed form, and digits or letters that run on", () => {
-    for (const t of ["v3.5", "3-5", "13/5", "3/55", "2026-03-055", "march 15", "marching 5", "summarch 5"])
-      expect([t, dateIn(t, ["2026-03-05"])]).toEqual([t, false]);
-  });
-  test("reads digits, word characters and blanks as Python's Unicode classes do", () => {
-    expect(dateIn("x٠3/5", ["2026-03-05"])).toBe(false);   // an Arabic-Indic digit runs on
-    expect(dateIn("émarch 5", ["2026-03-05"])).toBe(false);   // é is a word character
-    expect(dateIn("march\x1c5", ["2026-03-05"])).toBe(true);   // isspace(), unlike JavaScript's \s
-    expect(dateIn("march﻿5", ["2026-03-05"])).toBe(false);   // JavaScript's \s, unlike isspace()
-  });
-  test("indexes months as a list does: 00 is december, past 12 throws", () => {
-    expect(dateIn("december 5", ["2026-00-05"])).toBe(true);
-    expect(() => dateIn("x", ["2026-13-05"])).toThrow();
-  });
+describe("calendar", () => {
   test("accepts only calendar dates from year 1", () => {
     for (const d of ["2024-02-29", "2000-02-29", "0001-01-01", "9999-12-31"]) expect([d, calendarDate(d)]).toEqual([d, true]);
     for (const d of ["2023-02-29", "1900-02-29", "0000-01-01", "2026-13-01", "2026-00-10", "2026-04-31", "2026-04-00", "2026-1-01"])
@@ -107,16 +103,20 @@ describe("dates", () => {
 });
 
 describe("render", () => {
+  const kv = (...a: string[]) => a.map((s) => Buffer.from(s));
   test("replaces every token in argument order as plain text, and a key with no = by nothing", () => {
-    expect(render("<A> <A> <B> <C>", "", ["A=$&|/\\1", "B=<C>", "C=x", "D"]).text).toBe("$&|/\\1 $&|/\\1 x x");
-    expect(render("a<D>b", "", ["D"]).text).toBe("ab");
+    expect(render("<A> <A> <B> <C>", "", kv("A=$&|/\\1", "B=<C>", "C=x", "D")).out.toString()).toBe("$&|/\\1 $&|/\\1 x x");
+    expect(render("a<D>b", "", kv("D")).out.toString()).toBe("ab");
   });
   test("lists the tokens left, once each and sorted, except the kept ones", () => {
     expect(render("<ZED> <LANE> <AB> <ZED> <abc> <KEY>", "LANE,,KEY", []).left).toEqual(["<ZED>"]);
   });
   test("reads the template with universal newlines and a BOM kept, still printing when a token is left", () => {
-    expect(cli("render", file("t.md", "﻿a\r\nb\rc <XX> <YYY>"), "", "XX=v"))
-      .toEqual({ code: 1, out: "﻿a\nb\nc v <YYY>", err: "orchy: unrendered tokens: <YYY>\n" });
+    expect(cli("render", file("t.md", "\ufeffa\r\nb\rc <XX> <YYY>"), "", "XX=v"))
+      .toMatchObject({ code: 1, out: "\ufeffa\nb\nc v <YYY>", err: "orchy: unrendered tokens: <YYY>\n" });
+  });
+  test("passes a value's bytes outside UTF-8 through unchanged", () => {
+    expect(cli("render", file("f.md", "<FOO>!"), "", "FOO=\\xff")).toMatchObject({ code: 0, bytes: [0xff, 0x21] });
   });
 });
 
@@ -159,7 +159,8 @@ describe("holds", () => {
       "2026-03-05T10:00:61Z", "2026-03-05T10:00:62Z", "2026-13-01T00:00:00Z", "2026-00-01T00:00:00Z", "2026-03-05T24:00:00Z",
       "2026-03-05T10:00:00Z junk", "2026-03-05T10:00:00Z\tjunk", "2026-03-05T10:00:00Zjunk", "2026-03-05T10:00:00Z\u0000x",
       "2026-03-05T10:00:00", "2026-03-05t10:00:00z", "2026-03-05T10:00:00.5Z", "2026-03-05T10:00:00 Z", "1969-12-31T23:59:59Z",
-      "1969-12-31T23:59:58Z", "1969-12-31T23:59:57Z", "1970-01-01T00:00:00Z", "0000-02-29T00:00:00Z", "9999-12-31T23:59:59Z", "2026-0305T10:00:00Z", ""];
+      "1969-12-31T23:59:58Z", "1969-12-31T23:59:57Z", "1970-01-01T00:00:00Z", "0000-02-29T00:00:00Z", "9999-12-31T23:59:59Z",
+      "2026-0305T10:00:00Z", ""];
     const jq = Bun.spawnSync(["jq", "-c", "map(try fromdateiso8601 catch null)"], { stdin: Buffer.from(JSON.stringify(edges)) });
     expect(edges.map(fromDateIso8601)).toEqual(JSON.parse(jq.stdout.toString()));
   });

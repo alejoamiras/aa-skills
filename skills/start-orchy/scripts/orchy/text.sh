@@ -6,7 +6,7 @@ orchy_render() {
   keep=; [ "${1:-}" = --keep ] && { keep=${2:-}; shift 2; }
   name=${1:-}; t=$name; shift; [ -f "$t" ] || t="$(dirname "$0")/../templates/$t"
   [ -f "$t" ] || { echo "orchy: no template $name" >&2; exit 1; }
-  ts_run render "$(abs_path "$t")" "$keep" "$@"
+  abs_path t; ts_run render "$t" "$keep" "$@"
 }
 orchy_check_text() {
   ban=$(lcl '.prompt_ban // empty'); [ -n "$ban" ] || { echo "orchy: local.json has no prompt_ban" >&2; exit 2; }

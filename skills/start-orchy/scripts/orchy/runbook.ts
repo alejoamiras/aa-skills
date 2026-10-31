@@ -1,7 +1,8 @@
 // A runbook: the owner's steps, one per line, '- [ ] <step>' or '- [x] <step>', ending ' (proof: run <run-id>)' or
 // ' (proof: release <tag>)' or not. Prints the steps as JSON [[done, text, proof kind, proof arg], ...].
-// Usage: bun runbook.ts <file> [--new]   (--new: every step starts unticked; exit 1 with the refusal on stderr)
+// Usage: ts_run runbook <file> [--new]   (--new: every step starts unticked; exit 1 with the refusal on stderr)
 import { readFileSync } from "node:fs";
+import { args } from "./args.ts";
 import { badChar, utf8 } from "./text.ts";
 
 export type Step = [boolean, string, string, string];
@@ -42,11 +43,11 @@ const STRERROR: Record<string, string> = {
 };
 
 if (import.meta.main) {
-  const [path, ...rest] = process.argv.slice(2);
+  const [path, ...rest] = await args();
   let r: Step[] | string;
   try {
-    const raw = utf8(readFileSync(path));
-    r = raw === null ? "refused: the runbook is not UTF-8" : parseRunbook(raw, rest.length === 1 && rest[0] === "--new");
+    const raw = utf8(readFileSync(path.length ? path : ""));   // an empty Buffer is a type error, not ENOENT
+    r = raw === null ? "refused: the runbook is not UTF-8" : parseRunbook(raw, rest.length === 1 && rest[0].toString() === "--new");
   } catch (e) {
     const code = (e as { code?: string }).code ?? "";
     r = `refused: cannot read the runbook (${STRERROR[code] ?? code})`;

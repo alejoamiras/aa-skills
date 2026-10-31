@@ -1,6 +1,6 @@
 # shellcheck shell=bash disable=SC2016  # jq programs are single-quoted on purpose: their $vars are jq's
 # Goals: an ask whose answer is a body of work, its milestone, its runbook and its date, which never leaves the ledger.
-date_in() { ts_run dates in "$@"; }   # date_in <text> <YYYY-MM-DD>...: whether the text writes one of the dates in a common form
+date_in() { python3 -I "$SCRIPTS/orchy/dates.py" "$@"; }
 GOAL_DATES='[.notes[] | select(startswith("goal: ")) | capture(" (by|on) (?<d>[0-9]{4}-[0-9]{2}-[0-9]{2})").d] | unique | join(" ")'
 GOAL_LINE='"goal \(.name) " + (.milestone | if . == null then "milestones unread" elif . == "missing" then "milestone missing"
   else "\(.closed)/\(.open + .closed)" end) + (.runbook | if . == null then "" elif type == "object" then " runbook \(.done)/\(.steps)" else " runbook unreadable" end)'
@@ -12,7 +12,7 @@ ask_cmd_goal() { # ask_cmd_goal <askN> <name> [by|on <YYYY-MM-DD>] [then release
     by|on) [ -z "$dk" ] && [ $# -ge 2 ] || { echo "refused: a goal has at most one date, by or on <YYYY-MM-DD>" >&2; exit 1; }; dk=$1; dt=$2; shift 2;;
     then) [ -z "$th" ] && [ "${2:-}" = release ] || { echo "refused: the only end action is 'then release'" >&2; exit 1; }; th=release; shift 2;;
     *) echo "refused: ask goal takes [by|on <YYYY-MM-DD>] [then release], not '$1'" >&2; exit 1;; esac; done
-  [ -z "$dk" ] || { [[ "$dt" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && ts_run dates valid "$dt" 2>/dev/null; } \
+  [ -z "$dk" ] || { [[ "$dt" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && ts_run calendar "$dt" 2>/dev/null; } \
     || { echo "refused: $dt is not a calendar date (YYYY-MM-DD)" >&2; exit 1; }
   tf=$(mktemp "$H/scratch/goal.XXXXXX"); printf '%s\n' "$nm" > "$tf"; "$0" check-public "$tf" >/dev/null; rc=$?; rm -f "$tf"
   [ "$rc" = 0 ] || { echo "refused: the goal's name fails check-public" >&2; exit 1; }

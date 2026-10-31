@@ -546,7 +546,7 @@ bare() { env -i PATH=/usr/bin:/bin HOME="$T" ORCHY_HOME="$HR" ORCHY_REPO="$ORCHY
   ORCHY_PROFILE_DIR="$ORCHY_PROFILE_DIR" ORCHY_ASKS_DIR="$ORCHY_ASKS_DIR" ORCHY_ACCOUNTS="$ORCHY_ACCOUNTS" "$ORCHY" "$@"; }
 vn='del(.at, .load1, .nproc) | (.asks[]? |= (.age_s = 0))'
 for v in "state --json" "ask list --all --json" "receipt --json --offline"; do read -ra va <<<"$v"
-  w=$(ORCHY_HOME="$HR" "$ORCHY" "${va[@]}" | jq -S "$vn") && o=$(bare "${va[@]}" 2>&1 | jq -S "$vn") && [ "$o" = "$w" ] \
+  w=$(ORCHY_HOME="$HR" "$ORCHY" "${va[@]}" | jq -eS "$vn") && o=$(bare "${va[@]}" 2>&1 | jq -eS "$vn") && [ "$o" = "$w" ] \
     || fail "$v differs with only /usr/bin:/bin on PATH: $(diff <(echo "$w") <(echo "$o") | head -5)"
 done
 "$ORCHY" state > "$T/st.json"; jq -e --arg g "$g" '.asks | any(.id == $g and .lane == "gone-1" and .has_public) and all(has("text") | not)' "$T/st.json" >/dev/null || fail "state asks: $(jq -c .asks "$T/st.json")"
