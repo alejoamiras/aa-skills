@@ -31,7 +31,7 @@ d ( ) { :; }; e()
   [[ $x == {a,b} ]] && { echo; }
 }
 if true; then f() { :; }; fi
-! g ( ) { :; }; while false; do :; done; a[i]=1; a[1<<$#]=2; declare -A m; m["]"]=3
+! g ( ) { :; }; while false; do :; done; a[i]=1; x=1 a[1<<$#]=2; declare -A m; m["]"]=3
 `;
 
 test("isShell: a .sh name or a sh-family shebang, nothing else", () => {
@@ -51,6 +51,8 @@ test("functions: the definitions bash sees, past quotes, expansions, subscripts,
     { name: "g", line: 22, lines: 1 },
   ]);
   expect(functions('echo "$(( $(h() { :; }; h) ))"\n')).toEqual([{ name: "h", line: 1, lines: 1 }]);
+  expect(functions("f() { echo file[; }\necho a[; g() {\n:\necho a[; }\n")).toEqual([{ name: "f", line: 1, lines: 1 }, { name: "g", line: 2, lines: 3 }]);
+  expect(functions("echo a[<<E]=x\n}\nE]=x\nh() { :; }\n")).toEqual([{ name: "h", line: 4, lines: 1 }]);
 });
 
 test("functions: braces it cannot pair, or a body it cannot measure, throw instead of passing", () => {

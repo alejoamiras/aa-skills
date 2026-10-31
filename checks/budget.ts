@@ -41,6 +41,9 @@ function lineCount(text: string): number {
 
 type Frame = { k: "sub" | "bt" | "dq" | "param" | "sq" | "ansi" | "arith" | "index"; depth: number; word: boolean; inDq: boolean; line: number };
 const HEREDOC = /^<<(-?)[ \t]*((?:'[^']*'|"[^"]*"|\\.|[^\s;&|<>()'"`\\])+)/;
+// Bash reads name[ as an arithmetic subscript (so "<<" in it is a shift) only in an assignment at command position,
+// alone or after others, and the line confirms it with ]= or ]+=. Elsewhere, local and declare included, "[" is text.
+const ASSIGNEE = /(?:^|[;&|(){}!]|\b(?:then|do|else|elif|if|while|until|time))\s*(?:\S+=\S*\s+)*[A-Za-z_]\w*$/;
 
 // The text with only shell syntax left, line for line: comments cut, quoted text, parameter expansions and
 // arithmetic blanked, heredoc bodies emptied. A command substitution opens as ";" and closes as "x", so the braces
@@ -103,7 +106,7 @@ export function codeLines(text: string): string[] {
       if (s.startsWith("$'", i)) { push("ansi", "$'"); continue; }
       if (s.startsWith("((", i)) { push("arith", "  ", false); continue; }
       if (s.startsWith("<<<", i)) { emit("   "); continue; }
-      if (c === "[" && /\w/.test(s[i - 1] ?? "")) { push("index", "["); continue; }   // a[1<<$n]=x: arithmetic, not a heredoc
+      if (c === "[" && ASSIGNEE.test(o) && /^\[.*?\]\+?=/.test(s.slice(i))) { push("index", "["); continue; }
       const h = HEREDOC.exec(s.slice(i));
       if (h) {
         heredocs.push({ word: h[2].replace(/'([^']*)'|"([^"]*)"|\\(.)/g, "$1$2$3"), strip: h[1] === "-", line: n + 1 });
@@ -117,7 +120,6 @@ export function codeLines(text: string): string[] {
       }
       emit(c);
     }
-    if (stack.at(-1)?.k === "index") stack.pop();   // a lone "[" after a word is a glob character, not a subscript
     return o;
   });
   if (heredocs.length) throw new Error(`line ${heredocs[0].line}: a heredoc never reaches its "${heredocs[0].word}" line`);
@@ -245,7 +247,6 @@ export function raised(base: Budget, b: Budget): string[] {
   return out;
 }
 
-// budget.json's layout: JSON with each duplicate's file list on one line.
 export function format(b: Budget): string {
   return `${JSON.stringify(b, null, 2).replace(/\[\n\s+([^\]]*?)\n\s+\]/g, (_, list: string) => `[${list.split(/,\n\s+/).join(", ")}]`)}\n`;
 }
@@ -264,7 +265,7 @@ export function shellSources(root: string): Record<string, string> {
   return out;
 }
 
-// Budgets must be whole numbers: a string would coerce to NaN and pass every comparison.
+// Budgets must be whole numbers: a nonnumeric string would coerce to NaN and pass every comparison.
 function parse(json: string): Budget {
   const b: Budget = { files: {}, functions: {}, duplicates: {}, ...JSON.parse(json) };
   const len = (n: unknown) => Number.isSafeInteger(n) && (n as number) >= 0;
