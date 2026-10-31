@@ -96,6 +96,10 @@ launch_spawn() {
   exec 9>"$CAP/.spawn.lock"; flock -w 30 9 || { echo "refused: spawn lock busy for 30 s" >&2; exit 1; }
   seat_held || exit 1
   if [ -f "$H/leads/$k.started" ]; then read -r pid st _ < "$H/leads/$k.started"; alive "$pid" "$st" && { echo "refused: lead $k is alive (pid $pid)" >&2; exit 1; }; fi
+  # an arc follows its planner and resumes the planner's session, so never beside a live one: the slug's planner and the key's
+  if [[ "${k,,}" =~ -(a|arc)[0-9]+$ ]]; then for pl in "$w-plan" "${k%-*}-plan"; do
+    [ -f "$H/leads/$pl.started" ] && read -r pid st _ < "$H/leads/$pl.started" && alive "$pid" "$st" \
+      && { echo "refused: planner $pl is alive (pid $pid); the lane's arcs start after it ends" >&2; exit 1; }; done; fi
   if [[ "$k" == *-closeout ]]; then other=$(lead_rows | awk -v k="$k" '$1 ~ /-closeout$/ && $1 != k {print $1; exit}')
     [ -z "$other" ] || { echo "refused: close-out lead $other is alive; close-outs run one at a time" >&2; exit 1; }; fi
   cnt=$(lead_counts "$v"); pick=
