@@ -56,12 +56,12 @@ claim_lock_dir() {
 # $LOCK_DIR/owner; waiters reclaim only locks whose local owner is gone.
 lock() {
   mkdir -p "$AGENTS_DIR"
-  local n=0 opid ohost
+  local n=0 opid="" ohost=""
   until claim_lock_dir "$LOCK_DIR" 2>/dev/null; do
     if [ -f "$LOCK_DIR/owner" ]; then
-      read -r opid ohost < "$LOCK_DIR/owner" 2>/dev/null || opid=""
+      read -r opid ohost 2>/dev/null < "$LOCK_DIR/owner" || opid=""
       if [ "$ohost" = "$(hostname)" ] && [ -n "$opid" ] && ! kill -0 "$opid" 2>/dev/null; then
-        rm -f "$LOCK_DIR/owner" && rmdir "$LOCK_DIR" 2>/dev/null || true
+        take_dead_lock "$opid $ohost" && break
         continue
       fi
     fi
@@ -78,11 +78,32 @@ lock() {
   trap 'exit 143' TERM
 }
 
+# A dead owner's lock is taken over in place: the mv of its record picks one
+# taker, and a record that is no longer the dead one (the lock changed hands
+# since it was read) goes back. The dir never goes, so no third waiter can
+# claim it while a live holder's record is out.
+take_dead_lock() { # <the dead owner's "pid host">
+  local grave="$LOCK_DIR/owner.dead.$$"
+  mv "$LOCK_DIR/owner" "$grave" 2>/dev/null || return 1
+  if [ "$(cat "$grave" 2>/dev/null)" = "$1" ]; then
+    rm -f "$grave"
+    return 0
+  fi
+  mv "$grave" "$LOCK_DIR/owner" 2>/dev/null
+  return 1
+}
+
 unlock() {
   if [ "$LOCKED" = 1 ]; then
-    rm -f "$LOCK_DIR/owner"
-    rmdir "$LOCK_DIR" 2>/dev/null || true
     LOCKED=0
+    # A waiter may have our record out for a moment; rmdir fails until it is back. Failing beats
+    # returning: a record restored after we gave up would name a live pid (new --start execs claude).
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      rm -f "$LOCK_DIR/owner"
+      { rmdir "$LOCK_DIR" 2>/dev/null || [ ! -d "$LOCK_DIR" ]; } && return 0
+      sleep 0.1
+    done
+    die "could not release $LOCK_DIR; if no agent-worktree is running, remove it"
   fi
   return 0
 }
