@@ -86,9 +86,9 @@
 # the model; CLAUDE_USAGE_TOKEN_PROBE=0 turns the probe off.
 #
 # Accepted limits: the no-coreutils watchdog bounds the probe but not any
-# grandchild it leaves behind; two refreshers can overlap if one is stolen from
-# mid-claim (wasted work only — the snapshot swap is atomic); concurrent
-# `rename` calls are last-writer-wins.
+# grandchild it leaves behind; refreshers can overlap when a late stale-lock
+# reclaim displaces a fresh holder (wasted work only — the snapshot swap is
+# atomic); concurrent `rename` calls are last-writer-wins.
 
 set -uo pipefail
 unset CDPATH   # `cd x && pwd -P` must print one path, not cd's CDPATH echo too
@@ -533,11 +533,11 @@ token_probe() {
   lock_release "${lock}" "${me}"
 }
 
-# Take a stale lock only if it is still the one judged stale: mv is atomic,
-# and the grave's pid says whose it was. Someone else's fresh lock goes back.
-# Accepted race: two reclaimers judging the same stale owner can displace each
-# other's fresh lock, bounded to one duplicate 1-token probe; readings are
-# per-account files swapped atomically, so nothing is corrupted or exposed.
+# Take a stale lock only if it is still the one judged stale: mv is atomic, and the grave's pid
+# says whose it was. Someone else's fresh lock goes back if its path is still free, best effort: a
+# claim racing the restore leaves it nested in, and released with, the new lock. Accepted race: each
+# stale-judging reclaimer can displace a fresh lock, adding one concurrent 1-token probe; readings
+# are per-account files swapped atomically, so nothing is corrupted or exposed.
 lock_reclaim() {
   local lock="$1" holder="$2" me="$3" grave="$1.dead.$3"
   mv "${lock}" "${grave}" 2> /dev/null || return 0

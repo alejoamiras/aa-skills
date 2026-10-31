@@ -139,8 +139,9 @@ take_refresh_lock() {
       [[ ${holder} =~ ^[0-9]+$ ]] && kill -0 "${holder}" 2> /dev/null && return 1
       [[ -n ${aged} ]] || return 1
     fi
-    # Claim the stale lock by renaming it: mv is atomic, so of N racers exactly
-    # one succeeds and the losers back off instead of all recreating it.
+    # Claim the stale lock by renaming it: of the racers renaming this one lock, exactly one succeeds
+    # and the rest back off. A racer that judged it stale before another reclaimed it renames that
+    # fresh lock instead, so refreshers can overlap.
     grave="${LOCK_DIR}.dead.$$"
     mv "${LOCK_DIR}" "${grave}" 2> /dev/null || return 1
     rm -rf "${grave}"
@@ -148,8 +149,8 @@ take_refresh_lock() {
   fi
   printf '%s' "$$" > "${LOCK_DIR}/pid"
   trap 'release_lock' EXIT
-  # Another racer may have stolen and recreated the lock between our checks and
-  # our claim; whoever wrote the pid last owns it.
+  # A racer may have stolen and recreated the lock since our claim: whoever wrote the pid last owns
+  # it, and a steal after this check goes unseen.
   [[ $(cat "${LOCK_DIR}/pid" 2> /dev/null) == "$$" ]] || return 1
   rm -rf "${LOCK_DIR:?}".dead.* 2> /dev/null   # graves from refreshers that died mid-steal
   return 0
