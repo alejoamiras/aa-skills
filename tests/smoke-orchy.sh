@@ -540,6 +540,15 @@ mkdir -p "$HR/runbooks"; printf -- '- [x] Publish the build\n- [ ] Announce it (
 b=$(fp); R() { ORCHY_HOME="$HR" "$ORCHY" "$@" >/dev/null || fail "reader $*"; }
 R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline; R waiting list; R waiting list --json; R accounts; R accounts --json; R grants; R grants --json; R hold list; R hold list --json; R runbook show rb-r; R goals; R goals --json
 [ "$(fp)" = "$b" ] || fail "a reader changed the home, the ledger or gh.log: $(diff <(echo "$b") <(fp))"
+# the viewers reach no bun: with only the system's tools on PATH they print what a normal run prints, and nothing on stderr
+! env -i PATH=/usr/bin:/bin bash -c 'command -v bun' >/dev/null || fail "bun is in /usr/bin or /bin, so the bun-free reader check proves nothing"
+bare() { env -i PATH=/usr/bin:/bin HOME="$T" ORCHY_HOME="$HR" ORCHY_REPO="$ORCHY_REPO" ORCHY_CAPACITY_ROOT="$ORCHY_CAPACITY_ROOT" \
+  ORCHY_PROFILE_DIR="$ORCHY_PROFILE_DIR" ORCHY_ASKS_DIR="$ORCHY_ASKS_DIR" ORCHY_ACCOUNTS="$ORCHY_ACCOUNTS" "$ORCHY" "$@"; }
+vn='del(.at, .load1, .nproc) | (.asks[]? |= (.age_s = 0))'
+for v in "state --json" "ask list --all --json" "receipt --json --offline"; do read -ra va <<<"$v"
+  w=$(ORCHY_HOME="$HR" "$ORCHY" "${va[@]}" | jq -S "$vn") && o=$(bare "${va[@]}" 2>&1 | jq -S "$vn") && [ "$o" = "$w" ] \
+    || fail "$v differs with only /usr/bin:/bin on PATH: $(diff <(echo "$w") <(echo "$o") | head -5)"
+done
 "$ORCHY" state > "$T/st.json"; jq -e --arg g "$g" '.asks | any(.id == $g and .lane == "gone-1" and .has_public) and all(has("text") | not)' "$T/st.json" >/dev/null || fail "state asks: $(jq -c .asks "$T/st.json")"
 grep -q 'Ana' "$T/st.json" && fail "state printed an ask's text"
 "$ORCHY" ask list --json | jq -e --arg g "$g" '.schema == "orchy.asks/1" and (.asks | any(.id == $g and (.text | test("Ana")) and has("held") and has("age_s")))' >/dev/null || fail "ask list --json: $("$ORCHY" ask list --json | head -c 300)"
