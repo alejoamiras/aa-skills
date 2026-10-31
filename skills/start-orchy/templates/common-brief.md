@@ -60,6 +60,7 @@ The program's entropy is in the mass around the code, not the code: review round
 - Never push to <PROTECTED>, never `--admin`, never force-push or rewrite a pushed branch, never create, print or persist a secret, never run a release, a publish or a store upload, never change repository settings unless your lane section says so explicitly.
 <NEVER_OPEN>
 - Never open, list or search `~/.agents/orchy/`: it is the orchestrator's private state. Every reviewer prompt you write carries this same line.
+- Never run `orchy.sh` and never connect to the viewer's socket under `~/.local/state/orchy-viewer/`: both are the orchestrator's, and an answer written from your session would read as the owner's. Every reviewer prompt you write carries this same line.
 - Commit signing stays as the machine sets it. If a commit or push hangs, rerun it as `env -u SSH_AUTH_SOCK git <cmd>`; afterwards `git log --format='%h %G?' -3` must show no `N`.
 - Conventional commits, lower-case subject, PR titles at most 93 characters (the squash appends ` (#NN)`). Commits end with a `Co-Authored-By:` line naming the model that ran the session (`<LEAD_MODEL_NAME> <noreply@anthropic.com>`; never a model that did not run); PR bodies end with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 - Comments state invariants and whys, never a plan, phase, audit, reviewer or issue number. No absolute local paths and no roster account names in anything committed.

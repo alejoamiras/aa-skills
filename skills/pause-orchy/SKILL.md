@@ -7,9 +7,9 @@ description: Hands a running start-orchy program's orchestrator seat over before
 
 Run it in the orchestrator's session, from the repository's root. `ORCHY` is `~/.claude/skills/start-orchy/scripts/orchy.sh`.
 
-1. `ORCHY snapshot`: the live leads, the armed watchers and the waiting record as they stand.
+1. `ORCHY snapshot` and `ORCHY answer list`: the live leads, the armed watchers, the waiting record, the requests left `taken` and the pending answers as they stand. Take no answer: it waits in the inbox for the next seat.
 2. Stop the loop (`CronList`, then `CronDelete` the job whose prompt starts `Program status tick for`) and the event Monitor (`TaskStop` on the `ORCHY wait` task). Stop no lead and disarm no watcher: they finish their work and write their reports, which the next session reads.
-3. Append one dated line to `$ORCHY_HOME/notes.md` (`ORCHY home` prints the path): `<date> paused for an account move: leads <keys>; watchers <names>; waiting <refs>`. Keys, names and refs only, never an account name.
+3. Append one dated line to `$ORCHY_HOME/notes.md` (`ORCHY home` prints the path): `<date> paused for an account move: leads <keys>; watchers <names>; waiting <refs>; answers <aids>; taken <rids>`. Keys, names, refs and ids only, never an account name.
 4. `ORCHY unlock`. From here this session launches nothing: `launch` and `resume` refuse a session that does not hold the seat.
 5. Tell the owner, in two lines, that the program is paused with N leads and M watchers still running, and that the next step is `/start-orchy` from the repository's root in a session on the other account (`claude-usage run <account>`). That session takes the seat, adopts what is running, records its own session URL, and keeps leads off the account it runs on.
 
