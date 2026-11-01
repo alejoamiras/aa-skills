@@ -27,6 +27,7 @@ jobs:
               - 'bin/claude-usage'
               - 'bin/clu'
               - 'bin/codex-usage'
+              - 'lib/usage.sh'
               - 'skills/claude/scripts/**'
               - 'tests/smoke-claude-usage.sh'
               - 'tests/**'
@@ -46,6 +47,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Pull bash 3.2 for the macOS pass
+        env:
+          IMAGE: bash@sha256:0fd7cb8499c63a3c9345e7088a9cd83bb69f6e895e83833859aff838a0312091 # 3.2.57
+        run: docker pull -q "$IMAGE" && docker tag "$IMAGE" bash:3.2
       - run: bash tests/smoke-claude-usage.sh
 
   claude-usage-status:
