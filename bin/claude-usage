@@ -26,7 +26,7 @@
 #   claude-usage                 table for every account
 #   claude-usage --json          machine-readable (statusline, cron); each
 #                                reset also as epoch seconds (*_resets_at, or null);
-#                                session_window: ok, unknown, or none (no 5h window)
+#                                session_window: present, unknown, or none (no 5h window)
 #   claude-usage --json --cached the snapshot's rows only: never probes or
 #                                spawns a refresh (exit 1 with no snapshot)
 #   claude-usage run [name|best] [claude args…]
@@ -78,14 +78,13 @@
 #
 # Token accounts: a setup-token is inference-only (no user:profile scope), so
 # /usage cannot read it. Instead ONE 1-token Fable request to api.anthropic.com
-# returns the unified rate-limit headers (5h, 7d, and 7d_oi, the Fable week;
-# no 5h ones on a plan without that window) plus the organization id. Each
-# attempt, failed ones included, is reused for CLAUDE_USAGE_TTL. It spends a
-# sliver of real quota and, on an idle account, opens its windows, so only
-# explicit commands probe: the table, --json, show, best, and resolve/run when
-# a reading is stale; the status line's background refresh reuses cached
-# readings. CLAUDE_USAGE_PROBE_MODEL overrides the model;
-# CLAUDE_USAGE_TOKEN_PROBE=0 turns the probe off.
+# returns the unified rate-limit headers (5h unless the plan has no 5-hour
+# window, 7d, and 7d_oi, the Fable week) plus the organization id. Each attempt,
+# failed ones included, is reused for CLAUDE_USAGE_TTL. It spends a sliver of
+# real quota and, on an idle account, opens its windows, so only explicit
+# commands probe: the table, --json, show, best, and resolve/run when a reading
+# is stale; the status line's background refresh reuses cached readings.
+# CLAUDE_USAGE_PROBE_MODEL overrides the model; CLAUDE_USAGE_TOKEN_PROBE=0 turns it off.
 #
 # Accepted limits: the no-coreutils watchdog bounds the probe but not any
 # grandchild it leaves behind; refreshers can overlap when a late stale-lock
@@ -158,19 +157,20 @@ CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/claude-usage"
 # snapshot between roots would serve each the other's numbers.
 [[ ${ACCOUNTS_ROOT} != "${HOME}/.claude-accounts" ]] &&
   CACHE_DIR="${CACHE_DIR}/$(printf '%s' "${ACCOUNTS_ROOT}" | cksum | cut -d' ' -f1)"
-# v4 holds login rows only, with org id, observation time and the three reset epochs.
-SNAPSHOT="${CACHE_DIR}/snapshot.v4.tsv"
-# A v3 file from an older version is carried over once, epochs unknown and age kept, so no reader
-# meets an empty cache. It is linked into place, never moved, so it cannot replace a v4 another process
-# published meanwhile; a refresh or a roster change removes any v3 file an old process writes later.
-SNAPSHOT_V3="${CACHE_DIR}/snapshot.v3.tsv"
+# v5 holds login rows only, with org id, observation time and the three reset epochs; v4 readers would
+# print its "none" session as bare JSON, so they keep their own file. An older file is carried over once
+# (v3 with unknown epochs), age kept, so no reader meets an empty cache: linked into place, never moved, so
+# it cannot replace a v5 another process published meanwhile. A refresh or a roster change removes it.
+SNAPSHOT="${CACHE_DIR}/snapshot.v5.tsv"
+SNAPSHOT_V4="${CACHE_DIR}/snapshot.v4.tsv" SNAPSHOT_V3="${CACHE_DIR}/snapshot.v3.tsv"
+[[ -f ${SNAPSHOT_V4} && ! -f ${SNAPSHOT} ]] && ln "${SNAPSHOT_V4}" "${SNAPSHOT}" 2> /dev/null
 if [[ -f ${SNAPSHOT_V3} && ! -f ${SNAPSHOT} ]]; then
   awk -F'\t' -v OFS='\t' 'NF == 14 { $14 = "-" OFS "-" OFS "-" OFS $14; print }' "${SNAPSHOT_V3}" > "${SNAPSHOT}.$$" 2> /dev/null &&
     touch -r "${SNAPSHOT_V3}" "${SNAPSHOT}.$$" && ln "${SNAPSHOT}.$$" "${SNAPSHOT}" 2> /dev/null
   rm -f "${SNAPSHOT}.$$"
   [[ -f ${SNAPSHOT} ]] && rm -f "${SNAPSHOT_V3}"
 fi
-SNAPSHOTS=("${SNAPSHOT}" "${SNAPSHOT_V3}")
+SNAPSHOTS=("${SNAPSHOT}" "${SNAPSHOT_V4}" "${SNAPSHOT_V3}")
 LOCK_DIR="${CACHE_DIR}/refresh.lock"
 TTL="${CLAUDE_USAGE_TTL:-600}"
 
@@ -418,7 +418,7 @@ usage_text() {
   run_claude "$1" -p "/usage" --safe-mode --allowed-tools "" --no-session-persistence
 }
 
-token_cache() { printf '%s/token-%s.tsv' "${CACHE_DIR}" "$1"; }
+token_cache() { printf '%s/token2-%s.tsv' "${CACHE_DIR}" "$1"; }   # token-*.tsv is the older format, whose readers print a "none" session as bare JSON
 # The organization a token answered for, as "<gen>\t<org>": identity, kept
 # apart from readings so a failed probe never forgets it.
 token_org_file() { printf '%s/token-%s.org' "${CACHE_DIR}" "$1"; }
@@ -556,7 +556,7 @@ lock_release() { [[ $(cat "$1/pid" 2> /dev/null) == "$2" ]] && rm -rf "$1"; retu
 # unified rate-limit headers. Writes and prints the reading.
 token_fetch() {
   local key="$1" tok="" out line n v code="" cexit="" body gen tmp f
-  local org="-" s="" sr="" ss="" w="" wr="" ws="" p="" pr="" ps="" us="" result=failed reason=""
+  local org="-" s="" sr="" ss="" w="" wr="" ws="" p="" pr="" ps="" us="" h5=0 nowin=0 result=failed reason=""
   gen=$(token_gen "${key}")
   command -v curl > /dev/null || { token_none "${key}" "curl not on PATH"; return; }
   [[ ${PROBE_MODEL} =~ ^[A-Za-z0-9._-]+$ ]] || { token_none "${key}" "invalid CLAUDE_USAGE_PROBE_MODEL"; return; }
@@ -588,7 +588,7 @@ token_fetch() {
     line=${line%$'\r'}
     # Each status line starts a block; only the final reply's headers count.
     if [[ ${line} == HTTP/* ]]; then
-      org="-" s="" sr="" ss="" w="" wr="" ws="" p="" pr="" ps="" us=""
+      org="-" s="" sr="" ss="" w="" wr="" ws="" p="" pr="" ps="" us="" h5=0
       continue
     fi
     [[ ${line} =~ ^[0-9]{3}$ ]] && { code=${line}; continue; }
@@ -599,9 +599,9 @@ token_fetch() {
     case ${n} in
       anthropic-organization-id)                     org=${v} ;;
       anthropic-ratelimit-unified-status)            us=${v} ;;
-      anthropic-ratelimit-unified-5h-utilization)    s=${v} ;;
-      anthropic-ratelimit-unified-5h-reset)          sr=${v} ;;
-      anthropic-ratelimit-unified-5h-status)         ss=${v} ;;
+      anthropic-ratelimit-unified-5h-utilization)    s=${v} h5=1 ;;
+      anthropic-ratelimit-unified-5h-reset)          sr=${v} h5=1 ;;
+      anthropic-ratelimit-unified-5h-status)         ss=${v} h5=1 ;;
       anthropic-ratelimit-unified-7d-utilization)    w=${v} ;;
       anthropic-ratelimit-unified-7d-reset)          wr=${v} ;;
       anthropic-ratelimit-unified-7d-status)         ws=${v} ;;
@@ -611,7 +611,7 @@ token_fetch() {
     esac
   done <<< "${out:-}"
   shopt -u nocasematch
-  [[ -z ${s}${sr}${ss} && $(frac_left "${w}") != "-" ]] && s=none   # no 5h header beside a week: no 5-hour window
+  ((h5)) || [[ $(frac_left "${w}") == "-" ]] || nowin=1   # no 5h header beside a week: no 5-hour window
 
   # A refusal counts whatever else the reply lacks; anything else is ok only
   # from a transfer curl completed, with a 2xx, the week and, if the plan has one, the session.
@@ -626,7 +626,7 @@ token_fetch() {
       reason="transfer failed after HTTP ${code} (curl exit ${cexit:-?})"
     elif [[ ${code} != 2?? ]]; then
       reason="HTTP ${code} from the API"
-    elif [[ ${s} == none ]] || [[ $(frac_left "${s}") != "-" && $(frac_left "${w}") != "-" ]]; then
+    elif ((nowin)) || [[ $(frac_left "${s}") != "-" && $(frac_left "${w}") != "-" ]]; then
       result=ok
     else
       reason="HTTP ${code} without rate-limit headers"
@@ -636,7 +636,7 @@ token_fetch() {
   for v in ss ws ps; do [[ ${!v} =~ ^[a-z_]+$ ]] || printf -v "${v}" '%s' "-"; done
   for v in sr wr pr; do [[ ${!v} =~ ^[0-9]+$ ]] || printf -v "${v}" '%s' "-"; done
   if [[ ${result} == ok || ${result} == rejected ]]; then
-    [[ ${s} == none ]] || s=$(frac_left "${s}"); w=$(frac_left "${w}"); p=$(frac_left "${p}")
+    s=$(frac_left "${s}"); ((nowin)) && s=none; w=$(frac_left "${w}"); p=$(frac_left "${p}")
     if [[ ${org} != "-" ]]; then
       f=$(token_org_file "${key}")
       printf '%s\t%s\n' "${gen}" "${org}" > "${f}.$$" && mv -f "${f}.$$" "${f}"
@@ -726,14 +726,14 @@ probe() {
   plan=$(sed -n 's/.*"subscriptionType": "\([^"]*\)".*/\1/p' <<< "${auth}" | head -1)
   org=$(sed -n 's/.*"orgId": "\([A-Za-z0-9_-]*\)".*/\1/p' <<< "${auth}" | head -1)
 
-  usage=$(usage_text "${dir}" 2> /dev/null)
+  usage=$(usage_text "${dir}" 2> /dev/null) || usage=""
   obs=$(date +%s)   # when /usage answered: pairing compares it with token readings
   # A subscription login that lists no windows has none open: nothing spent
   # this week, so every bucket is full. The premium bucket's name is unknown.
   # A busy account occasionally gets one windowless reply too, so an idle
   # reading must repeat before it is believed.
   [[ ${usage} == *"using your subscription"* && ${usage} != *"Current "* ]] &&
-    usage=$(usage_text "${dir}" 2> /dev/null)
+    { usage=$(usage_text "${dir}" 2> /dev/null) || usage=""; }
   if [[ ${usage} == *"using your subscription"* && ${usage} != *"Current "* ]]; then
     printf '000%s\t%s\t%s\t%s\t100\tidle\t100\tidle\t-\t100\t0\t%s\t%s\t-\t-\t-\t\n' \
       "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${org:--}" "${obs}"
@@ -844,7 +844,7 @@ rank_rows() {
   awk -F'\t' -v OFS='\t' -v t="$(lower "${TARGET_MODEL}")" -v pf="$(lower "${PREMIUM_LABEL}")" '
     function num(x) { return x ~ /^[0-9]+$/ }
     NF {
-      sl = ($5 == "none" ? 100 : $5); wl = $7; pl = tolower($9); pv = $10   # no 5-hour window: no session limit
+      sl = ($5 == "none" ? 100 : $5); wl = $7; pl = tolower($9); pv = $10   # none: 100 is neutral in the bucket minimum
       req = ""
       if (index(t, pf)) req = pf
       else if (pl != "-" && pl != "" && index(t, pl)) req = pl
@@ -1098,7 +1098,7 @@ json() {
       days=$(token_days_left "$(key_for "${name}")")
       [[ ${days} =~ ^-?[0-9]+$ ]] || days=null
     fi
-    if [[ ${sl} =~ ^[0-9]+$ ]]; then win=ok; elif [[ ${sl} == none ]]; then win=none sl=null; else win=unknown sl=null; fi
+    if [[ ${sl} =~ ^[0-9]+$ ]]; then win=present; elif [[ ${sl} == none ]]; then win=none sl=null; else win=unknown sl=null; fi
     printf '\n  {"account":"%s","active":%s,"email":"%s","plan":"%s","session_left_pct":%s,"session_window":"%s","session_resets":"%s","week_left_pct":%s,"week_resets":"%s","premium_model":"%s","premium_left_pct":%s,"token_days_left":%s,"observed_at":%s,"session_resets_at":%s,"week_resets_at":%s,"premium_resets_at":%s,"note":"%s"}' \
       "$(jq_str "${name}")" "$([[ ${active} == 1 ]] && printf true || printf false)" "$(jq_str "${email}")" "$(jq_str "${plan}")" \
       "${sl}" "${win}" "$(jq_str "${sr}")" "${wl//-/null}" "$(jq_str "${wr}")" \
@@ -1119,7 +1119,7 @@ cmd_refresh() {
   gather_logins > "${tmp}" 2> /dev/null &
   wait
   mv -f "${tmp}" "${SNAPSHOT}"   # atomic swap: readers never see a half-written file
-  rm -f "${SNAPSHOT_V3}"
+  rm -f "${SNAPSHOT_V4}" "${SNAPSHOT_V3}"
   return 0
 }
 
@@ -1364,7 +1364,7 @@ cmd_add() {
     TOKEN=""
     xtrace_restore
     date +%s > "${dir}/${TOKEN_DATE}"
-    rm -f "${SNAPSHOT}" "${SNAPSHOT_V3}" "$(token_cache "${key}")" "$(token_org_file "${key}")"
+    rm -f "${SNAPSHOTS[@]}" "$(token_cache "${key}")" "$(token_org_file "${key}")"
     printf '✓ %s saved (token, expires ~%s)\n' "${name}" "$(token_expiry "${key}" '%Y-%m')"
     return 0
   fi
@@ -1383,7 +1383,7 @@ cmd_add() {
   fi
   # The token would outrank the login just made.
   rm -f "${dir}/${TOKEN_FILE}" "${dir}/${TOKEN_DATE}" "$(token_cache "${key}")" "$(token_org_file "${key}")"
-  rm -f "${SNAPSHOT}" "${SNAPSHOT_V3}"   # the roster changed; the next render re-matches the slot
+  rm -f "${SNAPSHOTS[@]}"   # the roster changed; the next render re-matches the slot
   local added main_email
   added=$(run_claude "${dir}" auth status --json 2> /dev/null | sed -n 's/.*"email": "\([^"]*\)".*/\1/p' | head -1)
   main_email=$(run_claude "${MAIN_DIR}" auth status --json 2> /dev/null | sed -n 's/.*"email": "\([^"]*\)".*/\1/p' | head -1)
@@ -1411,7 +1411,7 @@ cmd_remove() {
   fi
   rm -rf "${dir}"
   drop_label "${key}"
-  rm -f "${SNAPSHOT}" "${SNAPSHOT_V3}" "$(token_cache "${key}")" "$(token_org_file "${key}")"
+  rm -f "${SNAPSHOTS[@]}" "$(token_cache "${key}")" "$(token_org_file "${key}")"
   if [[ -n ${until} ]]; then
     printf 'removed %s (token file deleted; the token itself stays valid until ~%s)\n' "${name}" "${until}"
   else

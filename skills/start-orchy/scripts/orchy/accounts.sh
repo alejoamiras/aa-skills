@@ -55,7 +55,6 @@ acct_view() { # {policy, orchestrator, known, accounts}: one row per roster acco
            elif ($fresh | not) then ["light", (if ($r.week_resets_at | type) == "number" and $r.week_resets_at <= $now
                then "its week reset after the reading" else "the reading is over 2 h old" end)]
            elif ($r.week_left_pct | type) != "number" then ["light", "its week headroom is unknown"]
-           # a plan with no 5-hour window has no session to check
            elif ($r.session_left_pct | type) != "number" and $r.session_window != "none" then ["light", "its session headroom is unknown"]
            elif $r.week_left_pct < $pol.heavy_floor_pct then ["light", "week \($r.week_left_pct)% is under the \($pol.heavy_floor_pct)% floor", true]
            # like a spent session, a low one counts only until its own reset

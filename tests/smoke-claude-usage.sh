@@ -49,7 +49,7 @@ if [[ " $* " == *" /usage "* ]]; then
   [[ -f $CLAUDE_CONFIG_DIR/nosession ]] || printf '\nCurrent session: 0%% used · resets %s (%s)\n' "$s" "$z"   # a plan with no 5h window
   printf 'Current week (all models): %s%% used · resets %s (%s)\n' "$w" "$r" "$z"
   printf 'Current week (Fable): 100%% used · resets %s (%s)\n' "$r" "$z"
-  exit 0
+  [[ -f $CLAUDE_CONFIG_DIR/fail ]] && exit 1; exit 0
 fi
 # A session: record what it ran with, one line per call.
 printf 'dir=%s token=%s apikey=%s bedrock=%s argv=%s\n' "${CLAUDE_CONFIG_DIR-unset}" \
@@ -178,16 +178,18 @@ without() {
 NO_CLAUDE=$(without claude)
 t "cached json: read with no claude CLI on PATH" sh -c 'env PATH="$1" "$2" --json --cached | grep -q "\"account\":\"aaa-late\""' _ "$NO_CLAUDE" "$CU"
 t "json: a probe with no claude CLI on PATH dies naming it" sh -c '! env PATH="$1" "$2" --json > /dev/null 2> "$3" && grep -qx "claude CLI not on PATH" "$3"' _ "$NO_CLAUDE" "$CU" "$S/nocli.err"
-# A v3 snapshot (14 columns) is carried into v4 once: no epochs, its note intact.
+# A v3 snapshot (14 columns) is carried into v5 once: no epochs, its note intact.
 V3R="$S/v3-root"; mkdir -p "$V3R/carried"; ahead 2 > "$V3R/carried/reset"
 v3() { env CLAUDE_ACCOUNTS_ROOT="$V3R" XDG_CACHE_HOME="$S/cache-v3" CLAUDE_USAGE_TTL=99999 "$CU" "$@"; }
 v3 refresh
-v4=$(ls "$S"/cache-v3/claude-usage/*/snapshot.v4.tsv); old="${v4%v4.tsv}v3.tsv"
-awk -F'\t' -v OFS='\t' '{ $17 = "carried note"; print $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$17 }' "$v4" > "$old" && rm "$v4"
+v5=$(ls "$S"/cache-v3/claude-usage/*/snapshot.v5.tsv); old="${v5%v5.tsv}v3.tsv"
+awk -F'\t' -v OFS='\t' '{ $17 = "carried note"; print $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$17 }' "$v5" > "$old" && rm "$v5"
 v3 --json --cached > "$S/v3.json"
 t "v3 snapshot: read with no epochs and its note" sh -c 'test "$1" = "null null null" && grep -q "\"account\":\"carried\".*\"note\":\"carried note\"" "$2"' _ "$(epochs "$S/v3.json" carried)" "$S/v3.json"
-t "v3 snapshot: gone once carried, v4 in its place" sh -c 'test ! -e "$1" && test -s "$2"' _ "$old" "$v4"
+t "v3 snapshot: gone once carried, v5 in its place" sh -c 'test ! -e "$1" && test -s "$2"' _ "$old" "$v5"
 t "describe: shows the note, not an epoch" grep -q "^claude-usage: carried — carried note$" <(v3 run carried -p x 2>&1 >/dev/null)
+mv "$v5" "${v5%v5.tsv}v4.tsv"; v3 --json --cached > "$S/v4.json"; v3 refresh
+t "v4 snapshot: carried over as is, gone after a refresh" sh -c 'grep -q "\"account\":\"carried\".*\"note\":\"carried note\"" "$1" && test ! -e "$2" && test -s "$3"' _ "$S/v4.json" "${v5%v5.tsv}v4.tsv" "$v5"
 t "best: idle account wins" grep -q '^fresh (idle' <("$CU" best)
 t "other: skips the caller's own account" test "$(CLAUDE_USAGE_MODEL=sonnet CLAUDE_CONFIG_DIR="$CLAUDE_ACCOUNTS_ROOT/fresh" "$CU" resolve other)" = zzz-soon
 tn "other: Fable work refuses accounts with no Fable left" env CLAUDE_CONFIG_DIR="$CLAUDE_ACCOUNTS_ROOT/fresh" "$CU" resolve other
@@ -346,7 +348,7 @@ t "probe: the token goes to curl on stdin, never in argv" sh -c 'test -s "$1" &&
 t "epochs: a token reading's are its reply's headers" test "$(epochs "$S/net.json" tk-free)" = "$R5 $R7 $R7"
 t "probe: a rejected token is marked unusable" grep -q '"account":"tk-dead".*"note":"token rejected (HTTP 401)' "$S/net.json"
 t "pairing: a token sharing the slot's personal org is the active row" sh -c 'grep -q "\"account\":\"tk-pair\",\"active\":true" "$1" && ! grep -q "\"account\":\"main\"" "$1"' _ "$S/net.json"
-f=$(ls "$S"/cache-net/claude-usage/*/token-tk-pair.tsv); awk -F'\t' -v OFS='\t' -v o=$(( $(date +%s) - 3600 )) '{ $3 = o; print }' "$f" > "$f.n" && mv "$f.n" "$f"
+f=$(ls "$S"/cache-net/claude-usage/*/token2-tk-pair.tsv); awk -F'\t' -v OFS='\t' -v o=$(( $(date +%s) - 3600 )) '{ $3 = o; print }' "$f" > "$f.n" && mv "$f.n" "$f"
 t "pairing: a newer slot reading supplies the numbers" grep -q '"account":"tk-pair".*"week_resets":"idle"' <(CLAUDE_USAGE_TTL=99999 nr --json)
 nr refresh
 t "pairing: current names it from the slot" test "$(nr current)" = tk-pair
@@ -354,7 +356,7 @@ calls=$(wc -l < "$NET/argv")
 nr --json > /dev/null
 t "probe: a reading is reused within the TTL" test "$(wc -l < "$NET/argv")" -eq "$calls"
 t "table: a session shows its 5h reset time" grep -qE 'tk-free +│[^│]*│ +92%  ([A-Z][a-z]{2} [0-9]{1,2} )?[0-9]{1,2}(:[0-9]{2})?[ap]m' <(CLAUDE_USAGE_TTL=99999 nr)
-f=$(ls "$S"/cache-net/claude-usage/*/token-tk-free.tsv); awk -F'\t' -v OFS='\t' -v r=$(( $(date +%s) - 60 )) '{ $7 = r; print }' "$f" > "$f.n" && mv "$f.n" "$f"
+f=$(ls "$S"/cache-net/claude-usage/*/token2-tk-free.tsv); awk -F'\t' -v OFS='\t' -v r=$(( $(date +%s) - 60 )) '{ $7 = r; print }' "$f" > "$f.n" && mv "$f.n" "$f"
 t "table: a passed 5h reset reads as reset" grep -qE 'tk-free +│[^│]*│ +92%  reset +│' <(CLAUDE_USAGE_TTL=99999 nr)
 awk -F'\t' -v OFS='\t' -v r=$(( $(date +%s) + 86400 * 300 )) '{ $7 = r; print }' "$f" > "$f.n" && mv "$f.n" "$f"
 t "table: a reset beyond one window shows no time" grep -qE 'tk-free +│[^│]*│ +92% +│' <(CLAUDE_USAGE_TTL=99999 nr)
@@ -372,7 +374,7 @@ t "probe: a failed probe backs off for one TTL" test "$(wc -l < "$NET/argv")" -e
 printf '%s' "$TK_FREE" | CLAUDE_ACCOUNTS_ROOT="$NR" "$CU" add tk-free > /dev/null 2>&1
 nr --json > /dev/null
 t "probe: a re-added token is a new credential, probed afresh" test "$(wc -l < "$NET/argv")" -eq $((calls + 1))
-f=$(ls "$S"/cache-net/claude-usage/*/token-tk-free.tsv); old=$(( $(date +%s) - 7200 ))
+f=$(ls "$S"/cache-net/claude-usage/*/token2-tk-free.tsv); old=$(( $(date +%s) - 7200 ))
 awk -F'\t' -v OFS='\t' -v o="$old" '{ $3 = o; print }' "$f" > "$f.n" && mv "$f.n" "$f"
 calls=$(wc -l < "$NET/argv")
 _CLAUDE_USAGE_PASSIVE=1 nr refresh
@@ -447,7 +449,7 @@ tk=$(mktok fading); tokacct fading 0.0 0.0 0.0 f1; tokacct spare 0.5 0.5 0.5 f2
 rk refresh
 t "consistency: setup, the fresh account is best" test "$(rk resolve best)" = fading
 reply "$tk" 401 "request-id: r"
-f=$(ls "$S"/cache-r2/claude-usage/*/token-fading.tsv)
+f=$(ls "$S"/cache-r2/claude-usage/*/token2-fading.tsv)
 awk -F'\t' -v OFS='\t' '{ $3 = 1; print }' "$f" > "$f.n" && mv "$f.n" "$f"
 rk show fading > /dev/null; _CLAUDE_USAGE_PASSIVE=1 rk refresh
 t "consistency: a token show found revoked is never picked after" test "$(rk resolve best)" = spare
@@ -457,7 +459,7 @@ printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add mine > /dev/null 2>&1
 rkm() { env -u CLAUDE_USAGE_SKIP_MAIN CLAUDE_ACCOUNTS_ROOT="$RK" XDG_CACHE_HOME="$S/cache-r2" "$CU" "$@"; }
 rkm --json > /dev/null
 reply "$tk" 401 "request-id: r"
-f=$(ls "$S"/cache-r2/claude-usage/*/token-mine.tsv); awk -F'\t' -v OFS='\t' '{ $3 = 1; print }' "$f" > "$f.n" && mv "$f.n" "$f"
+f=$(ls "$S"/cache-r2/claude-usage/*/token2-mine.tsv); awk -F'\t' -v OFS='\t' '{ $3 = 1; print }' "$f" > "$f.n" && mv "$f.n" "$f"
 rkm --json > "$S/dead.json"
 t "dead alias: main stays the active, usable row" sh -c 'grep -q "\"account\":\"main\",\"active\":true" "$1" && grep -q "\"account\":\"mine\",\"active\":false" "$1"' _ "$S/dead.json"
 t "dead alias: best launches main" test "$(rkm resolve best 2>/dev/null)" = main
@@ -465,10 +467,10 @@ rm -rf "${RK:?}"/*; tokacct locked 0.1 0.1 0.1 l1
 : > "$S/notadir"
 t "lock: an unwritable cache dir fails fast with a reason" grep -q 'cache dir not writable' <(env CLAUDE_ACCOUNTS_ROOT="$RK" XDG_CACHE_HOME="$S/notadir" "$CU" show locked)
 d=$(rk refresh > /dev/null 2>&1; ls -d "$S"/cache-r2/claude-usage/*/)
-rm -f "$d"token-locked.tsv; mkdir -p "$d"token-locked.tsv.lock; echo 999999 > "$d"token-locked.tsv.lock/pid
+rm -f "$d"token2-locked.tsv; mkdir -p "$d"token2-locked.tsv.lock; echo 999999 > "$d"token2-locked.tsv.lock/pid
 : > "$NET/argv"
 rk show locked > /dev/null
-t "lock: a dead holder's lock is reclaimed, then released" sh -c 'test "$(wc -l < "$1")" -eq 1 && [ ! -e "$2" ]' _ "$NET/argv" "$d"token-locked.tsv.lock
+t "lock: a dead holder's lock is reclaimed, then released" sh -c 'test "$(wc -l < "$1")" -eq 1 && [ ! -e "$2" ]' _ "$NET/argv" "$d"token2-locked.tsv.lock
 TM="$S/team-root"; mkdir -p "$TM/t1" "$TM/t2"
 for a in t1 t2; do echo team > "$TM/$a/plan"; echo org-team > "$TM/$a/org"; ahead 2 > "$TM/$a/reset"; done
 t "team: the same team organization with another email is still other" test "$(CLAUDE_USAGE_MODEL=sonnet CLAUDE_CONFIG_DIR="$TM/t1" CLAUDE_ACCOUNTS_ROOT="$TM" XDG_CACHE_HOME="$S/cache-tm" "$CU" resolve other 2>/dev/null)" = t2
@@ -480,7 +482,7 @@ tokacct spare2 0.5 0.5 0.5 s2
 tk=$(mktok spentmine); reply "$tk" 200 "anthropic-organization-id: org-main" "$H-5h-utilization: 1.0" "$H-7d-utilization: 1.0" "$H-7d_oi-utilization: 1.0"
 printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add spentmine > /dev/null 2>&1
 rkm refresh
-f=$(ls "$S"/cache-r2/claude-usage/*/snapshot.v4.tsv)
+f=$(ls "$S"/cache-r2/claude-usage/*/snapshot.v5.tsv)
 awk -F'\t' -v OFS='\t' '$2 == "main" { $13 = 1 } { print }' "$f" > "$f.n" && mv "$f.n" "$f"
 t "pairing: an older slot reading never revives a newer spent token" test "$(rkm resolve best 2>/dev/null)" = spare2
 tk=$(mktok bareshow); reply "$tk" 429 "request-id: r"
@@ -497,9 +499,14 @@ printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add tk-nw > /dev/null 2>&1
 tk=$(mktok nwcut); reply "$tk" 429 "$H-status: rejected" "$H-7d-utilization: 0.5" "$H-7d_oi-utilization: 0.1"
 printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add tk-nwcut > /dev/null 2>&1
 tokacct tk-win 0.0 0.3 0.0 w1
+tk=$(mktok nwbad); reply "$tk" 200 "$H-5h-utilization: none" "$H-7d-utilization: 0.2"
+printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add tk-nwbad > /dev/null 2>&1
+mkdir -p "$RK/lg-nwfail"; ahead 2 > "$RK/lg-nwfail/reset"; touch "$RK/lg-nwfail/nosession" "$RK/lg-nwfail/fail"
 nw refresh; nw --json --cached > "$S/nw.json"
-t "no window: json says none, weeks as read, a window account ok" sh -c 'grep -q "\"account\":\"tk-nw\".*\"session_left_pct\":null,\"session_window\":\"none\".*\"week_left_pct\":80,.*\"premium_left_pct\":90" "$1" &&
-  grep -q "\"account\":\"lg-nw\".*\"session_window\":\"none\",.*\"week_left_pct\":50," "$1" && grep -q "\"account\":\"tk-win\".*\"session_left_pct\":100,\"session_window\":\"ok\"" "$1"' _ "$S/nw.json"
+t "no window: never from a 5h header's value, nor from a /usage that failed" sh -c 'grep -q "\"account\":\"tk-nwbad\".*\"session_window\":\"unknown\".*\"week_left_pct\":null," "$1" &&
+  grep -q "\"account\":\"lg-nwfail\".*\"session_window\":\"unknown\".*\"note\":\"no usage data" "$1"' _ "$S/nw.json"
+t "no window: json says none, weeks as read, a window account present" sh -c 'grep -q "\"account\":\"tk-nw\".*\"session_left_pct\":null,\"session_window\":\"none\".*\"week_left_pct\":80,.*\"premium_left_pct\":90" "$1" &&
+  grep -q "\"account\":\"lg-nw\".*\"session_window\":\"none\",.*\"week_left_pct\":50," "$1" && grep -q "\"account\":\"tk-win\".*\"session_left_pct\":100,\"session_window\":\"present\"" "$1"' _ "$S/nw.json"
 t "no window: a refusal naming no bucket spends the week, the session stays none" grep -q '"account":"tk-nwcut".*"session_window":"none".*"week_left_pct":0,' "$S/nw.json"
 t "no window: ranked on its weeks, 80/90 above 100/70/100" test "$(nw resolve best 2>/dev/null)" = tk-nw
 t "no window: the status line offers it with its Fable headroom" grep -q 'tk-win fable 100% → tk-nw 90%' <(CLAUDE_CONFIG_DIR="$RK/tk-win" nw statusline)
