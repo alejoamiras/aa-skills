@@ -1,0 +1,46 @@
+{
+  "answers": [
+    {
+      "at": "2026-10-31T10:00:00Z",
+      "choice": "other",
+      "id": "rq1.1",
+      "kind": "pick",
+      "note": "Unit gates the PR",
+      "request": "rq1",
+      "rev": 1,
+      "schema": "orchy.answer/1",
+      "state": "pending",
+      "text": "Run both in the nightly job"
+    },
+    {
+      "at": "2026-10-31T10:00:00Z",
+      "id": "rq2.1",
+      "kind": "done",
+      "log": "e2e-status\tpass\nlint\tpass",
+      "note": "Renamed it",
+      "request": "rq2",
+      "rev": 1,
+      "schema": "orchy.answer/1",
+      "state": "taken"
+    },
+    {
+      "at": "2026-10-31T10:00:00Z",
+      "binding": {
+        "kind": "text",
+        "sha256": "b341856823e1bdc2309ba6563ba12b6e86a38bd5e26827f264432f8e9b2d1227"
+      },
+      "go": true,
+      "id": "rq3.1",
+      "kind": "approve",
+      "note": null,
+      "reason": "invalid",
+      "request": "rq3",
+      "rev": 1,
+      "schema": "orchy.answer/1",
+      "state": "refused",
+      "withheld": "secret"
+    }
+  ],
+  "errors": [],
+  "schema": "orchy.answers/1"
+}

@@ -24,10 +24,25 @@ orchy_ask() {
 }
 ask_row() { jq -nc --arg id "$id" --arg at "$(utc_now)" "$@"; }
 ask_cmd_add() {
-  t="$*"; [ -n "$t" ] || { echo "usage: ask add <text>" >&2; exit 1; }
+  [ "${1:-}" != --from ] || { ask_cmd_from "${@:2}"; return; }
+  t="$*"; [ -n "$t" ] || { echo "usage: ask add <text> | --from <aid>" >&2; exit 1; }
   ask_add() { local n; n=$(fold | jq -r '[keys[] | select(test("^ask[0-9]+$")) | ltrimstr("ask") | tonumber] | max // 0')
     id="ask$((n + 1))"; ledger_append "$(ask_row --arg t "$t" '{id: $id, at: $at, state: "open", text: $t}')" && echo "$id"; }
   with_ledger ask_add
+}
+ask_cmd_from() { # an ask whose text is a taken answer's sentences, as take filed them, so nobody re-types the owner's words
+  aid=${1:-}; [ $# = 1 ] && [[ $aid =~ ^rq[1-9][0-9]{0,8}\.[1-9][0-9]?$ ]] || { echo "usage: ask add --from <aid>" >&2; exit 1; }
+  l=$(lead_below) && { echo "refused: this process runs under lead pid $l; only the orchestrator opens asks" >&2; exit 1; }
+  ask_from() { local f st t n
+    f="$RQ/${aid%%.*}.json"; [ -f "$f" ] || f="$RQ/closed/${aid%%.*}.json"
+    st=$([ -f "$f" ] && [ ! -L "$f" ] && jq -r --arg a "$aid" 'first(.answers[]? | select(.id == $a) | if .withheld then "withheld" else .state end) // "unlogged"' "$f" 2>/dev/null) || st=unlogged
+    [ "$st" = taken ] || { echo "refused: $aid is $st; only a taken answer opens an ask" >&2; return 1; }
+    jq -Rne --arg a "$aid" 'any(inputs | fromjson? | select(type == "object"); .from == $a)' "$LEDGER" >/dev/null && { echo "refused: $aid already opened an ask" >&2; return 1; }
+    t=$(jq -Rnr --arg a "$aid" 'first(inputs | fromjson? | select(type == "object" and .answer == $a) | .said // .text | strings) // empty' "$LEDGER")
+    [ -n "$t" ] || { echo "refused: the ledger holds no sentences of $aid" >&2; return 1; }
+    n=$(fold | jq -r '[keys[] | select(test("^ask[0-9]+$")) | ltrimstr("ask") | tonumber] | max // 0'); id="ask$((n + 1))"
+    ledger_append "$(ask_row --arg t "$t" --arg a "$aid" '{id: $id, at: $at, state: "open", text: $t, from: $a}')" && echo "$id"; }
+  with_ledger ask_from
 }
 ask_cmd_public() {
   t="$*"; [ -n "$t" ] || { echo "usage: ask public <askN> <text>" >&2; exit 1; }
@@ -45,7 +60,10 @@ ask_cmd_public() {
 ask_cmd_text() {
   t="$*"; [ -n "$t" ] || { echo "usage: ask $sub <askN> <text>" >&2; exit 1; }
   [ "$sub" = said ] || note_ok "$t" || exit 1
-  ask_text() { [ -n "$(ask_get "$id")" ] || { echo "refused: no $id" >&2; return 1; }
+  ask_text() { local a; a=$(ask_get "$id"); [ -n "$a" ] || { echo "refused: no $id" >&2; return 1; }
+    # an answer to the request a wording change raised says nothing of the new wording, which only the owner's OK clears
+    if [ "$sub" = note ] && [[ $t == answered:* ]] && [[ $(jq -r "$ASK_CTL" <<<"$a") == "waiting: wording"* ]]; then
+      echo "refused: $id waits on the owner's OK of its wording; only 'wording ok' ends that hold" >&2; return 1; fi
     ledger_append "$(ask_row --arg k "$sub" --arg t "$t" '{id: $id, at: $at} + {($k): $t}')" && echo "$id $sub recorded"; }
   with_ledger ask_text
 }
