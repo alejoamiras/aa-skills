@@ -36,8 +36,8 @@
 #   codex-usage statusline      compact cached segment for statusline.sh
 #   codex-usage refresh         re-probe every account into the snapshot cache
 #
-# Accepted limits: two refreshers can overlap if one is stolen from mid-claim
-# (the loser's result is discarded); concurrent `rename` calls
+# Accepted limits: refreshers can overlap when a late stale-lock reclaim displaces
+# a fresh holder (the loser's result is discarded); concurrent `rename` calls
 # are last-writer-wins; a `remove` landing between a refresh's roster check
 # and its publish can surface for one TTL; the probe needs the network, so
 # offline the snapshot just ages until it is flagged stale.
@@ -822,7 +822,7 @@ cmd_add() {
   # authenticate into the home this one then deletes on its own failure.
   mkdir -p "${ACCOUNTS_ROOT}"
   ADD_GUARD="${ACCOUNTS_ROOT}/.adding-${key}"   # global: the EXIT trap outlives this function's locals
-  mkdir "${ADD_GUARD}" 2> /dev/null || die "another add for ${name} is in progress (stale? rm -r ${ADD_GUARD})"
+  claim_dir "${ADD_GUARD}" 2> /dev/null || die "another add for ${name} is in progress (stale? rm -r ${ADD_GUARD})"
   trap 'rm -rf "${ADD_GUARD}"' EXIT
   local created=""
   [[ -e ${dir} ]] || created=1

@@ -606,6 +606,11 @@ t "lib: drop_label drops the exact key only" test "$(cat "$S/labels.conf")" = "$
 t "lib: jq_str escapes quotes and backslashes, drops control chars" test "$(lib jq_str $'a"b\\c\td\ne')" = 'a\"b\\cde'
 t "lib: pad_cell pads to the plain width, not the painted one" test "$(lib pad_cell $'\e[1mab\e[0m' ab 5 left)|$(lib pad_cell x x 3 right)" = $'\e[1mab\e[0m   |  x'
 t "lib: hrule draws two dashes past each width" test "$(lib hrule '<' '+' '>' 1 0)" = '<───+──>'
+mkdir -p "$S/race"
+won=$(bash -c '. "$1"; n=0; for ((i = 0; i < 200; i++)); do
+  claim_dir "$2/$i" 2> /dev/null & a=$!; claim_dir "$2/$i" 2> /dev/null & b=$!
+  wait "$a"; x=$?; wait "$b"; y=$?; ((x + y == 1)) && [ -d "$2/$i" ] && n=$((n + 1)); done; echo "$n"' _ "$ROOT/lib/usage.sh" "$S/race")
+t "lib: claim_dir lets one of two paired claims win, 200 times (a mkdir(1) regression fails only on uutils)" test "$won" -eq 200
 r=$("$CU_BIN" add main 2>&1)"|"$(cx add best 2>&1)
 t "lib: each tool's own wording for a reserved name" test "$r" = "'main' is reserved for ~/.claude|'best' is reserved: it means \"pick for me\" in \`home\` and CODEX_ACCOUNT"
 # install.sh reaches the bins through ~/.local/bin links: a relative link to an absolute one, from an unrelated cwd,
