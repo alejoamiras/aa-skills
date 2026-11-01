@@ -83,7 +83,8 @@ orchy_state() {
       | {id, state, lane: (.lane // null), age_s: ($now - (.at | fromdateiso8601? // $now)), has_public: (.public != null),
          waiting: (([ '"$ASK_HOLD"' ] | length) > 0)}]') || { asks=null; errs+=(asks); }
   else errs+=(asks); fi
-  waiting=null; if w=$(waiting_read 2>/dev/null); then waiting=$(jq -c .waiting <<<"$w"); else errs+=(waiting); fi
+  waiting=null; if w=$(waiting_view 2>/dev/null); then waiting=$(jq -c .waiting <<<"$w"); jq -e 'has("errors")' <<<"$w" >/dev/null && errs+=(requests)
+  else errs+=(waiting); fi
   triaged=null; if [ -e "$H/triaged.txt" ]; then
     if [ -f "$H/triaged.txt" ] && [ -r "$H/triaged.txt" ]; then triaged=$(grep -xE '[0-9]+' "$H/triaged.txt" | jq -Rsc 'split("\n") | map(select(. != "") | tonumber)')
     else errs+=(triaged); fi

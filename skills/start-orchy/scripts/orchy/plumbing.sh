@@ -31,10 +31,13 @@ session_pid() { # the orchestrator session: $CLAUDE_PID while it is a live claud
   if [[ "$p" =~ ^[0-9]+$ ]] && [ "$(ps -o comm= -p "$p" 2>/dev/null)" = claude ]; then echo "$p"; return; fi
   p=$PPID; while [ "$p" -gt 1 ] 2>/dev/null; do c=$(ps -o comm= -p "$p" 2>/dev/null); [ "$c" = claude ] && { echo "$p"; return; }; p=$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null || echo 1); done; echo "$PPID"
 }
+# tool <set> <name> <fallback>: a tool as the viewer's unit finds it, whose PATH lacks ~/.bun/bin and ~/.local/bin and
+# which sets no tool variable: the variable, else the name on PATH, else the install's own path
+tool() { if [ -n "$1" ]; then echo "$1"; elif command -v "$2" >/dev/null 2>&1; then command -v "$2"; elif [ -x "$3" ]; then echo "$3"; else echo "$2"; fi; }
 # ts_run <module> <arg>...: orchy/<module>.ts under bun, from its own directory, so no bunfig.toml or .env of the caller's
 # repo reaches it; the arguments go NUL-separated on stdin (args.ts). Never on the path of state, ask list or receipt:
-# those viewers run where bun is not installed.
-ts_run() { printf '%s\0' "${@:2}" | (cd "$SCRIPTS/orchy" && exec bun "./$1.ts"); }
+# those viewers run where bun may not be installed at all.
+ts_run() { local b; b=$(tool "${ORCHY_BUN:-}" bun "${HOME:-}/.bun/bin/bun"); printf '%s\0' "${@:2}" | (cd "$SCRIPTS/orchy" && exec "$b" "./$1.ts"); }
 # abs_path <var>: the path in var made to name its file from ts_run's directory: an existing file's real path, since a
 # path through /proc/self/cwd resolves against the reader's directory, unless that lies under /proc/<pid>, which for
 # /proc/self is realpath's own; else anchored at pwd -P, so a missing file fails as it did. The . keeps $(...) from

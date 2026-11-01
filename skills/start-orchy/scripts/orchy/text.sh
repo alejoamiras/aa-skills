@@ -17,6 +17,11 @@ orchy_check_text() {
     hits=$(grep -nE "$ban" "$f"); [ $? -le 1 ] || { echo "orchy: cannot scan $f" >&2; rc=2; continue; }
     [ -z "$hits" ] || { echo "orchy: $f carries banned text:"; head -5 <<<"$hits" | cut -c1-160; rc=1; }; done; exit $rc
 }
+public_ok() { # public_ok <file> <what>: check-public, its refusal as one line naming the patterns hit
+  local o; o=$("$0" check-public "$1" 2>&1)
+  case $? in 0) ;; 1) echo "refused: $2 fails check-public ($(grep -oE '^(LEAK|SENSITIVE|SECRET)|copies the owner' <<<"$o" | sort -u | paste -sd, -))" >&2; return 1;;
+    *) echo "refused: check-public could not run" >&2; return 1;; esac
+}
 orchy_check_private() { [ $# -gt 0 ] || { echo "usage: check-private <file>..." >&2; exit 2; }; bash "$OVERLAP" "$LEDGER" "$@"; }
 orchy_check_public() {
   # Fails closed: a check that cannot run refuses (exit 2), unlike scan, which reports what it could read.
@@ -38,7 +43,7 @@ orchy_check_public() {
     [ "$r" -le 1 ] || { echo "refused: the $kind pattern is not a valid grep -E regex" >&2; exit 2; }
     [ -z "$hits" ] || { echo "$kind:"; cut -c1-160 <<<"$hits" | head -5; rc=1; }
   done
-  gl=${ORCHY_GITLEAKS:-gitleaks}; command -v "$gl" >/dev/null || { echo "refused: $gl not found, so the secret check cannot run" >&2; exit 2; }
+  gl=$(tool "${ORCHY_GITLEAKS:-}" gitleaks "${HOME:-}/.local/bin/gitleaks"); command -v "$gl" >/dev/null || { echo "refused: $gl not found, so the secret check cannot run" >&2; exit 2; }
   "$gl" stdin --no-banner --redact --exit-code 3 -l error < "$f" >/dev/null 2>&1; r=$?
   case $r in 0) ;; 3) echo "SECRET: gitleaks found a secret"; rc=1;; *) echo "refused: gitleaks failed (exit $r)" >&2; exit 2;; esac
   exit $rc
