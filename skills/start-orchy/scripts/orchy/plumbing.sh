@@ -25,6 +25,10 @@ newest_proc() { # newest_proc <pid> <ps -eo pid=,ppid=,etimes=,args= rows>: "<ag
 }
 sha_ok() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
 name_ok() { [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; }   # a slug or a file name: no path, nothing dot- or dash-led
+# A report's markers: the reader's ERE, plus LEAD_DONE <lane> <arc> spelling the report's own key <lane>-<arc>, the arc its last
+# "-" segment, which reports.py builds alike; name_ok leaves "." the one ERE metacharacter in it
+marker_rx() { local k=${1%.md} d; d="LEAD_DONE ${k%-*} ${k##*-}"   # marker_rx <report file name> <ERE>
+  if [[ "$1" == "$k.md" && "$k" =~ .-[^-]+$ ]] && name_ok "$k"; then printf '%s|%s' "$2" "${d//./\\.}"; else printf '%s' "$2"; fi; }
 ref_ok() { [[ "$1" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$1" != *..* && "$1" != [-/]* ]]; }   # branch, ref and tag names, safe in an API path as written
 session_pid() { # the orchestrator session: $CLAUDE_PID while it is a live claude, else the nearest `claude` ancestor, else (a test, a plain shell) the caller's parent
   local p=${CLAUDE_PID:-} c

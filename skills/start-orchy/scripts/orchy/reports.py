@@ -2,6 +2,7 @@
 import sys, os, re, json, glob, hashlib
 d = sys.argv[1]; out = {"reports": [], "progress": {}}
 MARK = re.compile(rb"(LEAD_DONE|LEAD_BLOCKED:.*|ARC_FAILED:.*|SHOTS_READY.*|SHOTS_BLOCKED:.*)")
+KEY = re.compile(r"([A-Za-z0-9_][A-Za-z0-9._-]*)-([A-Za-z0-9._]+)")   # <lane>-<arc>, the arc its last "-" segment, as marker_rx reads it
 def text(b, n): return b.decode("utf-8", "replace")[:n]
 def regular(p): return os.path.isfile(p) and not os.path.islink(p)
 for p in sorted(glob.glob(os.path.join(d, "*.md"))):
@@ -12,12 +13,13 @@ for p in sorted(glob.glob(os.path.join(d, "*.md"))):
         with open(p, "rb") as fh: data = fh.read()
         mtime = int(os.path.getmtime(p))
     except OSError: out["reports"].append({"key": key, "error": "unreadable"}); continue
-    lines = data.split(b"\n"); marks = [l for l in lines if MARK.fullmatch(l)]
+    k = KEY.fullmatch(key); own = b"LEAD_DONE %s %s" % (k[1].encode(), k[2].encode()) if k else None
+    lines = data.split(b"\n"); marks = [l for l in lines if MARK.fullmatch(l) or l == own]
     failed = [l for l in lines if l.startswith(b"ARC_FAILED:")]
     last = marks[-1] if marks else None; marker = detail = None
     if last is not None:
         marker = re.match(rb"[A-Z_]+", last).group(0).decode()
-        rest = last[len(marker):].lstrip(b":").strip(); detail = text(rest, 80) if rest else None
+        rest = b"" if last == own else last[len(marker):].lstrip(b":").strip(); detail = text(rest, 80) if rest else None
     def lastm(rx, conv):
         m = [re.match(rx, l) for l in lines]; m = [x for x in m if x]
         return conv(m[-1].group(1)) if m else None

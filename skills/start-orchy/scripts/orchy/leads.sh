@@ -63,7 +63,7 @@ orchy_launch() { # orchy_launch launch|resume <arg>...
   # What the earlier run left, read before this one can rewrite it: a retry's event keeps a first failure countable.
   rp="$H/reports/$k.md"; prior=null; pfl=null; pfs=null
   if [ -f "$rp" ]; then
-    m=$(grep -xE 'LEAD_DONE|LEAD_BLOCKED:.*|ARC_FAILED:.*|SHOTS_READY.*|SHOTS_BLOCKED:.*' "$rp" | tail -1 | grep -oE '^(LEAD_DONE|LEAD_BLOCKED|ARC_FAILED|SHOTS_READY|SHOTS_BLOCKED)')
+    m=$(grep -xE "$(marker_rx "$k.md" 'LEAD_DONE|LEAD_BLOCKED:.*|ARC_FAILED:.*|SHOTS_READY.*|SHOTS_BLOCKED:.*')" "$rp" | tail -1 | grep -oE '^(LEAD_DONE|LEAD_BLOCKED|ARC_FAILED|SHOTS_READY|SHOTS_BLOCKED)')
     [ -n "$m" ] && prior="\"$m\""
     pfl=$(grep -c '^ARC_FAILED:' "$rp"); [[ "$pfl" =~ ^[0-9]+$ ]] || pfl=null
     [ "$pfl" != null ] && [ "$pfl" -gt 0 ] && pfs="\"$(grep '^ARC_FAILED:' "$rp" | tail -1 | tr -d '\n' | sha256sum | cut -d' ' -f1)\""
