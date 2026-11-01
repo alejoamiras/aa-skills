@@ -31,6 +31,9 @@ cd "$T/repo"
 if "$ORCHY" config .trunk >/dev/null 2>&1; then fail "config before bootstrap must refuse"; fi
 mkdir -p "$ORCHY_HOME"; jq '.install="true"' "$K/examples/orchy.example.json" > "$ORCHY_HOME/orchy.json"; cp "$K/examples/local.example.json" "$ORCHY_HOME/local.json"
 [ "$("$ORCHY" config .trunk)" = dev ] || fail "config .trunk"
+# the loader sources its named parts only: a stray file beside them never runs
+cp -r "$K/scripts" "$T/scripts-copy"; printf 'echo STRAY-SOURCED; exit 9\n' > "$T/scripts-copy/orchy/zzz.sh"
+o=$("$T/scripts-copy/orchy.sh" config .trunk 2>&1) && [ "$o" = dev ] || fail "a stray orchy/zzz.sh was sourced: $o"
 "$ORCHY" lock >/dev/null || fail "lock"
 # render: every token substituted; a token left over is exit 1
 out=$("$ORCHY" render common-brief.md REPO=example/app PRODUCT="the app" TRUNK=dev WORKTREE=/w/x BRANCH=worktree-x LANE=x KEY=x-plan PLANS_DIR=plans ARCHIVE_DIR=plans/archive ORCHY_HOME="$ORCHY_HOME" CODEX_EFFORT=high CODEX_MODEL=gpt-6.1-sol CODEX_MODEL_SHORT=sol LEAD_MODEL=opus LEAD_MODEL_NAME="Claude Opus 5.5" QUALITY_BAR=production GATES="lint, test" PROTECTED=main KNOWN_LIMIT_LABEL=known-limit DELEGATIONS="" NEVER_OPEN="")
@@ -540,6 +543,15 @@ mkdir -p "$HR/runbooks"; printf -- '- [x] Publish the build\n- [ ] Announce it (
 b=$(fp); R() { ORCHY_HOME="$HR" "$ORCHY" "$@" >/dev/null || fail "reader $*"; }
 R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline; R waiting list; R waiting list --json; R accounts; R accounts --json; R grants; R grants --json; R hold list; R hold list --json; R runbook show rb-r; R goals; R goals --json
 [ "$(fp)" = "$b" ] || fail "a reader changed the home, the ledger or gh.log: $(diff <(echo "$b") <(fp))"
+# the viewers reach no bun: with only the system's tools on PATH they print what a normal run prints, and nothing on stderr
+! env -i PATH=/usr/bin:/bin bash -c 'command -v bun' >/dev/null || fail "bun is in /usr/bin or /bin, so the bun-free reader check proves nothing"
+bare() { env -i PATH=/usr/bin:/bin HOME="$T" ORCHY_HOME="$HR" ORCHY_REPO="$ORCHY_REPO" ORCHY_CAPACITY_ROOT="$ORCHY_CAPACITY_ROOT" \
+  ORCHY_PROFILE_DIR="$ORCHY_PROFILE_DIR" ORCHY_ASKS_DIR="$ORCHY_ASKS_DIR" ORCHY_ACCOUNTS="$ORCHY_ACCOUNTS" "$ORCHY" "$@"; }
+vn='del(.at, .load1, .nproc) | (.asks[]? |= (.age_s = 0))'
+for v in "state --json" "ask list --all --json" "receipt --json --offline"; do read -ra va <<<"$v"
+  w=$(ORCHY_HOME="$HR" "$ORCHY" "${va[@]}" | jq -eS "$vn") && o=$(bare "${va[@]}" 2>&1 | jq -eS "$vn") && [ "$o" = "$w" ] \
+    || fail "$v differs with only /usr/bin:/bin on PATH: $(diff <(echo "$w") <(echo "$o") | head -5)"
+done
 "$ORCHY" state > "$T/st.json"; jq -e --arg g "$g" '.asks | any(.id == $g and .lane == "gone-1" and .has_public) and all(has("text") | not)' "$T/st.json" >/dev/null || fail "state asks: $(jq -c .asks "$T/st.json")"
 grep -q 'Ana' "$T/st.json" && fail "state printed an ask's text"
 "$ORCHY" ask list --json | jq -e --arg g "$g" '.schema == "orchy.asks/1" and (.asks | any(.id == $g and (.text | test("Ana")) and has("held") and has("age_s")))' >/dev/null || fail "ask list --json: $("$ORCHY" ask list --json | head -c 300)"

@@ -50,6 +50,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - run: bun test tests/orchy-release-profile.test.ts
+      - run: bun test tests/orchy-validators.test.ts
 
   smoke-orchy:
     needs: changes

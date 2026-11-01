@@ -1,8 +1,7 @@
 {
   "files": {
     "bin/claude-usage": 2202,
-    "bin/codex-usage": 1068,
-    "skills/start-orchy/scripts/orchy.sh": 1689
+    "bin/codex-usage": 1068
   },
   "functions": {
     "bin/agent-worktree": {
@@ -23,7 +22,6 @@
     "account_home": ["bin/claude-usage", "skills/crew/scripts/crew.sh"],
     "account_rows": ["bin/claude-usage", "bin/codex-usage"],
     "alive_as": ["bin/claude-usage", "skills/crew/scripts/crew.sh"],
-    "append_row": ["bin/agent-worktree", "skills/start-orchy/scripts/orchy.sh"],
     "best_row": ["bin/claude-usage", "bin/codex-usage"],
     "cached_rows": ["bin/claude-usage", "bin/codex-usage"],
     "cleanup": ["tests/live-crew.sh", "tests/smoke-crew.sh"],
@@ -49,19 +47,15 @@
     "key_for": ["bin/claude-usage", "bin/codex-usage"],
     "label_for": ["bin/claude-usage", "bin/codex-usage"],
     "mark_active": ["bin/claude-usage", "bin/codex-usage"],
-    "no": ["skills/start-orchy/scripts/orchy.sh", "tests/mocks/orchy/release/gh"],
-    "now": ["bin/agent-worktree", "skills/start-orchy/scripts/orchy.sh"],
     "ok": ["skills/start-orchy/page/smoke.sh", "tests/live-crew.sh"],
     "pad_cell": ["bin/claude-usage", "bin/codex-usage"],
     "paint_left": ["bin/claude-usage", "bin/codex-usage"],
     "pct_plain": ["bin/claude-usage", "bin/codex-usage"],
     "probe": ["bin/claude-usage", "bin/codex-usage"],
     "proc_start": ["bin/claude-usage", "skills/crew/scripts/crew.sh"],
-    "pstart": ["skills/start-orchy/scripts/orchy.sh", "tests/smoke-claude-usage.sh", "tests/smoke-crew.sh"],
+    "pstart": ["tests/smoke-claude-usage.sh", "tests/smoke-crew.sh"],
     "release_lock": ["bin/claude-usage", "bin/codex-usage"],
     "resolve_dir": ["bin/claude-usage", "bin/codex-usage"],
-    "roster": ["skills/start-orchy/scripts/orchy.sh", "tests/smoke-orchy.sh"],
-    "row": ["skills/start-orchy/scripts/orchy.sh", "tests/smoke-orchy.sh"],
     "snapshot_age": ["bin/claude-usage", "bin/codex-usage"],
     "spawn_refresh": ["bin/claude-usage", "bin/codex-usage"],
     "spent": ["bin/claude-usage", "bin/codex-usage"],
