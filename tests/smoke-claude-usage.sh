@@ -499,11 +499,11 @@ printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add tk-nw > /dev/null 2>&1
 tk=$(mktok nwcut); reply "$tk" 429 "$H-status: rejected" "$H-7d-utilization: 0.5" "$H-7d_oi-utilization: 0.1"
 printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add tk-nwcut > /dev/null 2>&1
 tokacct tk-win 0.0 0.3 0.0 w1
-tk=$(mktok nwbad); reply "$tk" 200 "$H-5h-utilization: none" "$H-7d-utilization: 0.2"
+tk=$(mktok nwbad); reply "$tk" 200 "$H-5h-surpassed-threshold: 0.9" "$H-7d-utilization: 0.2"
 printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add tk-nwbad > /dev/null 2>&1
 mkdir -p "$RK/lg-nwfail"; ahead 2 > "$RK/lg-nwfail/reset"; touch "$RK/lg-nwfail/nosession" "$RK/lg-nwfail/fail"
 nw refresh; nw --json --cached > "$S/nw.json"
-t "no window: never from a 5h header's value, nor from a /usage that failed" sh -c 'grep -q "\"account\":\"tk-nwbad\".*\"session_window\":\"unknown\".*\"week_left_pct\":null," "$1" &&
+t "no window: never beside any 5h header, nor from a /usage that failed" sh -c 'grep -q "\"account\":\"tk-nwbad\".*\"session_window\":\"unknown\".*\"week_left_pct\":null," "$1" &&
   grep -q "\"account\":\"lg-nwfail\".*\"session_window\":\"unknown\".*\"note\":\"no usage data" "$1"' _ "$S/nw.json"
 t "no window: json says none, weeks as read, a window account present" sh -c 'grep -q "\"account\":\"tk-nw\".*\"session_left_pct\":null,\"session_window\":\"none\".*\"week_left_pct\":80,.*\"premium_left_pct\":90" "$1" &&
   grep -q "\"account\":\"lg-nw\".*\"session_window\":\"none\",.*\"week_left_pct\":50," "$1" && grep -q "\"account\":\"tk-win\".*\"session_left_pct\":100,\"session_window\":\"present\"" "$1"' _ "$S/nw.json"

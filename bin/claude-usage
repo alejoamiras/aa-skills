@@ -594,14 +594,14 @@ token_fetch() {
     [[ ${line} =~ ^[0-9]{3}$ ]] && { code=${line}; continue; }
     [[ ${line} =~ ^curl-exit\ ([0-9]+)$ ]] && { cexit=${BASH_REMATCH[1]}; continue; }
     [[ ${line} == *:* ]] || continue
-    n=${line%%:*}; v=${line#*:}
+    n=${line%%:*}; v=${line#*:}; [[ ${n} == anthropic-ratelimit-unified-5h-* ]] && h5=1
     v=${v#"${v%%[![:space:]]*}"}; v=${v%"${v##*[![:space:]]}"}
     case ${n} in
       anthropic-organization-id)                     org=${v} ;;
       anthropic-ratelimit-unified-status)            us=${v} ;;
-      anthropic-ratelimit-unified-5h-utilization)    s=${v} h5=1 ;;
-      anthropic-ratelimit-unified-5h-reset)          sr=${v} h5=1 ;;
-      anthropic-ratelimit-unified-5h-status)         ss=${v} h5=1 ;;
+      anthropic-ratelimit-unified-5h-utilization)    s=${v} ;;
+      anthropic-ratelimit-unified-5h-reset)          sr=${v} ;;
+      anthropic-ratelimit-unified-5h-status)         ss=${v} ;;
       anthropic-ratelimit-unified-7d-utilization)    w=${v} ;;
       anthropic-ratelimit-unified-7d-reset)          wr=${v} ;;
       anthropic-ratelimit-unified-7d-status)         ws=${v} ;;
@@ -611,7 +611,7 @@ token_fetch() {
     esac
   done <<< "${out:-}"
   shopt -u nocasematch
-  ((h5)) || [[ $(frac_left "${w}") == "-" ]] || nowin=1   # no 5h header beside a week: no 5-hour window
+  ((h5)) || [[ $(frac_left "${w}") == "-" ]] || nowin=1   # a week and no 5h header at all, even empty: no window
 
   # A refusal counts whatever else the reply lacks; anything else is ok only
   # from a transfer curl completed, with a 2xx, the week and, if the plan has one, the session.
