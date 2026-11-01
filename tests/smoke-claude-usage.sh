@@ -46,7 +46,7 @@ if [[ " $* " == *" /usage "* ]]; then
   s=$r; [[ -f $CLAUDE_CONFIG_DIR/session ]] && s=$(cat "$CLAUDE_CONFIG_DIR/session")
   z=UTC; [[ -f $CLAUDE_CONFIG_DIR/zone ]] && z=$(cat "$CLAUDE_CONFIG_DIR/zone")
   w=50; [[ -f $CLAUDE_CONFIG_DIR/spent ]] && w=100
-  printf '\nCurrent session: 0%% used · resets %s (%s)\n' "$s" "$z"
+  [[ -f $CLAUDE_CONFIG_DIR/nosession ]] || printf '\nCurrent session: 0%% used · resets %s (%s)\n' "$s" "$z"   # a plan with no 5h window
   printf 'Current week (all models): %s%% used · resets %s (%s)\n' "$w" "$r" "$z"
   printf 'Current week (Fable): 100%% used · resets %s (%s)\n' "$r" "$z"
   exit 0
@@ -486,6 +486,26 @@ t "pairing: an older slot reading never revives a newer spent token" test "$(rkm
 tk=$(mktok bareshow); reply "$tk" 429 "request-id: r"
 printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add bareshow > /dev/null 2>&1
 t "show: a bare 429 prints as refused, unknown numbers, no crash" sh -c '"$@" > "$0" 2>&1 && grep -q "^refused" "$0" && grep -q "Current session: unknown" "$0"' "$S/show.out" env CLAUDE_ACCOUNTS_ROOT="$RK" XDG_CACHE_HOME="$S/cache-r2" "$CU" show bareshow
+
+# No 5-hour window: weekly headers alone, or a /usage with no session line, are a reading ranked on its weeks; the
+# session is none, never 0 or unknown, through the token cache and the snapshot alike.
+RK="$S/nw-root"; mkdir -p "$RK/lg-nw"; ahead 2 > "$RK/lg-nw/reset"; touch "$RK/lg-nw/nosession"
+nw() { env CLAUDE_ACCOUNTS_ROOT="$RK" XDG_CACHE_HOME="$S/cache-nw" "$CU" "$@"; }
+tk=$(mktok nw); reply "$tk" 200 "anthropic-organization-id: org-nw" "$H-status: allowed" "$H-representative-claim: seven_day" \
+  "$H-7d-utilization: 0.2" "$H-7d-reset: $R7" "$H-7d-status: allowed" "$H-7d_oi-utilization: 0.1" "$H-7d_oi-reset: $R7" "$H-7d_oi-status: allowed"
+printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add tk-nw > /dev/null 2>&1
+tk=$(mktok nwcut); reply "$tk" 429 "$H-status: rejected" "$H-7d-utilization: 0.5" "$H-7d_oi-utilization: 0.1"
+printf '%s' "$tk" | CLAUDE_ACCOUNTS_ROOT="$RK" "$CU" add tk-nwcut > /dev/null 2>&1
+tokacct tk-win 0.0 0.3 0.0 w1
+nw refresh; nw --json --cached > "$S/nw.json"
+t "no window: json says none, weeks as read, a window account ok" sh -c 'grep -q "\"account\":\"tk-nw\".*\"session_left_pct\":null,\"session_window\":\"none\".*\"week_left_pct\":80,.*\"premium_left_pct\":90" "$1" &&
+  grep -q "\"account\":\"lg-nw\".*\"session_window\":\"none\",.*\"week_left_pct\":50," "$1" && grep -q "\"account\":\"tk-win\".*\"session_left_pct\":100,\"session_window\":\"ok\"" "$1"' _ "$S/nw.json"
+t "no window: a refusal naming no bucket spends the week, the session stays none" grep -q '"account":"tk-nwcut".*"session_window":"none".*"week_left_pct":0,' "$S/nw.json"
+t "no window: ranked on its weeks, 80/90 above 100/70/100" test "$(nw resolve best 2>/dev/null)" = tk-nw
+t "no window: the status line offers it with its Fable headroom" grep -q 'tk-win fable 100% → tk-nw 90%' <(CLAUDE_CONFIG_DIR="$RK/tk-win" nw statusline)
+nw > "$S/nw.table"; nw show tk-nw > "$S/nw.show"
+t "no window: the table cell reads none, and the legend says why" sh -c 'grep -qE "tk-nw +│[^│]*│ none +│" "$1" && grep -q "session none = no 5-hour window" "$1"' _ "$S/nw.table"
+t "no window: show says the plan has none" grep -qx 'Current session: none (no 5-hour window on this plan)' "$S/nw.show"
 
 # --- account-home config: onboarding seed, prepare, reservations ---------------
 PR="$S/prep-root"; mkdir -p "$PR"/{pa,pb,pd,pe} "$S/trusted/sub" "$S/trusted/sub2" "$S/trusted-evil" "$S/trusted/a#b"

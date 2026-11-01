@@ -55,13 +55,16 @@ acct_view() { # {policy, orchestrator, known, accounts}: one row per roster acco
            elif ($fresh | not) then ["light", (if ($r.week_resets_at | type) == "number" and $r.week_resets_at <= $now
                then "its week reset after the reading" else "the reading is over 2 h old" end)]
            elif ($r.week_left_pct | type) != "number" then ["light", "its week headroom is unknown"]
-           elif ($r.session_left_pct | type) != "number" then ["light", "its session headroom is unknown"]
+           # a plan with no 5-hour window has no session to check
+           elif ($r.session_left_pct | type) != "number" and $r.session_window != "none" then ["light", "its session headroom is unknown"]
            elif $r.week_left_pct < $pol.heavy_floor_pct then ["light", "week \($r.week_left_pct)% is under the \($pol.heavy_floor_pct)% floor", true]
            # like a spent session, a low one counts only until its own reset
-           elif $r.session_left_pct < $pol.heavy_session_floor_pct and (($r.session_resets_at | type) != "number" or $r.session_resets_at > $now)
+           elif ($r.session_left_pct | type) == "number" and $r.session_left_pct < $pol.heavy_session_floor_pct
+             and (($r.session_resets_at | type) != "number" or $r.session_resets_at > $now)
              then ["light", "session \($r.session_left_pct)% is under the \($pol.heavy_session_floor_pct)% floor", true]
            else ["heavy", "week \($r.week_left_pct)% left"] end) as [$v, $why, $floor]
         | {key: $a.key, label: $a.label, verdict: $v, why: $why, floor: ($floor // false), week_left_pct: $r.week_left_pct, session_left_pct: $r.session_left_pct,
+           session_window: $r.session_window,
            week_resets_at: $r.week_resets_at, observed_at: $r.observed_at,
            # the headroom that expires soonest goes first: week left per hour to its reset
            score: (if $v != "no" and $fresh then ($r.week_left_pct // 0) / hrs($r.week_resets_at) else -1 end)}]
@@ -87,10 +90,11 @@ orchy_accounts() {
   need claude-usage; v=$(acct_view) || exit 1; c=$(lead_counts "$v")
   v=$(jq -c --argjson c "$c" '.accounts |= map(. + {heavy_leads: ($c[.key].heavy // 0), light_leads: ($c[.key].light // 0)})' <<<"$v")
   if [ "${1:-}" = --json ]; then jq -c --arg at "$(utc_now)" '{schema: "orchy.headroom/1", at: $at, policy, orchestrator, accounts}' <<<"$v"; exit 0; fi
-  jq -r --argjson now "$(date +%s)" 'def reading: "week \(.week_left_pct // "?")% session \(.session_left_pct // "?")%"
+  jq -r --argjson now "$(date +%s)" 'def reading: "week \(.week_left_pct // "?")% "
+      + (if .session_window == "none" then "no 5h window" else "session \(.session_left_pct // "?")%" end)
       + (if (.week_resets_at | type) != "number" then "" elif .week_resets_at > $now then " resets in \((.week_resets_at - $now) / 3600 | floor)h" else " reset passed" end);
     .policy as $p
-    | "policy: heavy leads need \($p.heavy_floor_pct)% of the week and \($p.heavy_session_floor_pct)% of the session left, light ones any; \($p.heavy_per_account) heavy and \($p.light_per_account) light per account",
+    | "policy: heavy leads need \($p.heavy_floor_pct)% of the week and, where the account has a 5-hour window, \($p.heavy_session_floor_pct)% of the session left, light ones any; \($p.heavy_per_account) heavy and \($p.light_per_account) light per account",
       "orchestrator: \(.orchestrator)  \(.me // {} | reading)",
       (.accounts[] | "\(.label)\(if .key != .label then " (\(.key))" else "" end)  \(.verdict)  \(reading)  leads \(.heavy_leads) heavy \(.light_leads) light  \(.why)")' <<<"$v"
 }

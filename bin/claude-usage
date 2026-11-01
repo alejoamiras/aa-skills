@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # claude-usage — one table of 5h/weekly limits across every Claude subscription
-# you own, without logging in and out.
+# you own, without logging in and out ("none" where a plan has no 5h window).
 #
 # Each account gets its own CLAUDE_CONFIG_DIR, which is what isolates the
 # credential (Claude Code namespaces its keychain entry per config dir). A
@@ -10,9 +10,9 @@
 # Everything reads as headroom LEFT, and rows sort best-account-first for the
 # model CLAUDE_USAGE_MODEL names (default fable): an account with any bucket
 # that model draws on at 0 is unusable; the rest rank by their tightest bucket
-# (session, week, and the model's own weekly bucket when it has one), then by
-# weekly headroom. Accounts with missing measurements follow the measured
-# ones; spent accounts come last, soonest weekly reset first.
+# (session where the plan has one, week, and the model's own weekly bucket when
+# it has one), then by weekly headroom. Accounts with missing measurements
+# follow the measured ones; spent accounts come last, soonest weekly reset first.
 #
 # ~/.claude ("main") is a SLOT, not an account: whatever is logged into it is
 # what a plain `claude` uses, and that changes whenever you log out and back in
@@ -25,7 +25,8 @@
 #
 #   claude-usage                 table for every account
 #   claude-usage --json          machine-readable (statusline, cron); each
-#                                reset also as epoch seconds (*_resets_at, or null)
+#                                reset also as epoch seconds (*_resets_at, or null);
+#                                session_window: ok, unknown, or none (no 5h window)
 #   claude-usage --json --cached the snapshot's rows only: never probes or
 #                                spawns a refresh (exit 1 with no snapshot)
 #   claude-usage run [name|best] [claude args…]
@@ -77,13 +78,14 @@
 #
 # Token accounts: a setup-token is inference-only (no user:profile scope), so
 # /usage cannot read it. Instead ONE 1-token Fable request to api.anthropic.com
-# returns the unified rate-limit headers (5h, 7d, and 7d_oi, the Fable week)
-# plus the organization id. Each attempt, failed ones included, is reused for
-# CLAUDE_USAGE_TTL. It spends a sliver of real quota and, on an idle account,
-# opens its 5h window, so only explicit commands probe: the table, --json,
-# show, best, and resolve/run when a reading is stale; the status line's
-# background refresh reuses cached readings. CLAUDE_USAGE_PROBE_MODEL overrides
-# the model; CLAUDE_USAGE_TOKEN_PROBE=0 turns the probe off.
+# returns the unified rate-limit headers (5h, 7d, and 7d_oi, the Fable week;
+# no 5h ones on a plan without that window) plus the organization id. Each
+# attempt, failed ones included, is reused for CLAUDE_USAGE_TTL. It spends a
+# sliver of real quota and, on an idle account, opens its windows, so only
+# explicit commands probe: the table, --json, show, best, and resolve/run when
+# a reading is stale; the status line's background refresh reuses cached
+# readings. CLAUDE_USAGE_PROBE_MODEL overrides the model;
+# CLAUDE_USAGE_TOKEN_PROBE=0 turns the probe off.
 #
 # Accepted limits: the no-coreutils watchdog bounds the probe but not any
 # grandchild it leaves behind; refreshers can overlap when a late stale-lock
@@ -556,11 +558,8 @@ token_fetch() {
   local key="$1" tok="" out line n v code="" cexit="" body gen tmp f
   local org="-" s="" sr="" ss="" w="" wr="" ws="" p="" pr="" ps="" us="" result=failed reason=""
   gen=$(token_gen "${key}")
-  if ! command -v curl > /dev/null; then
-    token_none "${key}" "curl not on PATH"; return
-  elif [[ ! ${PROBE_MODEL} =~ ^[A-Za-z0-9._-]+$ ]]; then
-    token_none "${key}" "invalid CLAUDE_USAGE_PROBE_MODEL"; return
-  fi
+  command -v curl > /dev/null || { token_none "${key}" "curl not on PATH"; return; }
+  [[ ${PROBE_MODEL} =~ ^[A-Za-z0-9._-]+$ ]] || { token_none "${key}" "invalid CLAUDE_USAGE_PROBE_MODEL"; return; }
   # Subscription OAuth on /v1 wants the Claude Code identity prompt.
   body=$(printf '{"model":"%s","max_tokens":1,"system":"You are Claude Code, Anthropic%ss official CLI for Claude.","messages":[{"role":"user","content":"."}]}' "${PROBE_MODEL}" "'")
   xtrace_off
@@ -612,9 +611,10 @@ token_fetch() {
     esac
   done <<< "${out:-}"
   shopt -u nocasematch
+  [[ -z ${s}${sr}${ss} && $(frac_left "${w}") != "-" ]] && s=none   # no 5h header beside a week: no 5-hour window
 
   # A refusal counts whatever else the reply lacks; anything else is ok only
-  # from a transfer curl completed, with a 2xx and both core buckets.
+  # from a transfer curl completed, with a 2xx, the week and, if the plan has one, the session.
   if [[ ${result} != dead ]]; then
     if [[ ${code} == 401 ]]; then
       result=dead reason="token rejected (HTTP 401) — mint a new one (claude setup-token), then: claude-usage add $(label_for "${key}")"
@@ -626,7 +626,7 @@ token_fetch() {
       reason="transfer failed after HTTP ${code} (curl exit ${cexit:-?})"
     elif [[ ${code} != 2?? ]]; then
       reason="HTTP ${code} from the API"
-    elif [[ $(frac_left "${s}") != "-" && $(frac_left "${w}") != "-" ]]; then
+    elif [[ ${s} == none ]] || [[ $(frac_left "${s}") != "-" && $(frac_left "${w}") != "-" ]]; then
       result=ok
     else
       reason="HTTP ${code} without rate-limit headers"
@@ -636,7 +636,7 @@ token_fetch() {
   for v in ss ws ps; do [[ ${!v} =~ ^[a-z_]+$ ]] || printf -v "${v}" '%s' "-"; done
   for v in sr wr pr; do [[ ${!v} =~ ^[0-9]+$ ]] || printf -v "${v}" '%s' "-"; done
   if [[ ${result} == ok || ${result} == rejected ]]; then
-    s=$(frac_left "${s}"); w=$(frac_left "${w}"); p=$(frac_left "${p}")
+    [[ ${s} == none ]] || s=$(frac_left "${s}"); w=$(frac_left "${w}"); p=$(frac_left "${p}")
     if [[ ${org} != "-" ]]; then
       f=$(token_org_file "${key}")
       printf '%s\t%s\n' "${gen}" "${org}" > "${f}.$$" && mv -f "${f}.$$" "${f}"
@@ -659,16 +659,16 @@ TOKEN_MODE=live
 # A row per account, led by a sort key: "key name email plan s_left s_reset
 # w_left w_reset p_label p_left active org observed s_at w_at p_at note", the
 # three reset epochs "-" when unknown, note last because only it may be empty.
-# A reading's headroom LEFT as "session \t week \t premium", "-" unmeasured. A
-# refused bucket is spent whatever its utilization says, measured or not; a
-# refusal that names none is the whole account refusing. Args: result, then
-# value and status for session, week, premium.
+# A reading's headroom LEFT as "session \t week \t premium", "-" unmeasured, the
+# session "none" on a plan with no 5-hour window. A refused bucket is spent
+# whatever its utilization says; a refusal naming no bucket refuses every bucket
+# the plan has. Args: result, then value and status for session, week, premium.
 token_norm() {
   local r="$1" s="$2" ss="$3" w="$4" ws="$5" p="$6" ps="$7" named=0
   [[ ${ss} == rejected ]] && { s=0; named=1; }
   [[ ${ws} == rejected ]] && { w=0; named=1; }
   [[ ${ps} == rejected ]] && { p=0; named=1; }
-  [[ ${r} == rejected ]] && ((!named)) && { s=0; w=0; p=0; }
+  [[ ${r} == rejected ]] && ((!named)) && { [[ ${s} == none ]] || s=0; w=0; p=0; }
   printf '%s\t%s\t%s\n' "${s}" "${w}" "${p}"
 }
 
@@ -739,14 +739,14 @@ probe() {
       "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${org:--}" "${obs}"
     return
   fi
-  if [[ -z ${usage} || ${usage} != *"Current session:"* ]]; then
+  if [[ ${usage} != *"Current session:"* && ${usage} != *"Current week (all models)"* ]]; then
     printf '%s\t%s\t%s\t%s\t-\t-\t-\t-\t-\t-\t0\t%s\t%s\t-\t-\t-\tno usage data (API-key auth or CLI error)\n' \
       "${NEVER}" "${name}" "${email:--}" "${plan:--}" "${org:--}" "${obs}"
     return
   fi
 
-  line=$(grep -m1 "Current session:" <<< "${usage}")
-  s_left=$(parse_left "${line}"); s_reset=$(parse_reset "${line}")
+  line=$(grep -m1 "Current session:" <<< "${usage}")   # absent on a plan with no 5-hour window
+  s_left=none; [[ -z ${line} ]] || s_left=$(parse_left "${line}"); s_reset=$(parse_reset "${line}")
   # A bare hour is read on the day of the observation, never of a later reader.
   s_at=$(clause_epoch "${line}" session_epoch "${s_reset}" "${obs}")
   [[ ${s_at} != "-" ]] && ((s_at > obs && s_at <= obs + SESSION_WINDOW)) || s_at="-"
@@ -844,7 +844,7 @@ rank_rows() {
   awk -F'\t' -v OFS='\t' -v t="$(lower "${TARGET_MODEL}")" -v pf="$(lower "${PREMIUM_LABEL}")" '
     function num(x) { return x ~ /^[0-9]+$/ }
     NF {
-      sl = $5; wl = $7; pl = tolower($9); pv = $10
+      sl = ($5 == "none" ? 100 : $5); wl = $7; pl = tolower($9); pv = $10   # no 5-hour window: no session limit
       req = ""
       if (index(t, pf)) req = pf
       else if (pl != "-" && pl != "" && index(t, pl)) req = pl
@@ -915,11 +915,11 @@ gather() {
 }
 
 pct_plain() {
-  if [[ $1 == "-" ]]; then printf -- '-'; else printf '%s%%' "$1"; fi
+  if [[ $1 == "-" || $1 == none ]]; then printf '%s' "$1"; else printf '%s%%' "$1"; fi
 }
 
 pct_paint() {
-  if [[ $1 == "-" ]]; then printf '%s-%s' "${DIM}" "${RST}"; else paint_left "$1"; fi
+  if [[ $1 == "-" || $1 == none ]]; then printf '%s%s%s' "${DIM}" "$1" "${RST}"; else paint_left "$1"; fi
 }
 
 # A 5h reset as an epoch, read as of the anchor. The CLI may print a bare time ("1am"): it is the
@@ -969,7 +969,7 @@ table() {
   rows=$(gather) || exit 1
 
   local -a n_c=() p_c=() s_pl=() s_pa=() w_pl=() w_pa=() x_pl=() x_pa=() notes=()
-  local plabel="PREMIUM" when days why tokens=0 dead_alias
+  local plabel="PREMIUM" when days why tokens=0 nowin=0 dead_alias
   # The roster row the slot would have been, had its credential worked.
   dead_alias=$(awk -F'\t' '
     $2 == "main" { me = $3; mo = $12; personal = ($4 == "max" || $4 == "pro") }
@@ -1019,7 +1019,7 @@ table() {
     fi
     p_c+=("${plan}")
     swhen=$(session_when "${sr}")
-    spct=$(pct_plain "${sl}")
+    spct=$(pct_plain "${sl}"); [[ ${sl} == none ]] && nowin=1
     if [[ -z ${swhen} ]]; then
       s_pl+=("$(printf '%4s' "${spct}")")
       s_pa+=("$(printf '%*s%s' "$((4 - ${#spct}))" "" "$(pct_paint "${sl}")")")
@@ -1065,12 +1065,10 @@ table() {
   done
   hrule "└" "┴" "┘" "${w0}" "${w1}" "${w2}" "${w3}" "${w4}"
 
-  if [[ -n ${GRN} ]]; then
-    printf '%s  ▶ = active in ~/.claude · all values = %% LEFT   %sgreen >50%s %s· %syellow ≤50%s %s· %sred ≤15%s\n' \
-      "${DIM}" "${GRN}" "${RST}${DIM}" "${DIM}" "${YEL}" "${RST}${DIM}" "${DIM}" "${RED}" "${RST}"
-  else
-    printf '  ▶ = active in ~/.claude · all values = %% LEFT\n'
-  fi
+  local legend="  ▶ = active in ~/.claude · all values = % LEFT"
+  ((nowin)) && legend+=" · session none = no 5-hour window"
+  [[ -n ${GRN} ]] && legend="${DIM}${legend}   ${GRN}green >50${RST}${DIM} · ${YEL}yellow ≤50${RST}${DIM} · ${RED}red ≤15${RST}"
+  printf '%s\n' "${legend}"
   ((tokens)) && notes+=("token rows: a setup-token cannot read /usage; numbers come from the rate-limit headers of a 1-token Fable request, at most once per ${TTL}s")
   local n
   ((${#notes[@]})) || return 0
@@ -1084,7 +1082,7 @@ table() {
 json_num() { if [[ $1 =~ ^[1-9][0-9]*$ ]]; then printf '%s' "$1"; else printf null; fi; }
 
 json() {
-  local rows first=1 key name email plan sl sr wl wr pl pv active org obs sa wa pa note days
+  local rows first=1 key name email plan sl sr wl wr pl pv active org obs sa wa pa note days win
   if [[ ${1:-} == cached ]]; then
     rows=$(snapshot_rows) || die "no snapshot yet: run claude-usage refresh"
   else
@@ -1100,9 +1098,10 @@ json() {
       days=$(token_days_left "$(key_for "${name}")")
       [[ ${days} =~ ^-?[0-9]+$ ]] || days=null
     fi
-    printf '\n  {"account":"%s","active":%s,"email":"%s","plan":"%s","session_left_pct":%s,"session_resets":"%s","week_left_pct":%s,"week_resets":"%s","premium_model":"%s","premium_left_pct":%s,"token_days_left":%s,"observed_at":%s,"session_resets_at":%s,"week_resets_at":%s,"premium_resets_at":%s,"note":"%s"}' \
+    if [[ ${sl} =~ ^[0-9]+$ ]]; then win=ok; elif [[ ${sl} == none ]]; then win=none sl=null; else win=unknown sl=null; fi
+    printf '\n  {"account":"%s","active":%s,"email":"%s","plan":"%s","session_left_pct":%s,"session_window":"%s","session_resets":"%s","week_left_pct":%s,"week_resets":"%s","premium_model":"%s","premium_left_pct":%s,"token_days_left":%s,"observed_at":%s,"session_resets_at":%s,"week_resets_at":%s,"premium_resets_at":%s,"note":"%s"}' \
       "$(jq_str "${name}")" "$([[ ${active} == 1 ]] && printf true || printf false)" "$(jq_str "${email}")" "$(jq_str "${plan}")" \
-      "${sl//-/null}" "$(jq_str "${sr}")" "${wl//-/null}" "$(jq_str "${wr}")" \
+      "${sl}" "${win}" "$(jq_str "${sr}")" "${wl//-/null}" "$(jq_str "${wr}")" \
       "$(jq_str "${pl}")" "${pv//-/null}" "${days}" "$(json_num "${obs}")" \
       "$(json_num "${sa}")" "$(json_num "${wa}")" "$(json_num "${pa}")" "$(jq_str "${note}")"
   done <<< "${rows}"
@@ -1456,7 +1455,8 @@ cmd_show() {
     local ns nw np
     IFS=$'\t' read -r ns nw np < <(token_norm "${result}" "${sl}" "${ss}" "${wl}" "${ws}" "${pv}" "${ps}")
     [[ ${ns} == 0 || ${nw} == 0 || ${np} == 0 ]] && printf 'refused or spent: not usable until a bucket resets\n'
-    printf 'Current session: %s · resets %s (%s)\n' "$(pct_used "${sl}")" "$(fmt_reset "${sr}")" "${ss}"
+    if [[ ${sl} == none ]]; then printf 'Current session: none (no 5-hour window on this plan)\n'
+    else printf 'Current session: %s · resets %s (%s)\n' "$(pct_used "${sl}")" "$(fmt_reset "${sr}")" "${ss}"; fi
     printf 'Current week (all models): %s · resets %s (%s)\n' "$(pct_used "${wl}")" "$(fmt_reset "${wr}")" "${ws}"
     printf 'Current week (%s): %s · resets %s (%s)\n' "${PREMIUM_LABEL}" "$(pct_used "${pv}")" "$(fmt_reset "${pr}")" "${ps}"
     printf '(rate-limit headers of a 1-token request, %ss ago; organization %s)\n' "$(($(date +%s) - obs))" "$(token_org "${k}")"
@@ -1856,7 +1856,7 @@ describe() {
     [[ ${name} == "${want}" ]] || continue
     [[ -n ${note} ]] && { printf '%s' "${note}"; return; }
     [[ ${wr} == idle ]] && { printf 'idle, everything left'; return; }
-    [[ ${sl} != "-" ]] && out="5h ${sl}%"
+    case ${sl} in -) ;; none) out="no 5h window" ;; *) out="5h ${sl}%" ;; esac
     [[ ${wl} != "-" ]] && out="${out:+${out} · }week ${wl}%"
     [[ ${pv} != "-" ]] && out="${out:+${out} · }$(lower "${pl}") ${pv}%"
     printf '%s' "${out:+${out} left}"

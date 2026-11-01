@@ -8,8 +8,8 @@
       "cmd_new": 88
     },
     "bin/claude-usage": {
-      "token_fetch": 98,
-      "table": 115
+      "token_fetch": 96,
+      "table": 113
     },
     "skills/crew/scripts/crew.sh": {
       "cmd_spawn": 102

@@ -758,6 +758,9 @@ LK state | jq -e '.caps == null' >/dev/null || fail "state read a symlinked poli
 jq 'map(if .account == "p-bravo" then .session_left_pct = 10 else . end)' "$CA/rows.json" > "$T/r.json" && mv "$T/r.json" "$CA/rows.json"
 o=$(AC launch acc-a8 acc p-bravo 2>&1 || true); grep -qF 'p-bravo takes light leads only: session 10% is under the 30% floor' <<<"$o" || fail "a heavy launch on a low session: $o"
 AC launch --light acc-a8 acc p-bravo >/dev/null || fail "a light launch on a low session"; cu_rows
+# the session counts only where the account has a 5-hour window: none is heavy on its week, an unread session still light
+jq 'map(if .account == "p-bravo" then .session_left_pct = null | .session_window = "none" elif .account == "p-alpha" then .session_left_pct = null else . end)' "$CA/rows.json" > "$T/r.json" && mv "$T/r.json" "$CA/rows.json"
+AC accounts --json | jq -e '(.accounts | map({(.key): [.verdict, .why]}) | add) as $v | $v["p-alpha"] == ["light", "its session headroom is unknown"] and $v["p-bravo"] == ["heavy", "week 60% left"]' >/dev/null && AC accounts | grep -q '^p-bravo  heavy  week 60% no 5h window ' || fail "an account with no 5-hour window: $(AC accounts)"; cu_rows
 # the seat: only its holder spawns; two programs racing for an account's last heavy slot take that one and the next
 for f in "$HA"/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/null || true; done; sleep 1
 for k in r0 r1 r2; do printf 'You are a subagent.\n' > "$HA/prompts/acc-$k.md"; done
