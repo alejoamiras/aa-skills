@@ -1532,7 +1532,7 @@ teardown)
     local h; h=$(holds_read) || { echo "$s: torn down, but holds.json is unreadable, so lane:$s may still hold"; exit 1; }
     jq -e --arg r "lane:$s" 'any(.holds[]; .ref == $r)' <<<"$h" >/dev/null || return 0
     "$0" hold "done" "lane:$s" || { echo "$s: torn down, but its hold remains (ORCHY hold done lane:$s)"; exit 1; }; }
-  [ -d "$W" ] || { echo "$s: no worktree dir"; (cd "$ROOT" && agent-worktree done "$q" --forget 2>&1 | tail -1); end_hold; exit 0; }
+  [ -d "$W" ] || { echo "$s: no worktree dir"; (cd "$ROOT" && agent-worktree "done" "$q" --forget 2>&1 | tail -1); end_hold; exit 0; }
   # a lead belongs to the lane whose worktree it runs in (launch starts it there), whatever its key
   wr=$(realpath -m "$W")
   lead_rows | while read -r k _ _ p; do c=$(readlink "/proc/$p/cwd" 2>/dev/null) || continue; { [ "$c" = "$wr" ] || [ "${c#"$wr"/}" != "$c" ]; } && echo "$k"; done | grep -q . && { echo "$s: a lead of this lane is alive; refusing"; exit 4; }
@@ -1542,14 +1542,14 @@ teardown)
   if [ -e "$bf" ] || [ -L "$bf" ]; then base=$( [ -f "$bf" ] && [ ! -L "$bf" ] && head -n 1 "$bf")
     { [ "$base" = "$TRUNK" ] || jq -e --arg b "$base" '(.merge.branches // {}) | has($b)' "$CFG" >/dev/null; } && ref_ok "$base" \
       || { echo "$s: wt/$s.base names neither the trunk nor a merge.branches base; refusing"; exit 2; }; fi
-  if out=$(cd "$ROOT" && agent-worktree done "$q" --merged --trunk "$base" 2>&1); then echo "$out" | tail -2; end_hold; exit 0; fi
+  if out=$(cd "$ROOT" && agent-worktree "done" "$q" --merged --trunk "$base" 2>&1); then echo "$out" | tail -2; end_hold; exit 0; fi
   echo "$out" | grep -qi 'refus' || { echo "$s: agent-worktree failed: $(echo "$out" | tail -1)"; exit 5; }
   # the squash proof can fail after a later PR rewrote a file the squash carried; a HEAD that IS a merged PR's head is proof enough, when the config allows a hand removal
   [ "$(cfg '.teardown.hand_remove // false')" = true ] || { echo "$out" | tail -2; echo "$s: hand removal is off (teardown.hand_remove); relay the refusal"; exit 2; }
   pr=$(gh pr list --repo "$REPO" --head "$b" --state merged --json number,headRefOid,baseRefName --jq ".[] | select(.headRefOid==\"$head\" and .baseRefName==\"$base\") | .number" | head -1)
   [ -n "$pr" ] || { echo "$s: HEAD $head is not the head of a PR merged into $base from $b; refusing"; exit 2; }
   (cd "$ROOT" && git worktree remove --force "$W" && git branch -D "$b" >/dev/null) || { echo "$s: hand removal failed; the lane's hold stays"; exit 5; }
-  (cd "$ROOT" && agent-worktree done "$q" --forget >/dev/null 2>&1; git worktree prune); echo "$s: hand-removed (branch $b at $head = merged PR #$pr)"; end_hold;;
+  (cd "$ROOT" && agent-worktree "done" "$q" --forget >/dev/null 2>&1; git worktree prune); echo "$s: hand-removed (branch $b at $head = merged PR #$pr)"; end_hold;;
 receipt)
   js=0; off=0; want=""; for o in "$@"; do case "$o" in --json) js=1;; --offline) off=1;; *) want=$o;; esac; done
   [ $off = 1 ] || need gh

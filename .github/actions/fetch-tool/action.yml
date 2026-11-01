@@ -1,0 +1,30 @@
+name: fetch-tool
+description: Puts one binary from a release archive on PATH, only once the archive matches its pinned sha256.
+inputs:
+  url:
+    description: Release archive (.zip, .tar.gz or .tar.xz) at a fixed version
+    required: true
+  sha256:
+    description: The archive's sha256
+    required: true
+  binary:
+    description: The binary's path inside the archive
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        URL: ${{ inputs.url }}
+        SHA256: ${{ inputs.sha256 }}
+        BINARY: ${{ inputs.binary }}
+      run: |
+        d=$(mktemp -d "$RUNNER_TEMP/tool.XXXXXX")
+        curl -fsSL --retry 3 -o "$d/archive" "$URL"
+        echo "$SHA256  $d/archive" | sha256sum -c -
+        case $URL in
+          *.zip) unzip -q "$d/archive" "$BINARY" -d "$d" ;;
+          *) tar -xf "$d/archive" -C "$d" "$BINARY" ;;
+        esac
+        rm "$d/archive"
+        dirname "$d/$BINARY" >> "$GITHUB_PATH"

@@ -60,9 +60,35 @@ Codex reads `~/.codex/AGENTS.md`; Claude Code reads only `~/.claude/CLAUDE.md` b
 
 Create `skills/<name>/SKILL.md` in this repo, rerun `./install.sh`, commit + push. Both harnesses read the same `name` + `description` frontmatter and tolerate the other's optional fields (Claude Code's `allowed-tools` / `effort` / `context`, Codex's optional `agents/openai.yaml`).
 
+## Checks
+
+Every PR runs one workflow per area. Each skips its jobs when the PR touches none of its paths (a manual run from the Actions tab runs everything) and ends in a `<workflow>-status` job, the check to require.
+
+| Workflow | Runs | Triggered by |
+|---|---|---|
+| `shell` | shellcheck at warning severity over every shell file, the size budgets, and a check that every smoke and bun test runs in some workflow | any change (a shell file is known by its shebang, whatever its name) |
+| `actionlint` | actionlint | `.github/` |
+| `gitleaks` | secret scan of the commits the PR or push adds | every PR, and pushes to `main` |
+| `agent-worktree`, `claude-usage`, `crew`, `keyed`, `start-orchy` | that area's smokes, plus `start-orchy`'s bun test | that area's files |
+
+**Budgets.** A shell file may not grow past 800 lines, a function past 80, and a function name may live in only one file: code two scripts share belongs in a library both source. `checks/budget.json` records today's offenders at their current size, and they can only shrink. A record looser than the code also fails, so a change that shrinks an offender lowers its record in the same PR: `bun checks/budget.ts --write` lowers or drops entries and never raises or adds one. On a PR, CI also compares the record with the base branch's and fails any entry added or raised.
+
+Locally, from the repo root (needs shellcheck, actionlint, bun 1.4+, jq and python3; `crew` needs tmux, `keyed` needs strace and, for its bash 3.2 pass, docker with the `bash:3.2` image):
+
+```sh
+checks/shellcheck.sh
+bun checks/budget.ts --base origin/main
+bun test tests/
+checks/wired.sh
+actionlint
+bash tests/smoke-<area>.sh    # one at a time
+```
+
+CI never runs `tests/smoke-memo-guard.sh` (it tests the private `claude/` submodule) or `tests/live-*.sh` (they use real accounts and repositories).
+
 ## Secret hygiene
 
 - `hooks/pre-commit` runs `gitleaks` on staged changes (wired by `install.sh`).
-- CI runs gitleaks over full history on every push/PR.
+- CI runs gitleaks over the commits each PR and each push to `main` adds.
 - GitHub secret scanning + push protection enabled on the remote.
 - No transcripts, history, `settings.local.json`, or credentials are ever tracked here.

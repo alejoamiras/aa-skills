@@ -1,0 +1,75 @@
+{
+  "files": {
+    "bin/claude-usage": 2202,
+    "bin/codex-usage": 1068,
+    "skills/start-orchy/scripts/orchy.sh": 1689
+  },
+  "functions": {
+    "bin/agent-worktree": {
+      "cmd_new": 88,
+      "cmd_done": 178
+    },
+    "bin/claude-usage": {
+      "token_fetch": 98,
+      "table": 115
+    },
+    "skills/crew/scripts/crew.sh": {
+      "cmd_spawn": 102
+    }
+  },
+  "duplicates": {
+    "A": ["tests/live-orchy-release.sh", "tests/smoke-orchy-release.sh", "tests/smoke-orchy.sh"],
+    "T": ["skills/crew/scripts/crew.sh", "tests/smoke-crew.sh"],
+    "account_home": ["bin/claude-usage", "skills/crew/scripts/crew.sh"],
+    "account_rows": ["bin/claude-usage", "bin/codex-usage"],
+    "alive_as": ["bin/claude-usage", "skills/crew/scripts/crew.sh"],
+    "append_row": ["bin/agent-worktree", "skills/start-orchy/scripts/orchy.sh"],
+    "best_row": ["bin/claude-usage", "bin/codex-usage"],
+    "cached_rows": ["bin/claude-usage", "bin/codex-usage"],
+    "cleanup": ["tests/live-crew.sh", "tests/smoke-crew.sh"],
+    "cmd_add": ["bin/claude-usage", "bin/codex-usage"],
+    "cmd_best": ["bin/claude-usage", "bin/codex-usage"],
+    "cmd_list": ["bin/agent-worktree", "bin/claude-usage", "bin/codex-usage"],
+    "cmd_refresh": ["bin/claude-usage", "bin/codex-usage"],
+    "cmd_remove": ["bin/claude-usage", "bin/codex-usage"],
+    "cmd_rename": ["bin/claude-usage", "bin/codex-usage"],
+    "cmd_show": ["bin/claude-usage", "bin/codex-usage"],
+    "cmd_status": ["bin/agent-worktree", "bin/env-exec"],
+    "cmd_statusline": ["bin/claude-usage", "bin/codex-usage"],
+    "current_account": ["bin/claude-usage", "bin/codex-usage"],
+    "die": ["bin/agent-worktree", "bin/claude-usage", "bin/codex-usage", "bin/send-to-mac", "skills/crew/scripts/crew.sh"],
+    "drop_label": ["bin/claude-usage", "bin/codex-usage"],
+    "fail": ["skills/start-orchy/page/smoke.sh", "tests/live-orchy-release.sh", "tests/smoke-orchy-release.sh", "tests/smoke-orchy.sh"],
+    "fp": ["tests/smoke-orchy-release.sh", "tests/smoke-orchy.sh"],
+    "gather": ["bin/claude-usage", "bin/codex-usage"],
+    "hrule": ["bin/claude-usage", "bin/codex-usage"],
+    "jq_str": ["bin/claude-usage", "bin/codex-usage"],
+    "json": ["bin/claude-usage", "bin/codex-usage"],
+    "json_num": ["bin/claude-usage", "bin/codex-usage"],
+    "key_for": ["bin/claude-usage", "bin/codex-usage"],
+    "label_for": ["bin/claude-usage", "bin/codex-usage"],
+    "mark_active": ["bin/claude-usage", "bin/codex-usage"],
+    "no": ["skills/start-orchy/scripts/orchy.sh", "tests/mocks/orchy/release/gh"],
+    "now": ["bin/agent-worktree", "skills/start-orchy/scripts/orchy.sh"],
+    "ok": ["skills/start-orchy/page/smoke.sh", "tests/live-crew.sh"],
+    "pad_cell": ["bin/claude-usage", "bin/codex-usage"],
+    "paint_left": ["bin/claude-usage", "bin/codex-usage"],
+    "pct_plain": ["bin/claude-usage", "bin/codex-usage"],
+    "probe": ["bin/claude-usage", "bin/codex-usage"],
+    "proc_start": ["bin/claude-usage", "skills/crew/scripts/crew.sh"],
+    "pstart": ["skills/start-orchy/scripts/orchy.sh", "tests/smoke-claude-usage.sh", "tests/smoke-crew.sh"],
+    "release_lock": ["bin/claude-usage", "bin/codex-usage"],
+    "resolve_dir": ["bin/claude-usage", "bin/codex-usage"],
+    "roster": ["skills/start-orchy/scripts/orchy.sh", "tests/smoke-orchy.sh"],
+    "row": ["skills/start-orchy/scripts/orchy.sh", "tests/smoke-orchy.sh"],
+    "snapshot_age": ["bin/claude-usage", "bin/codex-usage"],
+    "spawn_refresh": ["bin/claude-usage", "bin/codex-usage"],
+    "spent": ["bin/claude-usage", "bin/codex-usage"],
+    "t": ["tests/smoke-agent-worktree.sh", "tests/smoke-claude-usage.sh", "tests/smoke-crew.sh", "tests/smoke-keyed.sh"],
+    "table": ["bin/claude-usage", "bin/codex-usage"],
+    "tn": ["tests/smoke-agent-worktree.sh", "tests/smoke-claude-usage.sh", "tests/smoke-crew.sh", "tests/smoke-keyed.sh"],
+    "usage": ["bin/agent-worktree", "skills/start-orchy/scripts/orchy.sh"],
+    "valid_name": ["bin/claude-usage", "bin/codex-usage"],
+    "w": ["tests/smoke-orchy-release.sh", "tests/smoke-orchy.sh"]
+  }
+}
