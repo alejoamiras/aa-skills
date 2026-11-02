@@ -42,10 +42,31 @@ link() {
   echo "link    ${dst} -> ${src}"
 }
 
+# A skill with a `platforms` file (`uname -s` names, one per line) installs only
+# on those. Elsewhere its links from this repo are removed, so a harness never
+# lists a skill that cannot run on the machine.
+OS="$(uname -s)"
+unlink_ours() {
+  local dst="$1" name="$2"
+  [ -L "${dst}" ] || return 0
+  case "$(readlink "${dst}")" in
+    "${REPO_DIR}/skills/${name}"|"${REPO_REAL}/skills/${name}")
+      rm "${dst}"
+      echo "prune   ${dst} (not for ${OS})"
+      ;;
+  esac
+}
+
 # Same SKILL.md, two discovery roots: Claude Code reads ~/.claude/skills, Codex
 # reads ~/.agents/skills (neither reads the other's). Both follow symlinks.
 for skill in "${REPO_DIR}"/skills/*/; do
   name="$(basename "${skill%/}")"
+  if [ -f "${skill}platforms" ] && ! grep -qxF "${OS}" "${skill}platforms"; then
+    unlink_ours "${CLAUDE_DIR}/skills/${name}" "${name}"
+    unlink_ours "${AGENTS_DIR}/skills/${name}" "${name}"
+    echo "skip    ${name} ($(paste -sd, "${skill}platforms") only)"
+    continue
+  fi
   link "${REPO_DIR}/skills/${name}" "${CLAUDE_DIR}/skills/${name}"
   link "${REPO_DIR}/skills/${name}" "${AGENTS_DIR}/skills/${name}"
 done

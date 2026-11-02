@@ -1,0 +1,69 @@
+name: install
+
+on:
+  workflow_dispatch:
+  pull_request: # no branches: filter: a stacked PR targets its parent branch, not main
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      relevant: ${{ steps.override.outputs.relevant || steps.filter.outputs.relevant }}
+    steps:
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        if: github.event_name != 'workflow_dispatch'
+        id: filter
+        with:
+          filters: |
+            relevant:
+              - 'install.sh'
+              - 'skills/*/platforms'
+              - 'tests/smoke-install.sh'
+              - 'tests/**'
+              - 'checks/**'
+              - '.github/workflows/install.yml'
+      - name: Override for manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        id: override
+        run: echo "relevant=true" >> "$GITHUB_OUTPUT"
+
+  smoke:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash tests/smoke-install.sh
+
+  smoke-macos:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # bash 3.2 and the BSD userland only, as on a fresh Mac: no Homebrew coreutils, flock, timeout or bash 5.
+      - run: checks/stock-macos.sh -- bash tests/smoke-install.sh
+
+  install-status:
+    needs: [changes, smoke, smoke-macos]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Fail when a job failed or was cancelled
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
