@@ -110,6 +110,7 @@ describe("harden.findings/1", () => {
     const edits: [string, string, RegExp][] = [
       ["### [High] F-001:", "### [Severe] F-001:", /F-001's label \[Severe\] is not critical, high, medium, low/],
       ["### [High] F-001: Upload", "### F-001 Upload", /a finding's heading is/],
+      ["### [High] F-001:", "### [Potential\tHigh] F-001:", /heading carries a control, line separator or bidi character/],
       ["## Already tracked", "## Findings", /a second "## Findings" section/],
       ["### [Medium] F-003:", "### [Medium] F-001:", /F-001 is headed twice/],
       ["## Already tracked", "## Already Tracked", /F-003 has no "### \[<impact>\] F-003: <title>" heading under ## Already tracked/],
@@ -127,6 +128,22 @@ describe("harden.findings/1", () => {
     expect(() => write("audit/security/" + CUR, file(ENTRIES))).toThrow(/must be an absolute path/);
     symlinkSync(runDir(r), runDir(r, "2026-11-03-0900-link"));
     expect(() => write(runDir(r, "2026-11-03-0900-link"), file(ENTRIES))).toThrow(/is not a directory \(a symlink is refused\)/);
+    // a symlinked directory above the first file would anchor the symbol outside the tree
+    const away = join(T, `away${n++}`);
+    mkdirSync(away);
+    writeFileSync(join(away, "x.ts"), "join(UPLOAD_DIR, name)\n");
+    symlinkSync(away, join(r, "lib"));
+    expect(() => write(runDir(r), file(with1({ files: ["lib/x.ts"] })))).toThrow(/first file "lib\/x\.ts" lies under a symlink or a file/);
+  });
+
+  test("write refuses a findings.json over the limit its readers hold it to, and leaves none", () => {
+    const r = tree(), files = Array.from({ length: 64 }, (_, i) => `deep/${"x".repeat(110)}${i}.ts`), ids = Array.from({ length: 500 }, (_, i) => `F-${i + 1}`);
+    mkdirSync(join(r, "deep"));
+    for (const f of files) writeFileSync(join(r, f), "sink()\n");
+    writeFileSync(join(runDir(r), "report.md"), `## Findings\n\n${ids.map((id) => `### [Low] ${id}: Finding ${id}\n`).join("\n")}`);
+    const big = { scope: ["."], findings: ids.map((id) => ({ id, category: "CWE-20", files, symbol: "sink()", confidence: "low" })) };
+    expect(() => write(runDir(r), file(big))).toThrow(/findings\.json would be over 4194304 bytes/);
+    expect(() => lstatSync(join(runDir(r), "findings.json"))).toThrow();
   });
 
   test("a planted report link or FIFO refuses at once; a planted findings.json link is replaced, its target untouched", () => {

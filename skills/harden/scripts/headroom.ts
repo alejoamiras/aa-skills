@@ -1,7 +1,7 @@
 // A harden run's account headroom, from claude-usage's cached snapshot only (`--json --cached`, then `current` and
-// `list`, which never probe once a snapshot exists). `gate` judges this session's account before Phase 1; `fanout`
-// deals Phase 2's Claude cluster agents over the roster accounts with headroom, this session's account last. The
-// floors and the 2-hour life of a reading mirror orchy's heavy-lead defaults (accounts.sh acct_view).
+// `list`, which never probe once a snapshot exists): `gate` judges this session's account, `fanout` deals the Claude
+// cluster agents over the roster accounts with headroom, this session's account last. The floors and the 2-hour life
+// of a reading mirror orchy's heavy-lead defaults (accounts.sh acct_view).
 // Usage (through run.sh):
 //   gate --model <alias>      prints "ok: …" (exit 0) or "stop: …" (exit 1)
 //   fanout --model <alias> [--passes 1|2] [--exclude-from <file>] <cluster>…
@@ -11,7 +11,7 @@ import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 
 export const WEEK_FLOOR = 25, SESSION_FLOOR = 30;
 const FRESH_S = 7200, CU_TIMEOUT_MS = 20_000, EXCLUDE_MAX = 64 << 10;
-const MODEL = /^[a-z][a-z0-9.-]{0,39}$/, CLUSTER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$/;
+const MODEL = /^[a-z][a-z0-9.-]{0,39}$/, CLUSTER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, NAME = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$/;
 
 /** One row of `claude-usage --json --cached`: percentages left, resets and readings in epoch seconds, null when unknown. */
 export type Row = { account: string; email: string; session_left_pct: number | null; session_window: string; week_left_pct: number | null;
@@ -49,7 +49,6 @@ export function judge(r: Row | undefined, model: string, now: number): string | 
   return null;
 }
 
-/** The gate's one line for this session's row. */
 export function gateLine(r: Row | undefined, model: string, now: number): { ok: boolean; line: string } {
   const why = judge(r, model, now);
   if (why !== null) {
@@ -67,22 +66,25 @@ export function gateLine(r: Row | undefined, model: string, now: number): { ok: 
   return { ok: true, line: `ok: ${and(left)} left (${f}${also}), read ${age(now - (row.observed_at as number))} ago` };
 }
 
-/** Phase 2's Claude slots dealt round-robin, cluster-major: eligible roster accounts in the snapshot's rank order, this
- *  session's last. `never` null means the exclusion list could not be read, so no other account is used. */
+/** Slots dealt round-robin, cluster-major: eligible roster accounts in the snapshot's rank order, this session's last.
+ *  An account sharing an email with an excluded one, this session or one already dealt is the same account. `never`
+ *  null means the exclusion list could not be read, so no other account is used. */
 export function plan(o: { rows: Row[]; roster: Account[]; current: string; never: string[] | null; model: string; clusters: string[]; passes: number;
   now: number }): { slots: Slot[]; methodology: string } {
   const keyOf = (name: string) => o.roster.find((a) => a.label === name || a.key === name)?.key ?? name;
   const never = new Set((o.never ?? []).map(keyOf)), me = o.rows.find((r) => r.account === o.current), meKey = keyOf(o.current);
   const email = (r: Row | undefined) => (r && r.email !== "" && r.email !== "-" ? r.email.toLowerCase() : null);
+  const barred = new Set(o.rows.filter((r) => never.has(keyOf(r.account))).map(email).filter((e) => e !== null));
+  const out = (r: Row) => never.has(keyOf(r.account)) || barred.has(email(r) as string) || judge(r, o.model, o.now) !== null;
   const taken = new Set([email(me)].filter((e) => e !== null)), rotation: { key: string | null; row: Row }[] = [];
   if (o.never !== null) for (const r of o.rows) {
     const a = o.roster.find((x) => x.label === r.account), e = email(r);
-    if (!a || a.key === meKey || never.has(a.key) || judge(r, o.model, o.now) !== null || (e !== null && taken.has(e))) continue;
+    if (!a || a.key === meKey || out(r) || (e !== null && taken.has(e))) continue;
     if (e !== null) taken.add(e);
     rotation.push({ key: a.key, row: r });
   }
   const others = rotation.length;
-  if (me && !never.has(meKey) && judge(me, o.model, o.now) === null) rotation.push({ key: null, row: me });
+  if (me && !out(me)) rotation.push({ key: null, row: me });
   const all = o.clusters.flatMap((cluster) => Array.from({ length: o.passes }, (_, i) => ({ cluster, pass: i + 1 })));
   const floors = and([`${WEEK_FLOOR}% of the week`, `${SESSION_FLOOR}% of a 5-hour window`, ...(isFable(o.model) ? [`${WEEK_FLOOR}% of the Fable week`] : [])]);
   if (others === 0) {

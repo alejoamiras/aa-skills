@@ -100,10 +100,11 @@ export function fingerprint(focus: Focus, cat: string, primary: string, symbol: 
 }
 
 const impactOf = (focus: Focus, label: string) => {
-  const b = label.toLowerCase().replace(/^potential\s+/, "");
+  const b = label.toLowerCase().replace(/^potential /, "");
   return BUCKETS[focus].includes(b) ? b : null;
 };
 function parseHeading(focus: Focus, t: string, where: string): Heading {
+  text(t, `${where}: a finding's heading`, 300);
   const m = HEADING.exec(t) ?? no(`${where}: a finding's heading is "### [<impact>] <id>: <title>", not ${show(t)}`);
   const [, label, id, title] = m;
   text(title, `${where}: ${id}'s title`, 200);
@@ -136,11 +137,10 @@ export function headings(focus: Focus, md: string): { findings: Map<string, Head
   return out;
 }
 
-type Ref = "none" | "required" | "optional";
-const allowed = (ref: Ref) => (ref === "none" ? ENTRY_KEYS.filter((k) => k !== "ref") : ENTRY_KEYS);
+type Ref = "required" | "optional";
 function draftEntry(focus: Focus, v: unknown, what: string, ref: Ref): Draft {
   if (!isObj(v)) return no(`${what} is not an object`);
-  keys(v, what, allowed(ref));
+  keys(v, what, ENTRY_KEYS);
   const id = typeof v.id === "string" && ID.test(v.id) ? v.id : no(`${what}'s id is not like F-001`);
   const at = `${id}`;
   const files = list(v.files, `${at}'s files`, FILES_MAX, 1).map((p, j) => path(p, `${at}'s file ${j + 1}`));
@@ -192,7 +192,7 @@ export function validate(v: unknown, focus?: Focus, run?: string): Data {
   const entry = (e: unknown, what: string, statuses: string[], ref: Ref): Entry => {
     if (!isObj(e)) return no(`${what} is not an object`);
     const d = draftEntry(f, Object.fromEntries(Object.entries(e).filter(([k]) => DRAFT_KEYS.includes(k))), what, ref);
-    keys(e, d.id, allowed(ref));
+    keys(e, d.id, ENTRY_KEYS);
     for (const k of ENTRY_KEYS) if (k !== "ref" && !(k in e)) no(`${d.id} lacks ${k}`);
     const h = parseHeading(f, typeof e.heading === "string" ? e.heading : no(`${d.id}'s heading is not text`), `${d.id}'s heading`);
     if (h.id !== d.id || h.title !== e.title || impactOf(f, h.label) !== e.impact) no(`${d.id}'s heading, title and impact disagree`);
@@ -239,7 +239,8 @@ export function diff(current: Entry[], base: Entry[]): { status: Map<Entry, stri
   return { status, gone };
 }
 
-// Reads open no-follow and non-blocking, so a planted symlink or FIFO refuses instead of leading out or hanging.
+// Reads open no-follow and non-blocking, so a planted symlink or FIFO as the last component refuses instead of leading
+// out or hanging; a symlinked directory above it is the caller's to refuse.
 function read(file: string, cap: number, what: string): Buffer {
   let fd: number;
   try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
@@ -320,6 +321,8 @@ export function build(runDir: string, entriesFile: string): Data {
   for (const s of d.scope) if (s !== ".") present(root, s, "scope entry");
   for (const e of [...d.findings, ...d.tracked]) {
     e.files.slice(1).forEach((p) => present(root, p, `${e.id}'s file`));
+    const up = e.files[0].split("/").slice(0, -1);
+    up.forEach((_, i) => { if (!isRealDir(join(root, ...up.slice(0, i + 1)))) no(`${e.id}'s first file ${show(e.files[0])} lies under a symlink or a file`); });
     if (!read(join(root, e.files[0]), PRIMARY_MAX, `${e.id}'s first file ${show(e.files[0])}`).includes(Buffer.from(e.symbol)))
       no(`${e.id}'s symbol ${show(e.symbol)} does not occur in its first file ${show(e.files[0])}`);
   }
@@ -341,9 +344,12 @@ export function build(runDir: string, entriesFile: string): Data {
 /** Replaces findings.json by a fresh file renamed over it, so a planted link at that name is replaced, never followed. */
 export function write(runDir: string, entriesFile: string): { data: Data; line: string; summary: string } {
   const data = build(runDir, entriesFile), dir = resolve(runDir), tmp = join(dir, `.findings.json.${process.pid}.tmp`);
+  // the limit every reader holds it to, check and the next run's baseline included
+  const out = `${JSON.stringify(data, null, 2)}\n`;
+  if (Buffer.byteLength(out) > JSON_MAX) no(`findings.json would be over ${JSON_MAX} bytes`);
   const fd = openSync(tmp, "wx", 0o644);
   try {
-    try { writeSync(fd, `${JSON.stringify(data, null, 2)}\n`); fsyncSync(fd); } finally { closeSync(fd); }
+    try { writeSync(fd, out); fsyncSync(fd); } finally { closeSync(fd); }
     renameSync(tmp, join(dir, "findings.json"));
   } catch (e) { try { unlinkSync(tmp); } catch {} throw e; }
   const all = [...data.findings, ...data.tracked], n = (s: string) => all.filter((e) => e.status === s).length;
