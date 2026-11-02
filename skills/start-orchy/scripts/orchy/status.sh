@@ -52,6 +52,7 @@ orchy_snapshot() {
     .requests[] | . as $r | (select(.status == "taken") | "\(.id) taken \(.taken.answer // "?") \(age(.taken.at))"),
       (.unanswered[] as $a | "\($r.id) reply \($a) unanswered \(age(first($r.answers[] | select(.id == $a) | .at)))")' || echo "(request list failed)"
   echo "-- waiting"; "$0" waiting list 2>&1
+  echo "-- summary"; "$0" summary show 2>&1
   echo "-- grants"; "$0" grants 2>&1
   echo "-- holds"; "$0" hold list 2>&1
   echo "-- goals"; g=$("$0" goals --json 2>/dev/null) && jq -r '.goals[] | '"$GOAL_LINE" <<<"$g" 2>/dev/null || echo "goals: unreadable (ORCHY goals)"

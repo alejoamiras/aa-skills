@@ -142,3 +142,4 @@ A finding becomes a change only once its path is written (initial conditions, ac
 - One open request per ref, and one open reply per request: the owner's next reply waits for the `--re` note.
 - An action an answer leads to is not proven to run exactly once across a crash: a `notes.md` line whose effect cannot be seen goes to the owner.
 - A malformed request file stays until it is moved aside by hand; the rest project, and `errors` and the snapshot name it.
+- A lead can write `summary.json` as the owner's user, past every check `summary set` runs: a well-formed false or unscreened summary shows until the next tick finds it wrong and sets it again, and a malformed one blocks `summary set` until it is read and removed by hand. It is display data, never an instruction; `summary show` refuses only a file that is not `orchy.summary/1`, and a viewer renders the lines as literal text.

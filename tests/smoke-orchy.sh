@@ -313,19 +313,16 @@ o=$("$ORCHY" wt-new hx --base feature-x 2>&1 || true); grep -q 'neither the trun
 o=$(MOCK_AW_ANCESTRY=1 "$ORCHY" teardown hf 2>&1) && grep -qx 'done [^ ]*/hf --merged --trunk main' "$MOCK_DIR/aw.log" || fail "teardown of a hotfix lane against main: $o"
 "$ORCHY" wt-new hf2 --base main >/dev/null && [ "$(git -C .claude/worktrees/hf2 rev-parse HEAD)" = "$m" ] || fail "a second hotfix lane's base"
 echo keep > "$T/target"; ln -s "$T/target" "$ORCHY_HOME/wt/hx.base"; o=$("$ORCHY" wt-new hx --base main 2>&1 || true)
-grep -q 'must be a regular file, not a link' <<<"$o" && [ "$(cat "$T/target")" = keep ] && [ ! -d .claude/worktrees/hx ] || fail "wt-new wrote through a planted base link: $o"
-rm -f "$ORCHY_HOME/wt/hx.base"
+grep -q 'must be a regular file, not a link' <<<"$o" && [ "$(cat "$T/target")" = keep ] && [ ! -d .claude/worktrees/hx ] || fail "wt-new wrote through a planted base link: $o"; rm -f "$ORCHY_HOME/wt/hx.base"
 echo feature-x > "$ORCHY_HOME/wt/hf2.base"; o=$("$ORCHY" teardown hf2 2>&1 || true); grep -q 'names neither the trunk nor a merge.branches base' <<<"$o" || fail "teardown on a planted base: $o"
 for w in hf hf2; do git worktree remove --force ".claude/worktrees/$w"; git branch -q -D "worktree-$w"; done; cp "$T/cfg.bak" "$ORCHY_HOME/orchy.json"
 # disarm stops a live watcher (its whole process group); lock refuses while another live holder has it and replaces a stale one
 mkpr "$SHA"; "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 30 >/dev/null || fail "arm-merge for disarm"
 # another home's watcher on the same PR number is never this home's stray
 H2="$T/cap/home2"; mkdir -p "$H2/reports"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$H2/"; cp "$ORCHY_HOME/reports/r9.md" "$H2/reports/"
-ORCHY_HOME="$H2" "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 30 >/dev/null || fail "arm-merge in a second home"
-wp2=$(cut -d' ' -f1 "$H2/watch/merge-9.pid")
+ORCHY_HOME="$H2" "$ORCHY" arm-merge 9 "$SHA" lane-9 r9.md "" 30 >/dev/null || fail "arm-merge in a second home"; wp2=$(cut -d' ' -f1 "$H2/watch/merge-9.pid")
 wp=$(cut -d' ' -f1 "$ORCHY_HOME/watch/merge-9.pid"); "$ORCHY" disarm 9 | grep -q 'stopped merge-9' || fail "disarm did not stop the watcher"
-sleep 1; [ ! -d "/proc/$wp" ] || fail "watcher $wp still alive after disarm"
-[ -d "/proc/$wp2" ] || fail "disarm in one home killed another home's watcher on the same PR number"
+sleep 1; [ ! -d "/proc/$wp" ] || fail "watcher $wp still alive after disarm"; [ -d "/proc/$wp2" ] || fail "disarm in one home killed another home's watcher on the same PR number"
 strays() { ps -eo pid,args | grep -F "$ORCHY watch-merge 9 " | grep -v ' grep '; } # this checkout's only: a concurrent run is not a stray
 [ "$(strays | grep -vc "^ *$wp2 ")" = 0 ] || fail "a watch-merge 9 process of this home survived disarm: $(strays)"
 ORCHY_HOME="$H2" "$ORCHY" disarm 9 | grep -q 'stopped merge-9' || fail "disarm in the second home"
@@ -351,8 +348,7 @@ sleep 60 & hp=$!; echo "$hp $(awk '{print $22}' /proc/$hp/stat) 2026-01-01T00:00
 if "$ORCHY" lock >/dev/null 2>&1; then fail "lock did not refuse a live holder"; fi
 # a takeover file left by a killed contender never blocks the next one
 touch "$ORCHY_HOME/orchestrator.lock.takeover"
-kill $hp; wait $hp 2>/dev/null || true; "$ORCHY" lock | grep -q '^locked' || fail "lock did not replace a stale holder"; "$ORCHY" unlock >/dev/null
-"$ORCHY" lock >/dev/null || fail "relock"
+kill $hp; wait $hp 2>/dev/null || true; "$ORCHY" lock | grep -q '^locked' || fail "lock did not replace a stale holder"; "$ORCHY" unlock >/dev/null; "$ORCHY" lock >/dev/null || fail "relock"
 for f in "$T"/cap/*/leads/*.started; do read -r p _ < "$f"; kill "$p" 2>/dev/null || true; done; for f in "$MOCK_DIR"/gc.*; do kill "$(cat "$f")" 2>/dev/null || true; done
 # triage mode refuses worktrees, leads and merges in one guard
 cp "$ORCHY_HOME/orchy.json" "$T/orchy.bak"; jq '.mode="triage"' "$T/orchy.bak" > "$ORCHY_HOME/orchy.json"
@@ -420,7 +416,12 @@ jq '.waiting[0].since = "2026-01-01T00:00:00Z"' "$HV/waiting.json" > "$T/w.json"
 V add pr:12 "Fix the branch rules, then re-arm" >/dev/null || fail "waiting add on an existing ref"
 V list --json | jq -e '.waiting | length == 2 and .[0] == {ref: "pr:12", text: "Fix the branch rules, then re-arm", since: "2026-01-01T00:00:00Z"}' >/dev/null || fail "a second add did not replace the text in place and keep since: $(V list --json)"
 V "done" pr:12 >/dev/null && V list --json | jq -e '[.waiting[].ref] == ["page:0"]' >/dev/null || fail "waiting done: $(V list --json)"
-ORCHY_HOME="$HV" "$ORCHY" snapshot 2>&1 | sed -n '/^-- waiting/,/^--/p' | grep -qx 'page:0  [0-9]*m  Sign page 0' || fail "snapshot does not list the waiting record"
+# summary: the same lines keep the file byte for byte, so since says since when; a refused second line is one line and changes nothing
+S() { ORCHY_HOME="$HV" "$ORCHY" summary "$@"; }; sum2=("Building the CSV export" "Waiting on you to sign page 0"); [ "$(S show)" = "no summary" ] && [ "$(S set "${sum2[@]}")" = "summary set" ] || fail "summary set: $(S show 2>&1)"
+jq -c '.since = "2026-01-01T00:00:00Z"' "$HV/summary.json" > "$T/sum.json" && mv "$T/sum.json" "$HV/summary.json"; sumb=$(md5sum < "$HV/summary.json"); [ "$(S set "${sum2[@]}")" = "summary unchanged since 2026-01-01T00:00:00Z" ] || fail "unchanged lines: $(S show 2>&1)"
+for b in "Shipping **the export**" "Moving its lead to acct-a"; do o=$(S set "${sum2[0]}" "$b" 2>&1) && fail "summary set took a second line: $b"; [ "$(grep -c '' <<<"$o")" = 1 ] || fail "a summary refusal is not one line: $o"; done; [ "$(md5sum < "$HV/summary.json")" = "$sumb" ] || fail "a kept or refused summary rewrote the file"
+o=$(ORCHY_HOME="$HV" "$ORCHY" snapshot 2>&1); sed -n '/^-- waiting/,/^--/p' <<<"$o" | grep -qx 'page:0  [0-9]*m  Sign page 0' || fail "snapshot does not list the waiting record"
+[ "$(sed -n '/^-- summary/,/^--/{/^  /p}' <<<"$o")" = $'  Building the CSV export\n  Waiting on you to sign page 0' ] && grep -qxE 'since 2026-01-01T00:00:00Z \([0-9]+h\)' <<<"$o" || fail "snapshot summary: $(sed -n '/^-- summary/,/^--/p' <<<"$o")"
 # the snapshot's shell reader and the state's python reader take one marker set: the report's own key line, and no other tokens
 HK="$T/cap/hk"; mkdir -p "$HK/reports"; cp "$ORCHY_HOME/orchy.json" "$ORCHY_HOME/local.json" "$HK/"
 for a in a1 a2; do printf 'ARC_FAILED: %s red\nLEAD_DONE web-2 a1\n' "$a" > "$HK/reports/web-2-$a.md"; done; o=$(ORCHY_HOME="$HK" "$ORCHY" snapshot 2>&1)
@@ -588,7 +589,7 @@ o=$(ORCHY_HOME="$HR" "$ORCHY" receipt r); grep -qF "asks done 1 ($r)" <<<"$o" ||
 fp() { find "$HR" "$T/asks" -printf '%p %s %T@ %m\n' | sort; md5sum < "$MOCK_DIR/gh.log"; }
 mkdir -p "$HR/runbooks"; printf -- '- [x] Publish the build\n- [ ] Announce it (proof: release v1.0.0)\n' > "$HR/runbooks/rb-r.md"
 b=$(fp); R() { ORCHY_HOME="$HR" "$ORCHY" "$@" >/dev/null || fail "reader $*"; }
-R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline; R waiting list; R waiting list --json; R accounts; R accounts --json; R grants; R grants --json; R hold list; R hold list --json; R runbook show rb-r; R goals; R goals --json
+R state; R ask list; R ask list --all --json; R ask show "$r"; R receipt --offline; R receipt --json --offline; R waiting list; R waiting list --json; R accounts; R accounts --json; R grants; R grants --json; R hold list; R hold list --json; R runbook show rb-r; R goals; R goals --json; R summary show
 [ "$(fp)" = "$b" ] || fail "a reader changed the home, the ledger or gh.log: $(diff <(echo "$b") <(fp))"
 # the viewers reach no bun: with only the system's tools on PATH they print what a normal run prints, and nothing on stderr
 ! env -i PATH=/usr/bin:/bin bash -c 'command -v bun' >/dev/null || fail "bun is in /usr/bin or /bin, so the bun-free reader check proves nothing"
@@ -659,8 +660,7 @@ mkdir -p "$HW/watch"; sleep 60 & sw=$!; echo "$sw $(awk '{print $22}' /proc/$sw/
 w 3; echo "10:01Z MISSING REQUIRED CHECK (no run or status after 10 rounds): e2e" >> "$HW/watch/merge-7.out"
 w 3; grep -q 'CHANGED (reports/leads/watchers)' "$T/w.out" || fail "a live watcher's new marker did not wake the wait: $(cat "$T/w.out")"
 w 2; [ "$(cat "$T/w.out")" = "TIMEOUT after 2s, no change" ] || fail "a standing marker woke the wait again: $(cat "$T/w.out")"
-kill "$sw"; wait "$sw" 2>/dev/null || true
-rm -f "$MOCK_DIR/issues.json" "$MOCK_DIR/trunk.json"
+kill "$sw"; wait "$sw" 2>/dev/null || true; rm -f "$MOCK_DIR/issues.json" "$MOCK_DIR/trunk.json"
 # events: one orchy.event/1 line per hooked command, ids only; a relaunch keeps the failure it replaces; an unwritable log changes nothing
 E="$ORCHY_HOME/events.jsonl"; en() { grep -c '' "$E"; }
 one() { [ "$(en)" = $(( $1 + 1 )) ] && tail -1 "$E" | jq -e "$2" >/dev/null || fail "events after $3: $(tail -2 "$E")"; }
