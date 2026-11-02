@@ -7,8 +7,11 @@
       "effort": "high",
       "focus": "security",
       "id": "sec",
-      "lane": "harden-security",
+      "lane": "harden-security-D",
       "next": "T",
+      "open": [
+        "harden-security-D"
+      ],
       "paused": false,
       "runs": [
         {
@@ -23,8 +26,8 @@
           },
           "detail": null,
           "end": "T",
-          "key": "harden-security-N",
-          "lane": "harden-security",
+          "key": "harden-security-D-N",
+          "lane": "harden-security-D",
           "marker": "LEAD_DONE",
           "reason": null,
           "schedule": "sec",
@@ -57,16 +60,17 @@
       "since": "T",
       "skip_filed": false,
       "when": "mon 09:00 UTC",
-      "why": "the worktree harden-security is still open",
-      "will_start": false
+      "why": null,
+      "will_start": true
     },
     {
       "due": null,
       "effort": "low",
       "focus": "bugs",
       "id": "b",
-      "lane": "harden-bugs",
+      "lane": "harden-bugs-D",
       "next": "T",
+      "open": [],
       "paused": false,
       "runs": [
         {
@@ -77,7 +81,7 @@
           "detail": null,
           "end": "T",
           "key": null,
-          "lane": "harden-bugs",
+          "lane": "harden-bugs-D",
           "marker": null,
           "reason": "every account that may take a heavy lead already runs 1 (the cap)",
           "schedule": "b",
@@ -91,8 +95,8 @@
       "since": "T",
       "skip_filed": true,
       "when": "wed 11:00 America/New_York",
-      "why": "the worktree harden-bugs is still open",
-      "will_start": false
+      "why": null,
+      "will_start": true
     }
   ],
   "schema": "orchy.schedules/1"

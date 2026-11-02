@@ -19,9 +19,9 @@ const t = (s: string) => Date.parse(s);
 const z = (s: number) => new Date(s).toISOString().replace(".000Z", "Z");
 const sched = (o: Partial<Schedule> = {}): Schedule =>
   ({ id: "weekly", focus: "security", effort: "high", when: "mon 09:00 UTC", skip_filed: false, paused: false, since: "2026-10-01T00:00:00Z", ...o });
-const KEY = "harden-security-202611090907";
+const LANE = "harden-security-20261109", KEY = `${LANE}-202611090907`;
 const run = (o: Partial<Run> = {}): Run => ({ schema: "orchy.schedule-run/1", schedule: "weekly", slot: "2026-11-09T09:00:00Z", start: "2026-11-09T09:07:00Z",
-  end: null, status: "started", reason: null, lane: "harden-security", key: KEY, account: "atlas", cost_usd: null, marker: null, detail: null,
+  end: null, status: "started", reason: null, lane: LANE, key: KEY, account: "atlas", cost_usd: null, marker: null, detail: null,
   counts: null, window: null, ...o });
 const NO_FACTS = { mode: null, hold: null, open: [] as string[], alive: [] as string[] };
 
@@ -152,7 +152,7 @@ describe("records", () => {
   });
   test("a stored record is held to its shape: schema, owner, status, lane, names and one-line text", () => {
     const cases: [Partial<Run> | Record<string, unknown>, RegExp][] = [[{ schema: "x" }, /not an orchy.schedule-run\/1/],
-      [{ schedule: "other" }, /a record of other, not weekly/], [{ status: "lost" }, /status is/], [{ lane: "x" }, /lane is harden/],
+      [{ schedule: "other" }, /a record of other, not weekly/], [{ status: "lost" }, /status is/], [{ lane: "harden-security" }, /lane is harden-<focus>-<YYYYMMDD>/],
       [{ key: "../x" }, /key is a name/], [{ reason: "a‮b" }, /reason is not one line/], [{ cost_usd: -1 }, /not negative/], [{ start: "now" }, /start is not a time/]];
     for (const [o, m] of cases) expect(() => record({ ...run(), ...o }, "weekly")).toThrow(m);
     expect(record(run(), "weekly")).toEqual(run());
@@ -161,14 +161,14 @@ describe("records", () => {
     const root = join(T, "h1", "runs"), F = "20261109T090700Z.json";
     mkdirSync(join(T, "h1"));
     const reading = JSON.stringify({ week_left_pct: 80, week_resets_at: 2e9, session_left_pct: 90, session_resets_at: 1.9e9, observed_at: 1e9 });
-    const B = ["begin", root, "weekly", "2026-11-09T09:00:00Z", "2026-11-09T09:07:00Z", KEY, "harden-security"];
+    const B = ["begin", root, "weekly", "2026-11-09T09:00:00Z", "2026-11-09T09:07:00Z", KEY, LANE];
     expect(cli(...B)).toEqual({ code: 0, out: `${F}\n`, err: "" });
     expect(cli(...B)).toMatchObject({ code: 1, err: `refused: runs/weekly/${F} exists\n` });
     expect(cli("launched", root, "weekly", F, "atlas", reading).out).toBe("atlas\n");
-    for (const again of [["launched", root, "weekly", F, "beacon", "null"], ["skip", root, "weekly", "2026-11-09T09:00:00Z", "harden-security", "2026-11-09T09:08:00Z", "late", F]])
+    for (const again of [["launched", root, "weekly", F, "beacon", "null"], ["skip", root, "weekly", "2026-11-09T09:00:00Z", LANE, "2026-11-09T09:08:00Z", "late", F]])
       expect(cli(...again).code).toBe(1);
     const seg = (cost_usd: number, ended: string) => ({ key: KEY, cost_usd, ended });
-    const receipt = (...s: object[]) => JSON.stringify({ lanes: [{ lane: "harden-security", runs: [...s, { key: "harden-security-202611020907", cost_usd: 9, ended: "2026-11-02T10:00:00Z" }] }] });
+    const receipt = (...s: object[]) => JSON.stringify({ lanes: [{ lane: LANE, runs: [...s, { key: `${LANE}-202611090800`, cost_usd: 9, ended: "2026-11-09T08:50:00Z" }] }] });
     const end = JSON.stringify({ ...JSON.parse(reading), week_left_pct: 72, observed_at: 1e9 + 7200 });
     const settle = (marker: string, findings: string, r: string) => cli("settle", root, "weekly", F, marker, findings, r, "", end, "2026-11-09T11:00:00Z").out;
     const rec = () => JSON.parse(readFileSync(join(root, "weekly", F), "utf8"));
@@ -181,19 +181,19 @@ describe("records", () => {
       window: { week_used_pct: null, session_used_pct: null } });
     expect(settle("LEAD_DONE", "FINDINGS: none", both)).toBe(`weekly ${F} done\n`);
     expect(rec()).toMatchObject({ status: "done", detail: null, counts: {}, cost_usd: 1.75, end: "2026-11-09T10:40:00Z", window: { week_used_pct: 8 } });
-    for (let d = 10; d <= 16; d++) expect(cli("skip", root, "weekly", `2026-11-${d}T09:00:00Z`, "harden-security", `2026-11-${d}T09:01:00Z`, "no account").code).toBe(0);
+    for (let d = 10; d <= 16; d++) expect(cli("skip", root, "weekly", `2026-11-${d}T09:00:00Z`, `harden-security-202611${d}`, `2026-11-${d}T09:01:00Z`, "no account").code).toBe(0);
     expect(readdirSync(join(root, "weekly")).sort()).toEqual([11, 12, 13, 14, 15, 16].map((d) => `202611${d}T090100Z.json`));
   });
   test("a start killed before learning its account settles with the one .started names; one that never launched becomes its skip", () => {
     const root = join(T, "h2", "runs"), S = "2026-11-09T09:00:00Z";
     mkdirSync(join(T, "h2"));
-    const begin = (start: string, key: string) => cli("begin", root, "weekly", S, start, key, "harden-security").out.trim();
-    const a = begin("2026-11-09T09:07:00Z", KEY), b = begin("2026-11-09T09:08:00Z", "harden-security-202611090908");
+    const begin = (start: string, key: string) => cli("begin", root, "weekly", S, start, key, LANE).out.trim();
+    const a = begin("2026-11-09T09:07:00Z", KEY), b = begin("2026-11-09T09:08:00Z", `${LANE}-202611090908`);
     cli("settle", root, "weekly", a, "LEAD_DONE", "", "null", "beacon", "null", "2026-11-09T11:00:00Z");
-    expect(cli("skip", root, "weekly", S, "harden-security", "2026-11-09T09:09:00Z", "harden-security: install exit 1", b).out).toBe(`${b}\n`);
+    expect(cli("skip", root, "weekly", S, LANE, "2026-11-09T09:09:00Z", `${LANE}: install exit 1`, b).out).toBe(`${b}\n`);
     const r = (f: string) => JSON.parse(readFileSync(join(root, "weekly", f), "utf8"));
     expect([r(a).status, r(a).account, r(a).end]).toEqual(["done", "beacon", "2026-11-09T11:00:00Z"]);
-    expect(r(b)).toMatchObject({ status: "skipped", key: null, start: "2026-11-09T09:08:00Z", end: "2026-11-09T09:09:00Z", reason: "harden-security: install exit 1" });
+    expect(r(b)).toMatchObject({ status: "skipped", key: null, start: "2026-11-09T09:08:00Z", end: "2026-11-09T09:09:00Z", reason: `${LANE}: install exit 1` });
     expect(cli("settle", root, "weekly", b, "LEAD_DONE", "", "null", "", "null", "2026-11-09T11:00:00Z").err).toBe(`refused: runs/weekly/${b} had no lead\n`);
   });
   test("a planted file is an error, never data, and a symlinked runs directory refuses", () => {
@@ -214,16 +214,27 @@ describe("view", () => {
     const why = (s: Schedule, f = NO_FACTS) => view(root, [s], f, now).schedules[0].why;
     expect(why(sched({ paused: true }), { ...NO_FACTS, mode: "triage" })).toBe("paused");
     expect(why(sched(), { ...NO_FACTS, mode: "triage", hold: "other:peer-x" })).toBe("the program is in triage mode");
-    expect(why(sched(), { ...NO_FACTS, hold: "other:peer-x", open: ["harden-security"] })).toBe("held by other:peer-x");
-    expect(why(sched(), { ...NO_FACTS, open: ["harden-security"] })).toBe("the worktree harden-security is still open");
+    expect(why(sched(), { ...NO_FACTS, hold: "other:peer-x" })).toBe("held by other:peer-x");
     const v = view(root, [sched(), sched({ id: "tue", focus: "quality", when: "tue 09:00 UTC", skip_filed: true, paused: true })], NO_FACTS, now);
     expect(v.schedules.map(line)).toEqual(["DUE weekly: harden security high, slot 2026-11-09T09:00:00Z; ORCHY schedule start weekly",
       "tue: harden quality high, skips filed, tue 09:00 UTC; paused"]);
-    expect(v.schedules[0]).toMatchObject({ lane: "harden-security", due: "2026-11-09T09:00:00Z", next: "2026-11-16T09:00:00Z", will_start: true, runs: [] });
+    expect(v.schedules[0]).toMatchObject({ lane: LANE, due: "2026-11-09T09:00:00Z", next: "2026-11-16T09:00:00Z", will_start: true, open: [], runs: [] });
+    expect(v.schedules[1].lane).toBeNull();
     const e = view(root, [sched({ id: "tue", when: "tue 09:00 UTC", since: "2026-11-09T00:00:00Z" })], NO_FACTS, now).schedules[0];
     const last = (r: Run, alive: boolean) => line({ ...e, runs: [{ ...r, alive }] });
     expect(last(run({ status: "blocked", detail: "the tree was dirty" }), true))
       .toBe(`tue: harden security high, tue 09:00 UTC; next 2026-11-10T09:00:00Z; last blocked 2026-11-09T09:07:00Z: the tree was dirty; running ${KEY} on atlas`);
     expect(last(run(), false)).toEndWith(`; last started 2026-11-09T09:07:00Z; ${KEY} has no live lead and no final marker`);
+  });
+  test("a worktree an earlier run left never blocks the next slot; those of its started runs are counted, newest first", () => {
+    const root = join(T, "h5", "runs"), lane = (d: string) => `harden-security-202610${d}`;
+    mkdirSync(join(root, "weekly"), { recursive: true });
+    for (const [d, status] of [["12", "skipped"], ["19", "done"], ["26", "blocked"]])
+      writeFileSync(join(root, "weekly", `202610${d}T090700Z.json`), JSON.stringify(run({ slot: `2026-10-${d}T09:00:00Z`, start: `2026-10-${d}T09:07:00Z`,
+        status, lane: lane(d), key: status === "skipped" ? null : `${lane(d)}-202610${d}0907` })));
+    const e = view(root, [sched()], { ...NO_FACTS, open: [lane("12"), lane("19"), lane("26"), "harden-quality-20261026"] }, t("2026-11-09T09:05:00Z")).schedules[0];
+    expect(e).toMatchObject({ lane: LANE, due: "2026-11-09T09:00:00Z", will_start: true, open: [lane("26"), lane("19")] });
+    expect(line(e)).toBe("DUE weekly: harden security high, slot 2026-11-09T09:00:00Z; ORCHY schedule start weekly; 2 worktrees wait on you");
+    expect(line({ ...e, due: null, open: [lane("26")] })).toEndWith("; last blocked 2026-10-26T09:07:00Z; 1 worktree waits on you");
   });
 });
