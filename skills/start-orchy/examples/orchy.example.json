@@ -51,6 +51,7 @@
   },
   "never_open": [],
   "delegations": [],
+  "schedules": [],
   "scan": {
     "gate_files": "^\\.github/|biome\\.json|eslint|tsconfig|bunfig|vitest\\.config|playwright\\.config|required-checks|audit-acks",
     "weakening": "continue-on-error|\\|\\| true|\\.skip\\(|\\.only\\(|test\\.todo|retries:|if: false|allow_failure|biome-ignore lint|eslint-disable|@ts-ignore|@ts-expect-error|required_status|--admin",
