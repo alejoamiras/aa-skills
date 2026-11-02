@@ -24,7 +24,7 @@ const KEYS = ["id", "focus", "effort", "when", "skip_filed", "paused", "since"];
 export const ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const ZONE = /^[A-Za-z_]+(?:\/[A-Za-z0-9_+-]+)*$/;   // limit.py's: an IANA name, never an offset like +03:00
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
-const FILE = /^\d{8}T\d{6}Z\.json$/;
+const FILE = /^\d{8}T\d{6}Z\.json$/, LANE = /^harden-(security|quality|bugs)-\d{8}$/;
 const NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$/, BUCKET = /^[a-z][a-z-]{0,23}$/;
 export const MAX = 16, KEEP = 6, TEXT_MAX = 300, RECORD_MAX = 16 * 1024;
 const DAY_MS = 86_400_000;
@@ -40,6 +40,8 @@ export type Run = { schema: "orchy.schedule-run/1"; schedule: string; slot: stri
 export type Facts = { mode: string | null; hold: string | null; open: string[]; alive: string[] };
 
 export const iso = (t: number) => new Date(t).toISOString().replace(/\.\d{3}Z$/, "Z");
+/** A run's lane and worktree: the focus and its slot's UTC date, so no worktree an earlier run left stops a later one. */
+export const laneOf = (focus: string, slotAt: number) => `harden-${focus}-${iso(slotAt).slice(0, 10).replace(/-/g, "")}`;
 const time = (s: unknown, what: string): number => {
   const t = typeof s === "string" && ISO.test(s) ? Date.parse(s) : NaN;
   return Number.isFinite(t) ? t : no(`${what} is not a time like 2026-11-09T09:00:00Z`);
@@ -182,7 +184,7 @@ export function record(v: unknown, id: string): Run {
   if (o.schedule !== id) no(`a record of ${String(o.schedule).slice(0, 40)}, not ${id}`);
   time(o.slot, "slot"); time(o.start, "start"); if (o.end !== null) time(o.end, "end");
   if (!STATUSES.includes(o.status as string)) no(`status is ${STATUSES.join(", ")}`);
-  if (typeof o.lane !== "string" || !/^harden-(security|quality|bugs)$/.test(o.lane)) no("lane is harden-<focus>");
+  if (typeof o.lane !== "string" || !LANE.test(o.lane)) no("lane is harden-<focus>-<YYYYMMDD>");
   for (const k of ["key", "account"]) if (o[k] !== null && (typeof o[k] !== "string" || !NAME.test(o[k] as string))) no(`${k} is a name`);
   const marker = o.marker;
   if (marker !== null && !["LEAD_DONE", "LEAD_BLOCKED", "ARC_FAILED"].includes(marker as string)) no("marker is LEAD_DONE, LEAD_BLOCKED or ARC_FAILED");
@@ -312,32 +314,36 @@ export function settle(root: string, id: string, name: string, marker: string, l
   return out;
 }
 
-function why(s: Schedule, f: Facts): string | null {
-  const lane = `harden-${s.focus}`;
+function why(s: Schedule, f: Facts, lane: string | null): string | null {
   if (s.paused) return "paused";
   if (f.mode === "triage") return "the program is in triage mode";
   if (f.hold) return `held by ${f.hold}`;
-  return f.open.includes(lane) ? `the worktree ${lane} is still open` : null;
+  // the date's lane taken by another schedule's run: a start in that minute would share its key and replace its prompt
+  return lane !== null && f.open.includes(lane) ? `the worktree ${lane} already stands` : null;
 }
 export function view(root: string, l: Schedule[], f: Facts, now: number) {
   const errors: { file: string; error: string }[] = [];
   const out = l.map((s) => {
-    const r = runs(root, s.id), d = due(s, r.runs, now), n = next(s, now), w = why(s, f);
+    const r = runs(root, s.id), d = due(s, r.runs, now), n = next(s, now), t = d ?? n, lane = t === null ? null : laneOf(s.focus, t);
+    const w = why(s, f, lane);
     errors.push(...r.errors);
-    return { ...s, lane: `harden-${s.focus}`, next: n === null ? null : iso(n), due: d === null ? null : iso(d),
-      will_start: w === null, why: w, runs: r.runs.slice(0, KEEP).map((x) => ({ ...x, alive: x.key !== null && f.alive.includes(x.key) })) };
+    // skips are left out: one's lane may stand for another schedule's run on the same date
+    const open = [...new Set(r.runs.filter((x) => x.status !== "skipped" && f.open.includes(x.lane)).map((x) => x.lane))];
+    return { ...s, lane, next: n === null ? null : iso(n), due: d === null ? null : iso(d),
+      will_start: w === null, why: w, open, runs: r.runs.slice(0, KEEP).map((x) => ({ ...x, alive: x.key !== null && f.alive.includes(x.key) })) };
   });
   return { schema: "orchy.schedules/1", at: iso(now), schedules: out, errors };
 }
 type Entry = ReturnType<typeof view>["schedules"][number];
 export function line(e: Entry): string {
   const what = `harden ${e.focus} ${e.effort}${e.skip_filed ? ", skips filed" : ""}`;
-  const skip = e.will_start || e.paused ? "" : `; will skip: ${e.why}`;
-  if (e.due) return `DUE ${e.id}: ${what}, slot ${e.due}; ORCHY schedule start ${e.id}${skip}`;
+  const skip = e.will_start || e.paused ? "" : `; will skip: ${e.why}`, n = e.open.length;
+  const wait = n ? `; ${n} worktree${n === 1 ? " waits" : "s wait"} on you` : "";
+  if (e.due) return `DUE ${e.id}: ${what}, slot ${e.due}; ORCHY schedule start ${e.id}${skip}${wait}`;
   const r = e.runs[0], said = r?.reason ?? r?.detail;
   const last = !r ? "" : `; last ${r.status} ${r.start}${said ? `: ${said}` : ""}`;
   const run = r?.alive ? `; running ${r.key}${r.account ? ` on ${r.account}` : ""}` : r?.status === "started" ? `; ${r.key} has no live lead and no final marker` : "";
-  return `${e.id}: ${what}, ${e.when}; ${e.paused ? "paused" : `next ${e.next}`}${skip}${last}${run}`;
+  return `${e.id}: ${what}, ${e.when}; ${e.paused ? "paused" : `next ${e.next}`}${skip}${last}${run}${wait}`;
 }
 
 function facts(v: unknown): Facts {

@@ -4,10 +4,10 @@
 # closed for every child that may outlive the call, so no lead ever holds either.
 RUNS="$H/runs"
 sc_list() { jq -c '.schedules // []' "$CFG"; }
-sc_facts() { # what the view needs from outside TS: the mode, an all hold, the open harden worktrees, the live lead keys
+sc_facts() { # what the view needs from outside TS: the mode, an all hold, the standing harden-* worktrees, the live lead keys
   local h o=() x
   h=$(held all 2>/dev/null) || h="holds.json, which cannot be read"
-  for x in security quality bugs; do [ -d "$WT_ROOT/harden-$x" ] && o+=("harden-$x"); done
+  for x in "$WT_ROOT"/harden-*; do [ -d "$x" ] && o+=("${x##*/}"); done
   jq -nc --arg m "$(cfg '.mode // empty')" --arg h "$h" --arg o "${o[*]}" --arg a "$(lead_rows | cut -d' ' -f1)" \
     'def opt: if . == "" then null else . end; def words($s): $s | split("\\s+"; null) | map(select(. != ""));
      {mode: ($m | opt), hold: ($h | opt), open: words($o), alive: words($a)}'
@@ -60,7 +60,7 @@ sc_skip() { # <why>: the slot spent as skipped, through this start's record once
   echo "skipped $id: $1"; exit 0
 }
 sc_drop() { local o; o=$("$0" teardown "$lane" 2>&1 3>&-) || why="$why; its fresh worktree stays: $(tail -n 1 <<<"$o")"; }
-sc_start() { # <id>: a DUE slot's harden run as a heavy lead in harden-<focus>, or its skip; one attempt per slot
+sc_start() { # <id>: a DUE slot's harden run as a heavy lead in a worktree of its own, or its skip; one attempt per slot
   local id=$1 v e slot lane key why out acct f=
   [ "$(cfg '.mode // empty')" != triage ] || { echo "refused: orchy.json mode is triage; no scheduled run starts" >&2; exit 1; }
   need claude-usage; need agent-worktree; need flock
@@ -91,7 +91,7 @@ sc_settle() { # each dead lead's record, recomputed from its files while it read
     [ -f "$f" ] && [ ! -L "$f" ] || continue
     # schedules.ts validates the record again: this only picks the ones worth its look
     read -r st k lane a < <(jq -r '"\(.status) \(.key) \(.lane) \(.account // "-")"' "$f" 2>/dev/null) || continue
-    [ "$st" != skipped ] && name_ok "$k" && [[ $lane =~ ^harden-(security|quality|bugs)$ ]] && ! grep -qxF -- "$k" <<<"$live" || continue
+    [ "$st" != skipped ] && name_ok "$k" && [[ $lane =~ ^harden-(security|quality|bugs)-[0-9]{8}$ ]] && ! grep -qxF -- "$k" <<<"$live" || continue
     [ "$a" != - ] || a=""
     rp="$H/reports/$k.md"; [ -f "$H/leads/$k.started" ] || continue
     [ "$st" = started ] || [ "$H/leads/$k.started" -nt "$f" ] || [ "$rp" -nt "$f" ] || continue

@@ -73,8 +73,9 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   state [--json]               a poller's view as orchy.state/1 JSON: local facts only, no gh, usage or network call, nothing written
 #   schedule add <id> <security|quality|bugs> <effort> <mon..sun> <HH:MM> <zone> [--skip-filed] | remove <id>   a weekly
 #                                harden run in orchy.json (the seat's); pause|resume <id> need no seat, so the viewer may call them
-#   schedule list [--json] | start <id>   each schedule's next slot, why it would not start and its last six runs
-#                                (orchy.schedules/1); start runs a DUE slot as a heavy lead in harden-<focus>, or records its skip
+#   schedule list [--json] | start <id>   each schedule's next slot, why it would not start, its last six runs and the
+#                                worktrees they left standing (orchy.schedules/1); start runs a DUE slot as a heavy lead in
+#                                its own worktree, harden-<focus>-<YYYYMMDD> by the slot's UTC date, or records its skip
 #   wait [seconds]               block until a report, lead or watcher changes, an answer arrives, a schedule's slot comes, or
 #                                (every wait.poll_sec, default 120) open PRs, open issues or the trunk head (default 1500)
 #   scan <pr> [<full-sha>] [--quick]   gate-weakening and leak scan of a PR's diff, title, body and commit messages (plus the
