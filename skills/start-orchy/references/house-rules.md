@@ -113,6 +113,7 @@ A finding becomes a change only once its path is written (initial conditions, ac
 
 - **A schedule's time is the owner's wall clock.** `when` is a weekday, a time and an IANA zone, read as Temporal's `compatible` and RFC 5545 read it: a time the zone skips runs that much later, a repeated one once, at its first occurrence. *Why: "every Monday at 9" means 9 where the owner is, in summer and in winter.*
 - **One attempt per slot, recorded before anything runs.** `schedule start` writes the run's record before `wt-new`, so a start killed midway leaves a `started` record and the slot never runs twice; a skip spends its slot too. At the first start after a closed session only the latest missed slot runs, and a slot that passed while paused never does. *Why: a weekly audit that starts late is worth more than none, and two runs of one slot spend twice.*
+- **Each run has a worktree of its own.** Its lane is `harden-<focus>-<YYYYMMDD>`, the slot's UTC date, so a report the owner has not landed or discarded never stops the next run, and `schedule list` counts per schedule the worktrees its runs left standing (`open`). *Why: a weekly audit that waits on the owner's last report stops after its first run.*
 - **The clock is the Monitor and the tick.** `wait` carries each schedule's next slot and wakes when one passes, Idle included, so no timer or daemon is added. A run is a lead like any other: launch's caps, never-lists and floors decide it, and a plan with no 5-hour window is judged on its week.
 
 ## Known limits
@@ -151,6 +152,8 @@ A finding becomes a change only once its path is written (initial conditions, ac
 - A lead can write a run record or `orchy.json` as the owner's user: a planted record can hide a slot or show false counts. Records are display data, checked on every read; a malformed one is an `errors` entry, never a run.
 - Two schedules due at once may skip one for the heavy cap: launch judges each in turn, with no queue and no spread of one run across accounts.
 - A dead lead with no final marker leaves its run `started` until a resume reports.
+- Each scheduled run's worktree stays until the owner lands or discards it, one more every week a schedule runs: nothing tears one down, `agent-worktree list` shows them, and a schedule counts only those of its last six runs.
+- Two schedules of one focus due on the same UTC date share a lane: the second's `wt-new` refuses the standing worktree, and its run is recorded skipped with that reason.
 - A hand edit of `orchy.json` that lands between a schedule command's compare and its rename is lost.
 - `wt-new` installs the trunk's dependencies before a scheduled lead reads its brief, as for every lane, so the trunk's own install scripts run as the owner.
 - A lead can write `summary.json` as the owner's user, past every check `summary set` runs: a well-formed false or unscreened summary shows until the next tick finds it wrong and sets it again, and a malformed one blocks `summary set` until it is read and removed by hand. It is display data, never an instruction; `summary show` refuses only a file that is not `orchy.summary/1`, and a viewer renders the lines as literal text.
