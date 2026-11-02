@@ -61,6 +61,8 @@ orchy_snapshot() {
     jq -r --arg b "$b" '(map(select(.[0])) | length) as $k | select($k < length) | "\($b) \($k)/\(length)"' <<<"$j"; done
   # launch reads only the cached snapshot, so the tick refreshes it: a reading over 2 h old allows light leads only
   echo "-- headroom"; claude-usage refresh >/dev/null 2>&1; "$0" accounts 2>&1 | head -20
+  # after the refresh, whose readings a settled run's end takes; a start holding runs.lock leaves its runs to the next snapshot
+  echo "-- schedules"; ( flock -w 5 3 && sc_settle ) 3>>"$H/runs.lock"; "$0" schedule list 2>&1
 }
 orchy_state() {
   # orchy.state/1 for a poller: local facts only (no gh, usage or network call) and nothing written. The seat and the
@@ -141,21 +143,26 @@ orchy_wait() {
   # so seen/ only ever holds reported values: a second concurrent wait can report a change twice, never lose one.
   SEEN="$H/seen"; mkdir -p "$SEEN"
   declare -A last=() new=() unread=(); srcs=(prs issues trunk)
-  for s in local answers "${srcs[@]}"; do [ -f "$SEEN/$s" ] && last[$s]=$(cat "$SEEN/$s"); done
+  for s in local answers schedules "${srcs[@]}"; do [ -f "$SEEN/$s" ] && last[$s]=$(cat "$SEEN/$s"); done
   report() { local s l
     for s in "$@"; do l=$s; [ "$s" = local ] && l="reports/leads/watchers"
       echo "CHANGED ($l):" || return 1
-      if [ "$s" = answers ]; then an_added "${last[$s]:-}" "${new[$s]}" | sed 's/^/> /'; else diff <(echo "${last[$s]:-}") <(echo "${new[$s]}") | grep '^[<>]' | head -20; fi; done
+      case $s in answers|schedules) an_added "${last[$s]:-}" "${new[$s]}" | sed 's/^/> /';; *) diff <(echo "${last[$s]:-}") <(echo "${new[$s]}") | grep '^[<>]' | head -20;; esac; done
     for s in "$@"; do printf '%s\n' "${new[$s]}" > "$SEEN/.$s.$$" && mv "$SEEN/.$s.$$" "$SEEN/$s" || return 1; done; }
+  # answers and schedules wake on an arrival only: a departure (an answer taken, a slot started) is recorded without a report
+  arrive() { if [ -n "$(an_added "${last[$1]:-}" "${new[$1]}")" ]; then changed+=("$1")
+    elif [ "${new[$1]}" != "${last[$1]:-}" ]; then printf '%s\n' "${new[$1]}" > "$SEEN/.$1.$$" && mv "$SEEN/.$1.$$" "$SEEN/$1" && last[$1]=${new[$1]}; fi; }
+  # each schedule's due and next slot, recomputed when orchy.json changes; a poll takes the latest one passed, per id
+  sl_cfg=-; slots=
+  sl_due() { local c; c=$(cat "$CFG" 2>/dev/null)
+    [ "$c" = "$sl_cfg" ] || { sl_cfg=$c; slots=$(ts_run schedules slots "$RUNS" "$(jq -c '.schedules // []' <<<"$c" 2>/dev/null)" "$(utc_now)" 2>/dev/null); }
+    awk -v t="$(date +%s)" '$2 <= t && $2 >= m[$1] { m[$1] = $2; s[$1] = $3 } END { for (i in s) print i, s[i] }' <<<"$slots" | LC_ALL=C sort; }
   t0=$(date +%s); n=0
   while :; do
     sleep "$tick"; n=$((n+1)); changed=()
     new[local]=$(snap); { [ -n "${last[local]+x}" ] && [ "${new[local]}" = "${last[local]}" ]; } || changed+=(local)
-    # answers wake on an arrival only: the orchestrator's own take removes one, and that is recorded without a report
-    new[answers]=$(an_names)
-    if [ -n "$(an_added "${last[answers]:-}" "${new[answers]}")" ]; then changed+=(answers)
-    elif [ "${new[answers]}" != "${last[answers]:-}" ]; then
-      printf '%s\n' "${new[answers]}" > "$SEEN/.answers.$$" && mv "$SEEN/.answers.$$" "$SEEN/answers" && last[answers]=${new[answers]}; fi
+    new[answers]=$(an_names); arrive answers
+    new[schedules]=$(sl_due); arrive schedules
     # the first tick polls too: local events re-arm the wait, and a burst of them must not starve GitHub
     if [ "$n" = 1 ] || [ $((n % every)) -eq 0 ]; then
       for s in "${srcs[@]}"; do
