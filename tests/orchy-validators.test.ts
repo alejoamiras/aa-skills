@@ -1,11 +1,12 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { calendarDate } from "../skills/start-orchy/scripts/orchy/calendar.ts";
 import { fromDateIso8601, holds } from "../skills/start-orchy/scripts/orchy/holds.ts";
 import { render } from "../skills/start-orchy/scripts/orchy/render.ts";
 import { parseRunbook } from "../skills/start-orchy/scripts/orchy/runbook.ts";
+import { lineError } from "../skills/start-orchy/scripts/orchy/summary.ts";
 import { textError } from "../skills/start-orchy/scripts/orchy/text.ts";
 
 const SCRIPTS = join(import.meta.dir, "../skills/start-orchy/scripts");
@@ -185,5 +186,58 @@ describe("holds", () => {
       "2026-0305T10:00:00Z", ""];
     const jq = Bun.spawnSync(["jq", "-c", "map(try fromdateiso8601 catch null)"], { stdin: Buffer.from(JSON.stringify(edges)) });
     expect(edges.map(fromDateIso8601)).toEqual(JSON.parse(jq.stdout.toString()));
+  });
+});
+
+describe("summary", () => {
+  const t0 = "2026-03-05T10:00:00Z", t1 = "2026-03-05T12:30:00Z";
+  const markup = "carries markup or a link (` * | < > [ ] ://); a summary is plain text", id = "names an ask or a request by its id; say what it is";
+  const dir = (name: string) => { const d = join(T, name); mkdirSync(d); return d; };
+
+  test("accepts plain text of 1 to 140 code points", () => {
+    for (const l of ["a", "é".repeat(140), "PR #12 waits on CI", "Merging the task12 fixes (two of three)", "Waiting on you: sign page 2"])
+      expect([l, lineError(l)]).toEqual([l, null]);
+  });
+  test("refuses a length outside 1 to 140, a control or bidi character, a blank line, markup, a link and an ask or request id", () => {
+    const bad = "carries a control, line separator or bidi character";
+    for (const [l, e] of [["", "is 0 characters; 1 to 140"], ["é".repeat(141), "is 141 characters; 1 to 140"], ["a\nb", bad], ["a\x1b[31mb", bad], ["a\u202eb", bad],
+      ["\u3000 ", "is blank"], ["**Active**", markup], ["see `web-2`", markup], ["a | b", markup], ["<b>x</b>", markup], ["[x](y)", markup],
+      ["see https://example.com", markup], ["Delivering ask7", id], ["rq3 waits", id], ["\ud800", "is not text"]])
+      expect([l, lineError(l)]).toEqual([l, e]);
+  });
+  test("set writes orchy.summary/1 at 600, keeps the file byte for byte for the same lines, and writes a new since when they change", () => {
+    const f = join(dir("set"), "summary.json");
+    expect(cli("summary", "set", f, t0, "Building the export", "Waiting on you")).toMatchObject({ code: 0, out: "summary set\n" });
+    const first = readFileSync(f, "utf8");
+    expect([JSON.parse(first), statSync(f).mode & 0o777]).toEqual([{ schema: "orchy.summary/1", since: t0, lines: ["Building the export", "Waiting on you"] }, 0o600]);
+    expect(cli("summary", "set", f, t1, "Building the export", "Waiting on you")).toMatchObject({ code: 0, out: `summary unchanged since ${t0}\n` });
+    expect(readFileSync(f, "utf8")).toBe(first);
+    expect(cli("summary", "set", f, t1, "Building the export")).toMatchObject({ code: 0, out: "summary set\n" });
+    expect(JSON.parse(readFileSync(f, "utf8"))).toEqual({ schema: "orchy.summary/1", since: t1, lines: ["Building the export"] });
+    expect(readdirSync(join(T, "set"))).toEqual(["summary.json"]);
+  });
+  test("set refuses no line, three lines and bytes outside UTF-8, and a stored file that is not orchy.summary/1, writing nothing", () => {
+    const d = dir("refuse"), f = join(d, "summary.json");
+    for (const [ls, why] of [[[], "a summary is 1 or 2 lines, not 0"], [["a", "b", "c"], "a summary is 1 or 2 lines, not 3"], [["a\\xffb"], "line 1 is not UTF-8"], [["ok", "**b**"], `line 2 ${markup}`]] as const)
+      expect(cli("summary", "set", f, t0, ...ls)).toMatchObject({ code: 1, err: `refused: ${why}\n` });
+    expect(readdirSync(d)).toEqual([]);
+    const stored = [["junk", "is not JSON"], ['{"schema":"orchy.summary/2","since":"2026-03-05T10:00:00Z","lines":["a"]}', "is not orchy.summary/1: its schema is not orchy.summary/1"],
+      ['{"schema":"orchy.summary/1","since":"2026-03-05","lines":["a"]}', "is not orchy.summary/1: its since is not a UTC time"],
+      ['{"schema":"orchy.summary/1","since":"2026-03-05T10:00:00Z","lines":["**a**"]}', `is not orchy.summary/1: line 1 ${markup}`]];
+    for (const [body, why] of stored) {
+      writeFileSync(f, body);
+      for (const op of [["set", f, t0, "a"], ["show", f, t0]])
+        expect(cli("summary", ...op)).toMatchObject({ code: 1, err: `refused: summary.json ${why}; read it, remove it, then set the summary again\n` });
+      expect(readFileSync(f, "utf8")).toBe(body);
+    }
+    rmSync(f); symlinkSync(join(d, "elsewhere.json"), f);
+    expect(cli("summary", "set", f, t0, "a").err).toBe(`refused: summary.json is a symlink; read it, remove it, then set the summary again\n`);
+    expect(readdirSync(d)).toEqual(["summary.json"]);
+  });
+  test("show prints since and its age, then each line; no summary when there is none", () => {
+    const f = join(dir("show"), "summary.json");
+    expect(cli("summary", "show", f, t0)).toMatchObject({ code: 0, out: "no summary\n" });
+    cli("summary", "set", f, t0, "Building the export", "Waiting on you");
+    expect(cli("summary", "show", f, t1)).toMatchObject({ code: 0, out: `since ${t0} (2h)\n  Building the export\n  Waiting on you\n` });
   });
 });

@@ -68,6 +68,8 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #   say <key> <text>             queue a steering note; a live lead gets it after its next tool call (inbox-hook.sh)
 #   session-id <key>             the session id of a lead's latest run
 #   snapshot                     the tick's facts: reports, leads, watchers, PRs, worktrees, load, headroom
+#   summary set <line> [<line>] | show   the one or two plain lines a viewer shows (summary.json, orchy.summary/1); set
+#                                rewrites them only when they change, so since says since when; show prints them with their age
 #   state [--json]               a poller's view as orchy.state/1 JSON: local facts only, no gh, usage or network call, nothing written
 #   wait [seconds]               block until a report, lead or watcher changes, or (every wait.poll_sec, default 120) open PRs, open issues or the trunk head (default 1500)
 #   scan <pr> [<full-sha>] [--quick]   gate-weakening and leak scan of a PR's diff, title, body and commit messages (plus the
@@ -115,7 +117,7 @@ for d in "${ds[@]}"; do [ ! -L "$d" ] && [ -O "$d" ] || { echo "orchy: $d must b
 f=$({ find "$H" -maxdepth 2 ! -user "$EUID"; [ $under = 0 ] || find "$CAP" -maxdepth 1 ! -user "$EUID"; } 2>/dev/null | head -1)
 [ -z "$f" ] || { echo "orchy: $f belongs to another user; refusing a home someone else could write" >&2; exit 1; }
 # Readers keep the ownership checks but create nothing, so a poller never changes the home it reads.
-ro=0; case "$cmd" in state|config|local|session-id|receipt|accounts|grants|goals) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting|hold) case "${1:-}" in list) ro=1;; esac;; request) case "${1:-}" in list|show) ro=1;; esac;; answer) case "${1:-}" in list|show|put) ro=1;; esac;; runbook) case "${1:-}" in show) ro=1;; esac;; esac
+ro=0; case "$cmd" in state|config|local|session-id|receipt|accounts|grants|goals) ro=1;; ask) case "${1:-}" in list|show) ro=1;; esac;; waiting|hold) case "${1:-}" in list) ro=1;; esac;; request) case "${1:-}" in list|show) ro=1;; esac;; answer) case "${1:-}" in list|show|put) ro=1;; esac;; runbook|summary) case "${1:-}" in show) ro=1;; esac;; esac
 if [ $ro = 0 ]; then
   mkdir -p "$H"/{briefs,prompts,reports,leads,watch,wt,scratch,inbox,page/shots,page/build}
   chmod 700 "$H"; [ $under = 1 ] && chmod 700 "$CAP"
@@ -139,6 +141,7 @@ parts=(
   runbooks
   seat
   status
+  summary
   text
   waiting
 )
@@ -170,6 +173,7 @@ stop) orchy_stop "$@";;
 say) orchy_say "$@";;
 session-id) orchy_session_id "$@";;
 snapshot) orchy_snapshot;;
+summary) orchy_summary "$@";;
 accounts) orchy_accounts "$@";;
 state) orchy_state;;
 wait) orchy_wait "$@";;
