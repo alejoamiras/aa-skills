@@ -95,8 +95,9 @@ sc_settle() { # each dead lead's record, recomputed from its files while it read
     [ "$a" != - ] || a=""
     rp="$H/reports/$k.md"; [ -f "$H/leads/$k.started" ] || continue
     [ "$st" = started ] || [ "$H/leads/$k.started" -nt "$f" ] || [ "$rp" -nt "$f" ] || continue
-    # settled without its receipt, a run would keep a wrong cost once its files stop changing: the next snapshot tries again
-    rj=$("$0" receipt --json --offline "$lane" 2>/dev/null) || continue
+    # an unreadable receipt waits for the next snapshot, so a settled run never keeps a cost it could not read; a lane
+    # with no lead logs exits 1 and still prints the model
+    rj=$("$0" receipt --json --offline "$lane" 2>/dev/null); jq -e '.schema == "orchy.receipt/1"' <<<"$rj" >/dev/null 2>&1 || continue
     # only what the latest invocation appended ends the run: launch logs the report's size as each one starts
     off=$(grep '^{"type":"orchy_invocation"' "$H/leads/$k.log" 2>/dev/null | tail -n 1 | jq -r '.report_bytes // 0' 2>/dev/null)
     [[ $off =~ ^[0-9]{1,12}$ ]] || off=0

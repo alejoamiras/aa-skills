@@ -116,8 +116,10 @@ launch_spawn() {
   fi
   a=$pick
   # a killed run may end mid-line: the newline keeps the marker a line of its own. report_bytes, the report's size as
-  # this run starts, tells what the run appends from what an earlier one left
-  rsz=$(wc -c 2>/dev/null < "$H/reports/$k.md") && [[ $rsz =~ ^[0-9]+$ ]] || rsz=0
+  # this run starts, tells what it appends from what an earlier run left; read from metadata, as opening a planted FIFO
+  # would hold the spawn lock
+  rsz=0; if [ -f "$rp" ] && [ ! -L "$rp" ]; then rsz=$(stat -c %s -- "$rp") || exit 1
+  elif [ -e "$rp" ] || [ -L "$rp" ]; then echo "refused: reports/$k.md is not a regular file" >&2; exit 1; fi
   printf '\n%s\n' "$(jq -nc --arg k "$k" --arg l "$w" --arg c "$cmd" --arg t "$(utc_now)" --argjson b "$rsz" '{type: "orchy_invocation", key: $k, lane: $l, cmd: $c, at: $t, report_bytes: $b}')" >> "$L"
   # PRINT_BG_WAIT_CEILING=0: a headless turn that yields to a background task ends the session; the brief tells leads to poll inside one tool call instead.
   # setsid: the lead leads its own process group (a background subshell is not a group leader, so setsid does not fork and $! stays the lead).

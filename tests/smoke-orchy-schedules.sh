@@ -143,12 +143,26 @@ jq -e '.status == "skipped" and .key == null and (.reason | startswith("this ses
 [ ! -e "$MOCK_DIR/locked.log" ] || ss_fail "an agent-worktree call held a lock: $(cat "$MOCK_DIR/locked.log")"
 git worktree remove --force .claude/worktrees/harden-bugs && git branch -q -D worktree-harden-bugs   # the mock's done removes nothing
 
+# --- a FIFO planted at each name the run's report may take refuses the launch at once, nothing read from it
+SCH add f bugs low Sun 15:00 UTC >/dev/null; ss_back f; m=$(date +%s); for d in 0 60; do mkfifo "$H/reports/harden-bugs-$(date -u -d "@$((m + d))" +%Y%m%d%H%M).md"; done
+o=$(timeout 20 "$ORCHY" schedule start f) && [[ $o =~ ^skipped\ f:\ reports/harden-bugs-[0-9]{12}\.md\ is\ not\ a\ regular\ file$ ]] || ss_fail "a FIFO report: $o"
+rm -f "$H"/reports/harden-bugs-*.md; git worktree remove --force .claude/worktrees/harden-bugs && git branch -q -D worktree-harden-bugs
+
 # --- the only heavy account has no 5-hour window: judged on its week; skip_filed reaches the prompt
 { ss_row atlas 85 none; ss_row beacon 10; ss_row cedar 90; } | jq -s . > "$MOCK_DIR/cu/rows.json"
 SCH add b3 bugs max Sat 14:00 Asia/Tokyo --skip-filed >/dev/null; ss_back b3
 o=$(SCH start b3); [[ $o =~ ^started\ b3:\ (harden-bugs-[0-9]{12})\ on\ atlas$ ]] || ss_fail "the account with no 5-hour window: $o"; kb=${BASH_REMATCH[1]}
 grep -qF '## Already tracked' "$H/prompts/$kb.md" && grep -qxF 'FINDINGS: blocker=<n> critical=<n> major=<n> minor=<n>' "$H/prompts/$kb.md" || ss_fail "the skip_filed prompt"
 jq -e '.window.start.session_window == "none"' <<<"$(ss_rec b3)" >/dev/null || ss_fail "the start reading: $(ss_rec b3)"
+
+# --- a resume landing while a settle reads the run's files waits for it, so the resumed run never keeps what that settle read
+read -r pid _ < "$H/leads/$kb.started"; ss_dead "$pid"; printf '%s\n' LEAD_DONE 'REPORT audit/bugs/r1/report.md' 'COMMIT none' 'FINDINGS: none' > "$H/reports/$kb.md"
+mkdir -p "$T/slow"; printf '#!/usr/bin/env bash\n[ "${@: -1}" != %q ] || [ -e %q ] || { touch %q; sleep 2; }\nexec %q "$@"\n' "$H/reports/$kb.md" "$T/in" "$T/in" "$(command -v tail)" > "$T/slow/tail"
+chmod +x "$T/slow/tail"; PATH="$T/slow:$PATH" "$ORCHY" snapshot >/dev/null 2>&1 & s=$!
+timeout 60 bash -c 'until [ -e "$1" ]; do sleep 0.05; done' _ "$T/in" || ss_fail "the settle never read the report"
+"$ORCHY" resume "$kb" harden-bugs atlas "$("$ORCHY" session-id "$kb")" >/dev/null; wait "$s"
+read -r pid _ < "$H/leads/$kb.started"; ss_dead "$pid"; "$ORCHY" snapshot >/dev/null 2>&1
+jq -e '.status == "started" and .marker == null' <<<"$(ss_rec b3)" >/dev/null || ss_fail "a resume during a settle kept that settle's result: $(ss_rec b3)"
 
 # --- the reader's shape, pinned: times, epochs and key stamps vary per run
 SCH list --json | jq -S '.schedules |= map(select(.id == "sec" or .id == "b"))

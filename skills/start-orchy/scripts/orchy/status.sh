@@ -61,8 +61,9 @@ orchy_snapshot() {
     jq -r --arg b "$b" '(map(select(.[0])) | length) as $k | select($k < length) | "\($b) \($k)/\(length)"' <<<"$j"; done
   # launch reads only the cached snapshot, so the tick refreshes it: a reading over 2 h old allows light leads only
   echo "-- headroom"; claude-usage refresh >/dev/null 2>&1; "$0" accounts 2>&1 | head -20
-  # after the refresh, whose readings a settled run's end takes; a start holding runs.lock leaves its runs to the next snapshot
-  echo "-- schedules"; ( flock -w 5 3 && sc_settle ) 3>>"$H/runs.lock"; "$0" schedule list 2>&1
+  # after the refresh, whose readings a settled run's end takes. A start holding runs.lock leaves its runs to the next
+  # snapshot; the spawn lock keeps any launch or resume from landing between a run's reads and its write
+  echo "-- schedules"; ( flock -w 5 3 && flock -w 5 9 && sc_settle ) 3>>"$H/runs.lock" 9>>"$CAP/.spawn.lock"; "$0" schedule list 2>&1
 }
 orchy_state() {
   # orchy.state/1 for a poller: local facts only (no gh, usage or network call) and nothing written. The seat and the
