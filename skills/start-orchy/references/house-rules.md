@@ -114,6 +114,7 @@ A finding becomes a change only once its path is written (initial conditions, ac
 - **A schedule's time is the owner's wall clock.** `when` is a weekday, a time and an IANA zone, read as Temporal's `compatible` and RFC 5545 read it: a time the zone skips runs that much later, a repeated one once, at its first occurrence. *Why: "every Monday at 9" means 9 where the owner is, in summer and in winter.*
 - **One attempt per slot, recorded before anything runs.** `schedule start` writes the run's record before `wt-new`, so a start killed midway leaves a `started` record and the slot never runs twice; a skip spends its slot too. At the first start after a closed session only the latest missed slot runs, and a slot that passed while paused never does. *Why: a weekly audit that starts late is worth more than none, and two runs of one slot spend twice.*
 - **Each run has a worktree of its own.** Its lane is `harden-<focus>-<YYYYMMDD>`, the slot's UTC date, so a report the owner has not landed or discarded never stops the next run, and `schedule list` counts per schedule the worktrees its runs left standing (`open`). *Why: a weekly audit that waits on the owner's last report stops after its first run.*
+- **A run's fan-out never lands on the orchestrator's account or a never-listed one.** `schedule start` writes their names to `prompts/<key>.never.json` beside the prompt, by the prompt's own rename, and the prompt names only that path. *Why: launch refuses a prompt that names an account, and a lead may not read the machine's policy file.*
 - **The clock is the Monitor and the tick.** `wait` carries each schedule's next slot and wakes when one passes, Idle included, so no timer or daemon is added. A run is a lead like any other: launch's caps, never-lists and floors decide it, and a plan with no 5-hour window is judged on its week.
 
 ## Known limits
@@ -150,7 +151,10 @@ A finding becomes a change only once its path is written (initial conditions, ac
 - An action an answer leads to is not proven to run exactly once across a crash: a `notes.md` line whose effect cannot be seen goes to the owner.
 - A malformed request file stays until it is moved aside by hand; the rest project, and `errors` and the snapshot name it.
 - A lead can write a run record or `orchy.json` as the owner's user: a planted record can hide a slot or show false counts. Records are display data, checked on every read; a malformed one is an `errors` entry, never a run.
-- Two schedules due at once may skip one for the heavy cap: launch judges each in turn, with no queue and no spread of one run across accounts.
+- Two schedules due at once may skip one for the heavy cap: launch judges each in turn, with no queue. A run's lead takes one account; only its Claude cluster agents spread over others.
+- A run's cluster agents on other accounts are outside launch's caps and the run's receipt: its cost and window use count its lead alone. An alias of the orchestrator's account known only by organization (no email in the reading) is not left out.
+- A run compares its findings only with runs on the trunk: one nobody landed is no baseline, so the next run reads its findings new again.
+- A harden run started by hand beside a program leaves out the machine's never-list but cannot know which account runs that program's orchestrator, so its fan-out may load it.
 - A dead lead with no final marker leaves its run `started` until a resume reports.
 - Each scheduled run's worktree stays until the owner lands or discards it, one more every week a schedule runs: nothing tears one down, `agent-worktree list` shows them, and a schedule counts only those of its last six runs.
 - Two schedules of one focus due on the same UTC date share a lane: while the first's worktree stands, the second's run is recorded skipped, its reason naming that worktree.

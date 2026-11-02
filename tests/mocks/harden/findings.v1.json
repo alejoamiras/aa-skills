@@ -1,0 +1,83 @@
+{
+  "schema": "harden.findings/1",
+  "focus": "security",
+  "run": "2026-11-02-0900-weekly",
+  "scope": [
+    "."
+  ],
+  "exclude": [
+    "vendor"
+  ],
+  "baseline": "2026-10-26-0900-weekly",
+  "baseline_note": null,
+  "counts": {
+    "critical": 1,
+    "high": 1,
+    "medium": 0,
+    "low": 0
+  },
+  "findings": [
+    {
+      "id": "F-001",
+      "impact": "high",
+      "title": "Upload path escapes the upload directory",
+      "category": "CWE-22",
+      "files": [
+        "src/upload.ts",
+        "src/fs.ts"
+      ],
+      "symbol": "join(UPLOAD_DIR, name)",
+      "confidence": "high",
+      "status": "recurring",
+      "fingerprint": "f5d7f5e73e4db969",
+      "heading": "[High] F-001: Upload path escapes the upload directory"
+    },
+    {
+      "id": "F-002",
+      "impact": "critical",
+      "title": "Stored XSS in the profile bio",
+      "category": "CWE-79",
+      "files": [
+        "web/page.tsx"
+      ],
+      "symbol": "dangerouslySetInnerHTML",
+      "confidence": "moderate",
+      "status": "new",
+      "fingerprint": "dfb3c7c4415666f6",
+      "heading": "[Potential Critical] F-002: Stored XSS in the profile bio"
+    }
+  ],
+  "tracked": [
+    {
+      "id": "F-003",
+      "impact": "medium",
+      "title": "Session cookie lacks HttpOnly",
+      "category": "CWE-1004",
+      "files": [
+        "src/session.ts"
+      ],
+      "symbol": "Set-Cookie",
+      "confidence": "high",
+      "status": "recurring",
+      "fingerprint": "541a59230082a262",
+      "heading": "[Medium] F-003: Session cookie lacks HttpOnly",
+      "ref": "#12"
+    }
+  ],
+  "gone": [
+    {
+      "id": "F-003",
+      "impact": "low",
+      "title": "Error responses leak stack traces",
+      "category": "CWE-209",
+      "files": [
+        "src/errors.ts"
+      ],
+      "symbol": "err.stack",
+      "confidence": "moderate",
+      "status": "gone",
+      "fingerprint": "24f9a12f8496ade4",
+      "heading": "[Low] F-003: Error responses leak stack traces"
+    }
+  ]
+}

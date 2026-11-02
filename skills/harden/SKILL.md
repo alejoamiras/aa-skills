@@ -53,6 +53,8 @@ Before any scanning, briefly confirm with the user (use `AskUserQuestion` for cl
 
 **Unattended fallback** (CI, scheduled runs, AFK mode, or any non-interactive context): if no answer arrives within a reasonable wait, default to Opus 5.5 for the top-tier slot, GPT-6.1 Sol for the Codex legs (GPT-6 Astra when the Codex CLI is older than 0.159.1, Sol's floor), the whole repo minus generated/vendor/`node_modules`/`dist`/`build` directories at origin's default branch, and to **file** mode (never publish findings nobody approved). Phase 6 then writes its proposed list and files nothing. State the assumptions explicitly in the report's Methodology section so the user knows what was scanned.
 
+**Headroom gate** (Claude Code driver; last, once the answers are in): run `~/.claude/skills/harden/scripts/run.sh headroom gate --model <m>`, `<m>` being `claude_model` at `high` and up and `sonnet` below. It reads claude-usage's cached snapshot only and judges this session's account on the window its plan has: the week and the 5-hour window, a plan without one on its week alone, and the Fable week when `<m>` is Fable. A `stop:` line ends the run, and that line is the answer; the `ok:` line goes into Methodology. The gate is skipped only when the owner says so in Phase 0 (a scheduled run's prompt does: orchy's launch already judged that account). Another driver has no gate, and Methodology says so.
+
 ### Phase 0.5: Workspace homing
 
 A run writes dozens of files under `audit/` and keeps agents reading the tree for an hour or more. In the canonical clone that lands files in the checkout every other agent and human shares, and a branch switch there changes the code mid-audit. So once Phase 0 is answered (or its unattended fallback has fired), and BEFORE anything is written, home the run into its own git worktree.
@@ -112,6 +114,14 @@ For each cluster, spawn TWO agents in parallel (always, regardless of effort lev
 - **Claude agent** (model per effort level, see Effort knob below).
 - **Codex agent** via `/codex` at matching codex effort level (read-only sandbox). At `low` effort, codex runs at minimal effort but still runs. Codex is never skipped: keeping cross-model coverage constant across all tiers is non-negotiable (different model families catch different blind spots).
 
+**Where the Claude agents run** (Claude Code driver), so one account never carries the whole fan-out: once the clusters are fixed, run `~/.claude/skills/harden/scripts/run.sh headroom fanout --model <the Phase 2 Claude model> [--passes 2] [--exclude-from <file>] <cluster>…` (`--passes 2` at `ultra`; `--exclude-from ~/.agents/orchy/accounts.json` when that file exists, unless the run's prompt names another file). From claude-usage's cached readings it deals one slot per cluster and pass, round-robin, to the roster accounts that clear the gate's floors, this session's account last, and prints one `<cluster> <pass> =<key>|session` line per slot, then a `methodology:` line.
+- A `session` slot is the in-session `Agent` above.
+- A `=<key>` slot runs the same prompt as a read-only worker on that account: `CLAUDE_ACCOUNT='=<key>' CLAUDE_CONSULT_ROLE=worker ~/.claude/skills/claude/scripts/run-claude.sh <prompt-file> <worktree> <effort> read-only <model>`, effort `low`, `medium` or `high` as the run's and `xhigh` at `max` and `ultra`. Its `RESPONSE_FILE` becomes `raw/<cluster>-claude.md` (pass 2: `raw/<cluster>-claude-2.md`); Phase 2.5 and ultra's Round 2 resume it with `resume-claude.sh "" <prompt-file> <its CLAUDE_DIR> <same effort>`.
+- Workers read with Read, Grep and Glob only, so a quality worker reports no change frequency: the coordinator adds it in Phase 3.
+- A worker that exits non-zero, or that you stop as hung, reruns in session.
+- Methodology carries the `methodology:` line, which names accounts by letter, plus every slot that reran in session. No account name or key enters the run directory.
+- Another driver keeps the in-session path, and Methodology says so.
+
 Each agent receives:
 - The cluster's source code.
 - Repo-map summaries of the dependencies the cluster imports (NOT full source code of dependencies).
@@ -127,7 +137,7 @@ Each agent receives:
 For each handoff edge, the agent can request the handoff target's signature plus its immediate handler (one function) without violating the cap. This catches event-driven, DI-heavy, and cross-service flows that the hard cap would miss.
 
 Output per agent goes to:
-- `audit/<focus>/<run-id>/raw/<cluster>-claude.md`
+- `audit/<focus>/<run-id>/raw/<cluster>-claude.md` (ultra's second Claude pass: `<cluster>-claude-2.md`)
 - `audit/<focus>/<run-id>/raw/<cluster>-codex.md`
 
 ### Phase 2.5: Cross-rebuttal (only at `high` effort and above)
@@ -231,6 +241,23 @@ One line each. Things the agents flagged that were dropped during reduce or veri
 ## Cross-cutting observations
 Patterns that span multiple clusters and are worth tracking even if not actionable per-finding.
 ```
+
+#### Findings data — `audit/<focus>/<run-id>/findings.json`
+
+Every run writes it, standalone or scheduled, on any driver, once `report.md` is final: the verified findings as data (`harden.findings/1`), for a viewer that lists them as one-liners and expands each from `report.md` by its heading. Write the entries to a file outside the worktree (`mktemp`), then run `~/.claude/skills/harden/scripts/run.sh findings write <absolute run dir> <absolute entries file>` (Codex: `~/.agents/skills/harden/scripts/run.sh`), always by that installed path, never a copy inside the audited tree:
+
+```json
+{ "scope": ["."], "exclude": ["vendor"],
+  "findings": [{ "id": "F-001", "category": "CWE-22", "files": ["src/upload.ts", "src/fs.ts"], "symbol": "join(UPLOAD_DIR, name)", "confidence": "high" }],
+  "tracked": [{ "id": "F-004", "category": "CWE-79", "files": ["web/page.tsx"], "symbol": "dangerouslySetInnerHTML", "confidence": "moderate", "ref": "#12" }] }
+```
+
+- One entry per `### [<IMPACT>] <id>: <title>` heading: under `## Findings` in `findings`, under `## Already tracked` (a skip-filed run) in `tracked`. Title and impact are read from the heading, so headings follow the template exactly.
+- `category`: the CWE (security), the bugs prompt's primary type (bugs), or the smell's name (quality). `files`: repo-relative, no line numbers, the primary sink or location first, each instance's file once. `symbol`: the most specific identifier or literal at that sink or location, verbatim from the first file (the sink call, not the function around it). `ref`: the issue (`#12`) or advisory id that tracks it, required in `tracked`.
+- `scope`: the Phase 0 scope as repo-relative prefixes, `["."]` for the whole repository. `exclude`: what Phase 0 left out by name (an owner's answer, a never-open line), beyond the standard generated and vendored set.
+- Anything else is refused with the reason: fix the entries or the heading and run it again.
+
+The script computes the rest. A finding's fingerprint is its focus, category, first file and symbol, never a line, title, id or run id. Its status compares it with the newest earlier run of this focus in the tree that has the same `scope` and `exclude`: `new`, `recurring`, or `gone` for one this run did not report again, which is no proof of a fix. Only runs in the audited snapshot count, so a run never landed on the branch the worktree was cut from is no baseline. The script prints the `FINDINGS:` line (a scheduled run's report block copies it) and a summary line for Methodology; `run.sh findings check <absolute run dir>` re-validates a written file.
 
 #### Stakeholder report — Artifact, or `audit/<focus>/<run-id>/report.html`
 
@@ -625,7 +652,7 @@ audit/<focus>/<YYYY-MM-DD>-<run-id>/
 ├── raw/
 │   ├── repo-map.md                   # flat (single-codebase) OR
 │   ├── repo-map/<package>.md         # hierarchical (monorepo)
-│   ├── <cluster-1>-claude.md         # Phase 2 raw + Phase 2.5 cross-rebuttal appended
+│   ├── <cluster-1>-claude.md         # Phase 2 raw + Phase 2.5 cross-rebuttal appended (-claude-2.md: ultra's second pass)
 │   ├── <cluster-1>-codex.md
 │   ├── <cluster-2>-claude.md
 │   └── ...
@@ -634,10 +661,11 @@ audit/<focus>/<YYYY-MM-DD>-<run-id>/
 │   ├── verified.md                   # after Phase 4 verifier
 │   └── filing.md                     # Phase 6 plan and results (filing: ask)
 ├── report.md                         # Phase 5 markdown report (always; in Artifact mode it also records the Artifact URL)
+├── findings.json                     # Phase 5 findings as data (harden.findings/1, always)
 └── report.html                       # Phase 5 stakeholder report source (every focus; the published page in file mode)
 ```
 
-The tree lives inside the run's worktree (Phase 0.5) until the user lands it. Multiple runs on the same codebase get separate dated directories; they do not overwrite each other. Compare runs by reading multiple `report.md` files side by side.
+The tree lives inside the run's worktree (Phase 0.5) until the user lands it. Multiple runs on the same codebase get separate dated directories; they do not overwrite each other. The run id starts with the UTC time as `HHMM`, then a word (`0900-weekly`), so a day's runs sort in order. Each `findings.json` marks every finding new, recurring or gone against the newest earlier run of its focus and coverage in the audited snapshot.
 
 **The stakeholder report is the primary artifact for every focus.** It gets opened by non-engineers and engineers alike to triage and prioritize; the markdown is the engineering-detail companion. Its ELI5 framing follows the focus (attacker / user / future change — see Phase 5), and its delivery mode follows the driver and the Phase 0 privacy answer: a Claude Artifact on Claude Code, `report.html` everywhere else.
 

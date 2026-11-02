@@ -1,0 +1,11 @@
+{
+  "scope": ["."],
+  "exclude": ["vendor"],
+  "findings": [
+    { "id": "F-001", "category": "CWE-22", "files": ["src/upload.ts", "src/fs.ts"], "symbol": "join(UPLOAD_DIR, name)", "confidence": "high" },
+    { "id": "F-002", "category": "cwe-079", "files": ["web/page.tsx"], "symbol": "dangerouslySetInnerHTML", "confidence": "moderate" }
+  ],
+  "tracked": [
+    { "id": "F-003", "category": "CWE-1004", "files": ["src/session.ts"], "symbol": "Set-Cookie", "confidence": "high", "ref": "#12" }
+  ]
+}

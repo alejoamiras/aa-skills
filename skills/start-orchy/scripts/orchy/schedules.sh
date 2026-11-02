@@ -39,8 +39,8 @@ sc_reading() { # <roster key>: its cached headroom reading as JSON, or null
     | {week_left_pct, week_resets_at, session_left_pct, session_resets_at, session_window, observed_at}) // null' 2>/dev/null)
   echo "${r:-null}"
 }
-sc_prompt() { # <entry> <lane> <key>: prompts/<key>.md from templates/harden-spawn.md, or nothing
-  local f b sk no t
+sc_prompt() { # <entry> <lane> <key>: prompts/<key>.md from templates/harden-spawn.md and the run's prompts/<key>.never.json, or nothing
+  local f b sk no t l n
   f=$(jq -r .focus <<<"$1")
   case $f in security) b="critical high medium low";; bugs) b="blocker critical major minor";; *) b="architectural structural local cosmetic";; esac
   if [ "$(jq -r .skip_filed <<<"$1")" = true ]; then sk="Findings already filed: run Phase 6's match step, which writes nothing; a verified finding that an open issue or a draft or triage advisory already tracks goes under \`## Already tracked\` with that number, and stays out of the findings and the counts."
@@ -48,6 +48,11 @@ sc_prompt() { # <entry> <lane> <key>: prompts/<key>.md from templates/harden-spa
   no=$(jq -r '.never_open // [] | map(strings) | if length == 0 then "" else "- Never open, read or search \(join(", ")): they hold secrets, and the audit leaves them out. Every reviewer prompt you write carries this same line." end' "$CFG")
   # the key is predictable, so the prompt lands by rename onto the name itself (-T): a planted link is replaced, never followed
   [ ! -L "$H/prompts" ] && t=$(mktemp "$H/prompts/.$3.XXXXXX") || { echo "refused: prompts/ must be a directory, not a symlink" >&2; return 1; }
+  # the accounts the run's fan-out leaves out land the same way: launch refuses a prompt that names one
+  l='[]'; [ ! -f "$LOCAL" ] || l=$(jq -c '.accounts.never // [] | map(strings)' "$LOCAL" 2>/dev/null) || l=
+  n=$("$0" accounts --json 2>/dev/null 3>&- 4>&-) && [ -n "$l" ] && n=$(jq -c --argjson l "$l" '{never: ([.orchestrator, .policy.never[], $l[]] | unique)}' <<<"$n") \
+    && printf '%s\n' "$n" > "$t" && mv -fT "$t" "$H/prompts/$3.never.json" && t=$(mktemp "$H/prompts/.$3.XXXXXX") \
+    || { rm -f "$t"; echo "refused: cannot write prompts/$3.never.json" >&2; return 1; }
   # the template by its absolute path: render tries a bare name in the working directory first
   if "$0" render "$SCRIPTS/../templates/harden-spawn.md" LANE="$2" KEY="$3" WORKTREE="$WT_ROOT/$2" BRANCH="$(cfg '.worktrees.branch_prefix // "worktree-"')$2" \
     TRUNK="$TRUNK" ORCHY_HOME="$H" FOCUS="$f" EFFORT="$(jq -r .effort <<<"$1")" CLAUDE_MODEL="$(cfg '.leads.model // "opus"')" \

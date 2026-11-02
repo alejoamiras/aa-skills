@@ -96,6 +96,8 @@ o=$(PATH="$T/aw:$PATH" SCH start sec); [[ $o =~ ^started\ sec:\ ($ls-[0-9]{12})\
 grep -qxF "$k" "$MOCK_DIR/begun.log" || ss_fail "no started record when its worktree was asked for: $(cat "$MOCK_DIR/begun.log" 2>&1)"
 grep -qF "the harden skill's \`security\` focus at effort \`high\`" "$H/prompts/$k.md" && grep -qxF 'FINDINGS: critical=<n> high=<n> medium=<n> low=<n>' "$H/prompts/$k.md" \
   || ss_fail "the rendered prompt: $(cat "$H/prompts/$k.md")"
+# the fan-out's exclusions travel beside the prompt, which names only their path
+[ "$(cat "$H/prompts/$k.never.json")" = '{"never":["cedar"]}' ] && grep -qF -- "--exclude-from $H/prompts/$k.never.json" "$H/prompts/$k.md" || ss_fail "the never file: $(cat "$H/prompts/$k.never.json" 2>&1)"
 jq -e --arg k "$k" --arg d "$due" '.status == "started" and .key == $k and .account == "atlas" and .slot == $d and .window.start.week_left_pct == 90' <<<"$(ss_rec sec)" >/dev/null \
   || ss_fail "the started record: $(ss_rec sec)"
 read -r pid _ < "$H/leads/$k.started"
@@ -125,10 +127,11 @@ o=$(SCH start sec2); [ "$o" = "skipped sec2: the worktree $ls already stands" ] 
 
 # --- two due at once with one heavy slot left: one starts, the other skips with launch's own reason and makes no worktree
 SCH add q quality medium Tue 10:00 Europe/London >/dev/null; SCH add b bugs low Wed 11:00 America/New_York --skip-filed >/dev/null; ss_back q; ss_back b
-# a link to a directory, planted at each name q's prompt may take, is replaced by the prompt and receives nothing
-mkdir -p "$T/trap"; m=$(date +%s); lq=$(ss_lane q); for d in 0 60; do ln -s "$T/trap" "$H/prompts/$lq-$(date -u -d "@$((m + d))" +%Y%m%d%H%M).md"; done
+# a link to a directory, planted at each name q's prompt and never file may take, is replaced by the file and receives nothing
+mkdir -p "$T/trap"; m=$(date +%s); lq=$(ss_lane q); for d in 0 60; do for x in md never.json; do ln -s "$T/trap" "$H/prompts/$lq-$(date -u -d "@$((m + d))" +%Y%m%d%H%M).$x"; done; done
 o=$(MOCK_LEAD_SECS=60 SCH start q); [[ $o =~ ^started\ q:\ ($lq-[0-9]{12})\ on\ atlas$ ]] || ss_fail "start q: $o"; kq=${BASH_REMATCH[1]}
-[ -z "$(find "$T/trap" -mindepth 1)" ] && [ -f "$H/prompts/$kq.md" ] && [ ! -L "$H/prompts/$kq.md" ] || ss_fail "the planted prompt link was followed"
+[ -z "$(find "$T/trap" -mindepth 1)" ] && [ -f "$H/prompts/$kq.md" ] && [ ! -L "$H/prompts/$kq.md" ] && [ -f "$H/prompts/$kq.never.json" ] && [ ! -L "$H/prompts/$kq.never.json" ] \
+  || ss_fail "a planted prompt link was followed"
 [ "$(SCH start b)" = "skipped b: every account that may take a heavy lead already runs 1 (the cap)" ] || ss_fail "the second due run: $(ss_rec b)"
 ! compgen -G '.claude/worktrees/harden-bugs-*' >/dev/null && jq -e '.status == "skipped" and .key == null' <<<"$(ss_rec b)" >/dev/null || ss_fail "the skip made a worktree, or no record"
 "$ORCHY" stop "$kq" >/dev/null

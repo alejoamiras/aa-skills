@@ -1,0 +1,65 @@
+{
+  "schema": "harden.findings/1",
+  "focus": "security",
+  "run": "2026-10-26-0900-weekly",
+  "scope": [
+    "."
+  ],
+  "exclude": [
+    "vendor"
+  ],
+  "baseline": null,
+  "baseline_note": "no earlier security run with this scope and exclusions carries findings.json",
+  "counts": {
+    "critical": 0,
+    "high": 1,
+    "medium": 1,
+    "low": 1
+  },
+  "findings": [
+    {
+      "id": "F-001",
+      "impact": "high",
+      "title": "Path traversal in upload",
+      "category": "CWE-22",
+      "files": [
+        "src/upload.ts"
+      ],
+      "symbol": "join(UPLOAD_DIR, name)",
+      "confidence": "high",
+      "status": "new",
+      "fingerprint": "f5d7f5e73e4db969",
+      "heading": "[High] F-001: Path traversal in upload"
+    },
+    {
+      "id": "F-002",
+      "impact": "medium",
+      "title": "Session cookie lacks HttpOnly",
+      "category": "CWE-1004",
+      "files": [
+        "src/session.ts"
+      ],
+      "symbol": "Set-Cookie",
+      "confidence": "high",
+      "status": "new",
+      "fingerprint": "541a59230082a262",
+      "heading": "[Medium] F-002: Session cookie lacks HttpOnly"
+    },
+    {
+      "id": "F-003",
+      "impact": "low",
+      "title": "Error responses leak stack traces",
+      "category": "CWE-209",
+      "files": [
+        "src/errors.ts"
+      ],
+      "symbol": "err.stack",
+      "confidence": "moderate",
+      "status": "new",
+      "fingerprint": "24f9a12f8496ade4",
+      "heading": "[Low] F-003: Error responses leak stack traces"
+    }
+  ],
+  "tracked": [],
+  "gone": []
+}
