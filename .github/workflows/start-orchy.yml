@@ -52,6 +52,7 @@ jobs:
       - run: bun test tests/orchy-release-profile.test.ts
       - run: bun test tests/orchy-validators.test.ts
       - run: bun test tests/orchy-requests.test.ts
+      - run: bun test tests/orchy-schedules.test.ts
 
   smoke-orchy:
     needs: changes
