@@ -127,7 +127,7 @@ elif [[ -n "${CLAUDE_ACCOUNT:-}" ]]; then
   echo "NOTE: claude-usage is not on PATH; using the ~/.claude login" >&2
 fi
 
-CLAUDE_DIR=$(mktemp -d -t claude-XXXXXXXX)
+CLAUDE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/claude-XXXXXXXX")
 # Reviewers and workers never touch the shared memory; the owner's AGENTS.md tells sessions to.
 MEMO_PREAMBLE="You are a subagent. Don't run memo."
 RESPONSE_FILE="$CLAUDE_DIR/response.md"

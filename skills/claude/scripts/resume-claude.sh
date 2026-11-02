@@ -88,7 +88,7 @@ fi
 MODEL="fable"
 SANDBOX=""  # only ever read back from the records, never inherited
 if [[ -z "$CLAUDE_DIR" ]]; then
-  CLAUDE_DIR=$(mktemp -d -t claude-XXXXXXXX)
+  CLAUDE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/claude-XXXXXXXX")
   printf '%s' "$SID" > "$CLAUDE_DIR/session_id"
 elif [[ ! -d "$CLAUDE_DIR" ]]; then
   echo "ERROR: claude dir does not exist: $CLAUDE_DIR" >&2
