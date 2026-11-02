@@ -67,8 +67,9 @@ export function gateLine(r: Row | undefined, model: string, now: number): { ok: 
 }
 
 /** Slots dealt round-robin, cluster-major: eligible roster accounts in the snapshot's rank order, this session's last.
- *  An account sharing an email with an excluded one, this session or one already dealt is the same account. `never`
- *  null means the exclusion list could not be read, so no other account is used. */
+ *  An account sharing an email with an excluded one, this session or one already dealt is the same account. With no
+ *  other account eligible every slot stays in session, excluded or not: the run already runs there. `never` null means
+ *  the exclusion list could not be read, so no other account is used. */
 export function plan(o: { rows: Row[]; roster: Account[]; current: string; never: string[] | null; model: string; clusters: string[]; passes: number;
   now: number }): { slots: Slot[]; methodology: string } {
   const keyOf = (name: string) => o.roster.find((a) => a.label === name || a.key === name)?.key ?? name;

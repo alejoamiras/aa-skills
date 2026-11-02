@@ -63,6 +63,7 @@ describe("headroom", () => {
     // an alias of an excluded account is that account: neither another roster name nor this session takes its share
     expect(keys([row("beacon", { email: "atlas@example.com" }), row("atlas"), row("cedar", { email: "atlas@example.com" }), row("delta")], ["atlas"]))
       .toEqual(["k-delta", "k-delta", "k-delta"]);
+    expect(keys([row("beacon", { email: "atlas@example.com" }), row("atlas"), row("cedar", { email: "atlas@example.com" })], ["atlas"])).toEqual([null, null, null]);
     expect(keys([row("beacon", { week_left_pct: 10 }), row("cedar")])).toEqual([null, null, null]);
     expect(keys(all, null)).toEqual([null, null, null]);
   });
