@@ -46,6 +46,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - run: bun test tests/harden-findings.test.ts
+      - run: bun test tests/harden-headroom.test.ts
 
   harden-status:
     needs: [changes, test]
