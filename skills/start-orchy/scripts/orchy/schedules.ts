@@ -69,19 +69,20 @@ export function at(y: number, mo: number, d: number, hh: number, mm: number, zon
   return fit.length ? Math.min(...fit) : t0 - before;
 }
 
-// the slot on the local date k days from t's local date, in the schedule's zone
+// the slot on the local date k days from t's local date, in the schedule's zone. A time the zone skips can push a slot
+// past its date's midnight, so both walks reach one date beyond the week
 function onDay(w: When, t: number, k: number): number | null {
   const l = new Date(wall(t, w.zone)), d = new Date(Date.UTC(l.getUTCFullYear(), l.getUTCMonth(), l.getUTCDate() + k));
   return d.getUTCDay() === w.day ? at(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), w.hh, w.mm, w.zone) : null;
 }
 /** The latest slot at or before t. */
 export function slot(w: When, t: number): number {
-  for (let k = 0; k <= 7; k++) { const s = onDay(w, t, -k); if (s !== null && s <= t) return s; }
+  for (let k = 0; k <= 8; k++) { const s = onDay(w, t, -k); if (s !== null && s <= t) return s; }
   throw new Error("no slot in the week before");
 }
 /** The first slot after t. */
 export function after(w: When, t: number): number {
-  for (let k = 0; k <= 7; k++) { const s = onDay(w, t, k); if (s !== null && s > t) return s; }
+  for (let k = -1; k <= 7; k++) { const s = onDay(w, t, k); if (s !== null && s > t) return s; }
   throw new Error("no slot in the week after");
 }
 

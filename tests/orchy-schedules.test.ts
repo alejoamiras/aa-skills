@@ -78,6 +78,10 @@ describe("slots", () => {
     expect(z(after(w("sun 02:30 America/New_York"), t("2026-03-07T00:00:00Z")))).toBe("2026-03-08T07:30:00Z");
     expect(z(after(w("sun 01:30 Europe/London"), t("2026-03-28T00:00:00Z")))).toBe("2026-03-29T01:30:00Z");
     expect(z(after(w("sun 02:15 Australia/Lord_Howe"), t("2026-10-03T00:00:00Z")))).toBe("2026-10-03T15:45:00Z");
+    // Nuuk skips Saturday 23:00 to midnight: Saturday's 23:30 runs at Sunday 00:30, and both walks still find it
+    const nuuk = w("sat 23:30 America/Nuuk");
+    expect(z(after(nuuk, t("2026-03-29T01:29:00Z")))).toBe("2026-03-29T01:30:00Z");
+    expect(z(slot(nuuk, t("2026-03-29T01:29:00Z")))).toBe("2026-03-22T01:30:00Z");
   });
   test("a wall time the zone repeats runs once, at its first occurrence", () => {
     const ny = w("sun 01:30 America/New_York");
@@ -89,15 +93,16 @@ describe("slots", () => {
   });
   // biome-ignore lint/suspicious/noExplicitAny: Temporal has no types in this Bun
   const Temporal = (globalThis as { Temporal?: any }).Temporal;
-  test.skipIf(!Temporal)("agrees with Temporal's compatible within three hours of every zone's transitions in 2026 and 2027", () => {
+  test.skipIf(!Temporal)("agrees with Temporal's compatible within three hours of every zone's transitions in 2026 and 2027, and both walks find each slot", () => {
     const bad: string[] = [];
     let n = 0;
     for (const zone of Intl.supportedValuesOf("timeZone")) {
       for (let z0 = Temporal.ZonedDateTime.from({ timeZone: zone, year: 2026, month: 1, day: 1 }), tr; (tr = z0.getTimeZoneTransition("next")) && tr.year < 2028; z0 = tr) {
         const w0 = tr.toPlainDateTime().round({ smallestUnit: "minute", roundingMode: "floor" });
         for (let m = -180; m <= 180; m += 15, n++) {
-          const p = w0.add({ minutes: m });
-          if (at(p.year, p.month, p.day, p.hour, p.minute, zone) !== p.toZonedDateTime(zone).epochMilliseconds) bad.push(`${zone} ${p}`);
+          const p = w0.add({ minutes: m }), s = at(p.year, p.month, p.day, p.hour, p.minute, zone);
+          const ws = { day: p.dayOfWeek % 7, hh: p.hour, mm: p.minute, zone };
+          if (s !== p.toZonedDateTime(zone).epochMilliseconds || slot(ws, s) !== s || after(ws, s - 1) !== s) bad.push(`${zone} ${p}`);
         }
       }
     }
