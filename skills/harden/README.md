@@ -16,16 +16,16 @@ The routing rule, since every finding belongs to exactly one focus: **security**
 
 ```mermaid
 flowchart TD
-    S0["Phase 0 — scope confirm"] --> H["Phase 0.5 — home into its own worktree (harden-focus)"]
+    S0["Phase 0 — scope confirm, then the headroom gate"] --> H["Phase 0.5 — home into its own worktree (harden-focus)"]
     H --> S1["Phase 1 — repo map (hierarchical for monorepos)"]
     S1 --> CL["Main agent clusters the repo — by entrypoint/sink (security), state owner (bugs), or boundary/similarity (quality)"]
-    CL --> A["Claude agent per cluster"]
+    CL --> A["Claude agent per cluster, spread over accounts with headroom"]
     CL --> B["Codex agent per cluster"]
     A --> R["Phase 2.5 — cross-rebuttal (high effort and above)"]
     B --> R
     R --> S3["Phase 3 — coordinator reduce: dedupe by root cause, resolve cross-model disagreements, assign severity"]
     S3 --> S4["Phase 4 — verifier pass, by severity bucket"]
-    S4 --> S5["Phase 5 — report.md + stakeholder report (Claude Artifact on Claude Code, report.html elsewhere)"]
+    S4 --> S5["Phase 5 — report.md + findings.json + stakeholder report (Claude Artifact on Claude Code, report.html elsewhere)"]
     S5 --> S6["Phase 6 (opt-in) — file issues and private draft advisories, only the list the owner approves"]
 ```
 
@@ -36,6 +36,8 @@ The design decisions that matter:
 - **Cross-model always.** Every cluster gets a Claude agent *and* a Codex agent, at every effort level. Two same-family agents agreeing means nothing; cross-family convergence is the strongest confidence signal available, and disagreement is itself recorded as a signal.
 - **Evidence or it doesn't exist.** Security findings need a concrete source→sink trace; bugs need a minimal counter-example; quality needs a named smell (Fowler catalog or a mapped analog). "Could be vulnerable" is a non-finding by construction. Negative lists (what NOT to flag) cut more false positives than any prompting trick.
 - **Bounded context.** In-cluster traces cap at ~4 functions of inter-procedural depth (beyond that, hallucination rates spike), with an escalation rule for handoff edges (event→listener, DI inject→consumer, hook→handler) so event-driven flows don't vanish at cluster boundaries.
+- **Headroom first, load spread.** On Claude Code a run starts only when its account clears the floors on the window its plan has (no 5-hour window: its week), and Phase 2's Claude cluster agents go round-robin to the roster accounts that clear them too, this session's account last. Both read claude-usage's cached snapshot, never a probe.
+- **Findings as data.** Beside `report.md`, every run writes `findings.json` (`harden.findings/1`): per finding its heading, impact, category, files, confidence and a script-computed fingerprint (focus, category, primary file, symbol), so the next run marks each new, recurring or gone against the newest earlier run of the same focus and coverage.
 - **Dedupe by root cause, not location.** The same flaw in 5 places is one finding with 5 `instances` — remediation scope stays accurate without inflating counts.
 - **Findings outlive the run, on your say-so.** After the report, Phase 6 proposes the following:
   - an issue per significant bug or quality finding;
@@ -70,10 +72,11 @@ The coordinator deliberately switches family at `max`+: the map phase becomes Cl
 
 ```
 audit/<focus>/<YYYY-MM-DD>-<run-id>/
-├── raw/         # repo map + per-cluster agent outputs (+ rebuttals)
-├── findings/    # consolidated.md, verified.md, filing.md (Phase 6)
-├── report.md    # engineering-facing
-└── report.html  # stakeholder-facing source, every focus (see report-template.html)
+├── raw/          # repo map + per-cluster agent outputs (+ rebuttals)
+├── findings/     # consolidated.md, verified.md, filing.md (Phase 6)
+├── report.md     # engineering-facing
+├── findings.json # the same findings as data, with statuses against the last run
+└── report.html   # stakeholder-facing source, every focus (see report-template.html)
 ```
 
 The stakeholder report leads each finding with a three-paragraph plain-language ELI5 (what it is; what an attacker would do / a user would trigger / gets harder to change, per focus; the fix) and tucks the technical trace behind a collapsible — built for the person who must prioritize fixes without reading code. When Claude Code drives and the user allows it, the page is published as a default-private **Claude Artifact** (URL recorded in `report.md`); on Codex, without the Artifact tool, or when findings must stay on the machine, it is the standalone `report.html` — decided once at Phase 0. A generic scaffold ships with this skill as [`report-template.html`](report-template.html).
