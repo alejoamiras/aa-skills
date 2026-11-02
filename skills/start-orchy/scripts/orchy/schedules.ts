@@ -234,7 +234,6 @@ function write(root: string, r: Run, replace: boolean): string {
   } catch (e) { try { unlinkSync(tmp); } catch {} throw e; }
   return name;
 }
-/** Keeps the newest KEEP records of a schedule. */
 function prune(root: string, id: string): void {
   const dir = join(root, id);
   for (const n of readdirSync(dir).filter((x) => FILE.test(x)).sort().slice(0, -KEEP)) try { unlinkSync(join(dir, n)); } catch {}
@@ -287,13 +286,13 @@ export function used(a: Reading | null, b: Reading | null, left: "week_left_pct"
   if (ra === null || rb === null || Math.abs(ra - rb) > 300 || x < y) return null;
   return x - y;
 }
-/** A run as its files tell it now: ended by the latest invocation's final marker, or, with none (""), started again. */
+/** A run as its files tell it now: ended by the final marker its latest invocation appended, or, with none (""), started again. */
 export function settle(root: string, id: string, name: string, marker: string, line: string, receipt: unknown, account: string,
   end: Reading | null, now: number): Run {
   const run = load(root, id, name);
   if (run.key === null || run.status === "skipped") no(`runs/${id}/${name} had no lead`);
   const m = marker === "" ? null : (/^(LEAD_DONE|LEAD_BLOCKED|ARC_FAILED)(.*)$/.exec(marker) ?? no("no final marker"));
-  // a key's segments in the receipt: a resume adds one, and each carries only its own cost
+  // a key's segments in the receipt, one per launch or resume, each with only its own cost
   const segs = (isObj(receipt) && Array.isArray(receipt.lanes) ? receipt.lanes : []).filter((l: O) => isObj(l) && l.lane === run.lane)
     .flatMap((l: O) => (Array.isArray(l.runs) ? l.runs : [])).filter((s: O) => isObj(s) && s.key === run.key);
   const priced = segs.map((s: O) => s.cost_usd).filter((c: unknown): c is number => typeof c === "number" && Number.isFinite(c) && c >= 0);

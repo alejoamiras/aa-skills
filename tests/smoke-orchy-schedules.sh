@@ -74,12 +74,25 @@ o=$(PATH="$T/clock:$PATH" "$ORCHY" wait 20)
 grep -qxF "> roll $(date -u -d "@$at" +%FT%TZ)" <<<"$o" && ! grep -q '^TIMEOUT' <<<"$o" || ss_fail "the slot passing mid-wait did not wake it: $o"
 [ "$(SCH remove roll)" = "schedule roll removed; its run records stay" ] || ss_fail "remove"
 
-# --- start: the due slot runs as a heavy lead on atlas, its record written before anything ran; no lock reaches a child
+# --- a pause that lands while a start waits on schedules.lock is what that start reads
+flock "$H/schedules.lock" bash -c 'touch "$2"; sleep 2; jq ".schedules[0].paused = true" "$1" > "$1.p" && mv "$1.p" "$1"' _ "$C" "$T/held" & w=$!
+timeout 5 bash -c 'until [ -e "$1" ]; do sleep 0.05; done' _ "$T/held" || ss_fail "the lock holder never took schedules.lock"
+want='sec is not due; its next slot is none: it is paused'; ss_nope SCH start sec; wait "$w"
+jq '.schedules[0].paused = false' "$C" > "$T/c.json" && mv "$T/c.json" "$C"
+
+# --- start: the due slot runs as a heavy lead on atlas, its record written before anything ran; no lock reaches a child.
+# The agent-worktree first on PATH logs the lane's started records as each worktree is asked for
+mkdir -p "$T/aw"; cat > "$T/aw/agent-worktree" <<EOF; chmod +x "$T/aw/agent-worktree"
+#!/usr/bin/env bash
+[ "\$1" != new ] || jq -r --arg l "\$2" 'select(.status == "started" and .lane == \$l) | .key' "\$ORCHY_HOME"/runs/*/*.json >> "\$MOCK_DIR/begun.log"
+exec "$G/agent-worktree" "\$@"
+EOF
 ss_rec() { jq -c . "$(find "$H/runs/$1" -name '*.json' | sort | tail -n 1)"; }   # a schedule's newest record
 ss_dead() { local i; for ((i = 0; i < 100; i++)); do [ -d "/proc/$1" ] || return 0; sleep 0.1; done; ss_fail "lead pid $1 still runs"; }
 ss_back() { jq --arg i "$1" '(.schedules[] | select(.id == $i)).since = "2026-01-05T00:00:00Z"' "$C" > "$T/c.json" && mv "$T/c.json" "$C"; }
-o=$(SCH start sec); [[ $o =~ ^started\ sec:\ (harden-security-[0-9]{12})\ on\ atlas$ ]] || ss_fail "start: $o"; k=${BASH_REMATCH[1]}
-grep -qF "the harden skill's \`security\` focus at effort \`high\`" "$H/prompts/$k.md" && grep -qxF '    FINDINGS: critical=<n> high=<n> medium=<n> low=<n>' "$H/prompts/$k.md" \
+o=$(PATH="$T/aw:$PATH" SCH start sec); [[ $o =~ ^started\ sec:\ (harden-security-[0-9]{12})\ on\ atlas$ ]] || ss_fail "start: $o"; k=${BASH_REMATCH[1]}
+grep -qxF "$k" "$MOCK_DIR/begun.log" || ss_fail "no started record when its worktree was asked for: $(cat "$MOCK_DIR/begun.log" 2>&1)"
+grep -qF "the harden skill's \`security\` focus at effort \`high\`" "$H/prompts/$k.md" && grep -qxF 'FINDINGS: critical=<n> high=<n> medium=<n> low=<n>' "$H/prompts/$k.md" \
   || ss_fail "the rendered prompt: $(cat "$H/prompts/$k.md")"
 jq -e --arg k "$k" --arg d "$due" '.status == "started" and .key == $k and .account == "atlas" and .slot == $d and .window.start.week_left_pct == 90' <<<"$(ss_rec sec)" >/dev/null \
   || ss_fail "the started record: $(ss_rec sec)"
@@ -87,18 +100,18 @@ read -r pid _ < "$H/leads/$k.started"
 for x in /proc/"$pid"/fd/*; do case $(readlink "$x") in *runs.lock|*schedules.lock) ss_fail "the lead holds $(readlink "$x")";; esac; done
 want='sec is not due'; ss_nope SCH start sec
 
-# --- settle: a dead lead with no report keeps started and gains its cost; its report ends it; a resume that dies
-# unreported reads started again with both runs' cost, until its own report lands
+# --- settle: a dead lead with no report keeps started and gains its cost; its report (its block written twice) ends it;
+# a resume that dies having added prose but no block of its own reads started again, with both runs' cost, until its block lands
 ss_dead "$pid"; "$ORCHY" snapshot >/dev/null 2>&1
 jq -e '.status == "started" and .cost_usd == 0.5 and .end == null' <<<"$(ss_rec sec)" >/dev/null || ss_fail "a dead lead's record with no report: $(ss_rec sec)"
 SCH list | grep -qF "$k has no live lead and no final marker" || ss_fail "list of a dead unreported run: $(SCH list)"
 { ss_row atlas 85; ss_row beacon 10; ss_row cedar 90; } | jq -s . > "$MOCK_DIR/cu/rows.json"
-printf '%s\n' 'Audit done.' LEAD_DONE 'REPORT audit/security/r1/report.md' 'COMMIT none' 'FINDINGS: critical=0 high=2 medium=1 low=0' > "$H/reports/$k.md"
+{ echo 'Audit done.'; for _ in 1 2; do printf '%s\n' LEAD_DONE 'REPORT audit/security/r1/report.md' 'COMMIT none' 'FINDINGS: critical=0 high=2 medium=1 low=0'; done; } > "$H/reports/$k.md"
 "$ORCHY" snapshot >/dev/null 2>&1
 jq -e '.status == "done" and .marker == "LEAD_DONE" and .counts == {critical: 0, high: 2, medium: 1, low: 0} and .cost_usd == 0.5
   and (.end | test("Z$")) and .window.week_used_pct == 5 and .window.session_used_pct == 0' <<<"$(ss_rec sec)" >/dev/null || ss_fail "the settled record: $(ss_rec sec)"
 MOCK_RESULT='{"type":"result","subtype":"success","total_cost_usd":1.25,"num_turns":3,"duration_ms":1000}' "$ORCHY" resume "$k" harden-security atlas "$("$ORCHY" session-id "$k")" >/dev/null
-read -r pid _ < "$H/leads/$k.started"; ss_dead "$pid"; "$ORCHY" snapshot >/dev/null 2>&1
+read -r pid _ < "$H/leads/$k.started"; ss_dead "$pid"; echo 'Resumed: rerunning the fix loop.' >> "$H/reports/$k.md"; "$ORCHY" snapshot >/dev/null 2>&1
 jq -e '.status == "started" and .marker == null and .counts == null and .cost_usd == 1.25' <<<"$(ss_rec sec)" >/dev/null || ss_fail "a resume that died unreported: $(ss_rec sec)"
 printf '%s\n' LEAD_DONE 'REPORT audit/security/r1/report.md' 'COMMIT none' 'FINDINGS: critical=0 high=1 medium=1 low=0' >> "$H/reports/$k.md"
 "$ORCHY" snapshot >/dev/null 2>&1
@@ -106,7 +119,10 @@ jq -e '.status == "done" and .counts.high == 1 and .cost_usd == 1.25' <<<"$(ss_r
 
 # --- two due at once with one heavy slot left: one starts, the other skips with launch's own reason and makes no worktree
 SCH add q quality medium Tue 10:00 Europe/London >/dev/null; SCH add b bugs low Wed 11:00 America/New_York --skip-filed >/dev/null; ss_back q; ss_back b
+# a link to a directory, planted at each name q's prompt may take, is replaced by the prompt and receives nothing
+mkdir -p "$T/trap"; m=$(date +%s); for d in 0 60; do ln -s "$T/trap" "$H/prompts/harden-quality-$(date -u -d "@$((m + d))" +%Y%m%d%H%M).md"; done
 o=$(MOCK_LEAD_SECS=60 SCH start q); [[ $o =~ ^started\ q:\ (harden-quality-[0-9]{12})\ on\ atlas$ ]] || ss_fail "start q: $o"; kq=${BASH_REMATCH[1]}
+[ -z "$(find "$T/trap" -mindepth 1)" ] && [ -f "$H/prompts/$kq.md" ] && [ ! -L "$H/prompts/$kq.md" ] || ss_fail "the planted prompt link was followed"
 [ "$(SCH start b)" = "skipped b: every account that may take a heavy lead already runs 1 (the cap)" ] || ss_fail "the second due run: $(ss_rec b)"
 [ ! -d .claude/worktrees/harden-bugs ] && jq -e '.status == "skipped" and .key == null' <<<"$(ss_rec b)" >/dev/null || ss_fail "the skip made a worktree, or no record"
 "$ORCHY" stop "$kq" >/dev/null
@@ -131,7 +147,7 @@ git worktree remove --force .claude/worktrees/harden-bugs && git branch -q -D wo
 { ss_row atlas 85 none; ss_row beacon 10; ss_row cedar 90; } | jq -s . > "$MOCK_DIR/cu/rows.json"
 SCH add b3 bugs max Sat 14:00 Asia/Tokyo --skip-filed >/dev/null; ss_back b3
 o=$(SCH start b3); [[ $o =~ ^started\ b3:\ (harden-bugs-[0-9]{12})\ on\ atlas$ ]] || ss_fail "the account with no 5-hour window: $o"; kb=${BASH_REMATCH[1]}
-grep -qF '## Already tracked' "$H/prompts/$kb.md" && grep -qxF '    FINDINGS: blocker=<n> critical=<n> major=<n> minor=<n>' "$H/prompts/$kb.md" || ss_fail "the skip_filed prompt"
+grep -qF '## Already tracked' "$H/prompts/$kb.md" && grep -qxF 'FINDINGS: blocker=<n> critical=<n> major=<n> minor=<n>' "$H/prompts/$kb.md" || ss_fail "the skip_filed prompt"
 jq -e '.window.start.session_window == "none"' <<<"$(ss_rec b3)" >/dev/null || ss_fail "the start reading: $(ss_rec b3)"
 
 # --- the reader's shape, pinned: times, epochs and key stamps vary per run

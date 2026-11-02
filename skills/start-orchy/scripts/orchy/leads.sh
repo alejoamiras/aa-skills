@@ -115,8 +115,10 @@ launch_spawn() {
     else echo "refused: $a already runs $n $weight lead(s) across programs (cap $capn); --force-cap only on the owner's word" >&2; fi; exit 1
   fi
   a=$pick
-  # a killed run may end mid-line: the newline keeps the marker a line of its own
-  printf '\n%s\n' "$(jq -nc --arg k "$k" --arg l "$w" --arg c "$cmd" --arg t "$(utc_now)" '{type: "orchy_invocation", key: $k, lane: $l, cmd: $c, at: $t}')" >> "$L"
+  # a killed run may end mid-line: the newline keeps the marker a line of its own. report_bytes, the report's size as
+  # this run starts, tells what the run appends from what an earlier one left
+  rsz=$(wc -c 2>/dev/null < "$H/reports/$k.md") && [[ $rsz =~ ^[0-9]+$ ]] || rsz=0
+  printf '\n%s\n' "$(jq -nc --arg k "$k" --arg l "$w" --arg c "$cmd" --arg t "$(utc_now)" --argjson b "$rsz" '{type: "orchy_invocation", key: $k, lane: $l, cmd: $c, at: $t, report_bytes: $b}')" >> "$L"
   # PRINT_BG_WAIT_CEILING=0: a headless turn that yields to a background task ends the session; the brief tells leads to poll inside one tool call instead.
   # setsid: the lead leads its own process group (a background subshell is not a group leader, so setsid does not fork and $! stays the lead).
   ( cd "$d" && exec 9>&- env CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 setsid nohup claude-usage run "=$a" "${extra[@]}" -p "$(cat "$p")" --model "$model" "${perm[@]}" \

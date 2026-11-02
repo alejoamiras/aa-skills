@@ -9,12 +9,14 @@ You run the scheduled audit `<LANE>` (lead key `<KEY>`): the harden skill's `<FO
 - `report_mode` file (`report.html` beside `report.md`) and `filing: ask`, which unattended means Phase 6 writes its proposed list and files nothing. Open no issue, advisory, comment or PR.
 - <SKIP_FILED>
 
-Commit the run's directory on <BRANCH> alone (`git add -f` when `audit/` is ignored) as `docs(audit): <FOCUS> <DATE>`, push nothing and leave the worktree in place: the owner lands or discards it. Overwrite <ORCHY_HOME>/reports/<KEY>.progress at every phase. Last, append this block to <ORCHY_HOME>/reports/<KEY>.md, each line exactly as shown:
+Commit the run's directory on <BRANCH> alone (`git add -f` when `audit/` is ignored) as `docs(audit): <FOCUS> <DATE>`, push nothing and leave the worktree in place: the owner lands or discards it. Overwrite <ORCHY_HOME>/reports/<KEY>.progress at every phase. Last, append this block to <ORCHY_HOME>/reports/<KEY>.md, each line flush left, as shown:
 
-    LEAD_DONE
-    REPORT <the run's report.md, relative to the worktree>
-    COMMIT <the commit's full sha, or none>
-    FINDINGS: <BUCKETS>
+```
+LEAD_DONE
+REPORT <the run's report.md, relative to the worktree>
+COMMIT <the commit's full sha, or none>
+FINDINGS: <BUCKETS>
+```
 
 `LEAD_BLOCKED: <why>` or `ARC_FAILED: <why>` replaces `LEAD_DONE` when the run could not finish. `FINDINGS:` counts the verified findings per impact bucket, zeros included, a finding relabeled `Potential` in its bucket; `FINDINGS: none` when the run verified nothing. At most ten lines of summary follow. The findings themselves stay in the report: never in this block, a commit message or a file outside the worktree.
 

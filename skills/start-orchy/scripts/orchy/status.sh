@@ -152,17 +152,18 @@ orchy_wait() {
   # answers and schedules wake on an arrival only: a departure (an answer taken, a slot started) is recorded without a report
   arrive() { if [ -n "$(an_added "${last[$1]:-}" "${new[$1]}")" ]; then changed+=("$1")
     elif [ "${new[$1]}" != "${last[$1]:-}" ]; then printf '%s\n' "${new[$1]}" > "$SEEN/.$1.$$" && mv "$SEEN/.$1.$$" "$SEEN/$1" && last[$1]=${new[$1]}; fi; }
-  # each schedule's due and next slot, recomputed when orchy.json changes; a poll takes the latest one passed, per id
+  # each schedule's due and next slot, recomputed when orchy.json changes; a poll takes the latest one passed, per id.
+  # Called bare, never in $(...): a subshell would drop the cache
   sl_cfg=-; slots=
   sl_due() { local c; c=$(cat "$CFG" 2>/dev/null)
     [ "$c" = "$sl_cfg" ] || { sl_cfg=$c; slots=$(ts_run schedules slots "$RUNS" "$(jq -c '.schedules // []' <<<"$c" 2>/dev/null)" "$(utc_now)" 2>/dev/null); }
-    awk -v t="$(date +%s)" '$2 <= t && $2 >= m[$1] { m[$1] = $2; s[$1] = $3 } END { for (i in s) print i, s[i] }' <<<"$slots" | LC_ALL=C sort; }
+    new[schedules]=$(awk -v t="$(date +%s)" '$2 <= t && $2 >= m[$1] { m[$1] = $2; s[$1] = $3 } END { for (i in s) print i, s[i] }' <<<"$slots" | LC_ALL=C sort); }
   t0=$(date +%s); n=0
   while :; do
     sleep "$tick"; n=$((n+1)); changed=()
     new[local]=$(snap); { [ -n "${last[local]+x}" ] && [ "${new[local]}" = "${last[local]}" ]; } || changed+=(local)
     new[answers]=$(an_names); arrive answers
-    new[schedules]=$(sl_due); arrive schedules
+    sl_due; arrive schedules
     # the first tick polls too: local events re-arm the wait, and a burst of them must not starve GitHub
     if [ "$n" = 1 ] || [ $((n % every)) -eq 0 ]; then
       for s in "${srcs[@]}"; do
