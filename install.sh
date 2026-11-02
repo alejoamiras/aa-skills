@@ -46,15 +46,18 @@ link() {
 # on those. Elsewhere its links from this repo are removed, so a harness never
 # lists a skill that cannot run on the machine.
 OS="$(uname -s)"
+# Ownership compares physical paths: an earlier install may have run through a
+# symlinked alias of this clone.
 unlink_ours() {
-  local dst="$1" name="$2"
+  local dst="$1" name="$2" target dir
   [ -L "${dst}" ] || return 0
-  case "$(readlink "${dst}")" in
-    "${REPO_DIR}/skills/${name}"|"${REPO_REAL}/skills/${name}")
-      rm "${dst}"
-      echo "prune   ${dst} (not for ${OS})"
-      ;;
-  esac
+  target="$(readlink "${dst}")"
+  case "${target}" in /*) ;; *) target="$(dirname "${dst}")/${target}" ;; esac
+  [ "$(basename "${target}")" = "${name}" ] || return 0
+  dir="$(cd "$(dirname "${target}")" 2>/dev/null && pwd -P)" || return 0
+  [ "${dir}" = "${REPO_REAL}/skills" ] || return 0
+  rm "${dst}"
+  echo "prune   ${dst} (not for ${OS})"
 }
 
 # Same SKILL.md, two discovery roots: Claude Code reads ~/.claude/skills, Codex

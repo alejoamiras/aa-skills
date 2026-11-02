@@ -23,14 +23,16 @@ chmod +x "$S/fake/uname"
 install_as() { env HOME="$S/home" PATH="$S/fake:$PATH" FAKE_OS="$1" bash "$R/install.sh" > "$S/out.$1" 2>&1; }
 linked() { [ "$(readlink "$S/home/$1/skills/$2")" = "$R/skills/$2" ]; }
 
-# An earlier install linked linuxy into ~/.claude; ~/.agents holds someone else's skill of the same name.
-ln -s "$R/skills/linuxy" "$S/home/.claude/skills/linuxy"
+# An earlier install, run through a symlinked alias of the clone, linked linuxy into ~/.claude; ~/.agents holds
+# someone else's skill of the same name.
+ln -s "$R" "$S/alias"
+ln -s "$S/alias/skills/linuxy" "$S/home/.claude/skills/linuxy"
 ln -s "$S/elsewhere" "$S/home/.agents/skills/linuxy"
 
 install_as Darwin; rc=$?
 assert_install "darwin: install succeeds" test "$rc" = 0
 assert_install "darwin: a skill without platforms links into both roots" eval 'linked .claude anywhere && linked .agents anywhere'
-assert_install "darwin: a Linux-only skill's earlier link from this repo is removed" test ! -L "$S/home/.claude/skills/linuxy"
+assert_install "darwin: a Linux-only skill's earlier link into this clone, through an alias, is removed" test ! -L "$S/home/.claude/skills/linuxy"
 assert_install "darwin: a same-named link to somewhere else is left alone" test "$(readlink "$S/home/.agents/skills/linuxy")" = "$S/elsewhere"
 assert_install "darwin: the skip names the platforms" grep -qx 'skip    linuxy (Linux only)' "$S/out.Darwin"
 
