@@ -54,7 +54,7 @@ unlink_ours() {
   target="$(readlink "${dst}")"
   case "${target}" in /*) ;; *) target="$(dirname "${dst}")/${target}" ;; esac
   [ "$(basename "${target}")" = "${name}" ] || return 0
-  dir="$(cd "$(dirname "${target}")" 2>/dev/null && pwd -P)" || return 0
+  dir="$(cd -P "$(dirname "${target}")" 2>/dev/null && pwd -P)" || return 0
   [ "${dir}" = "${REPO_REAL}/skills" ] || return 0
   rm "${dst}"
   echo "prune   ${dst} (not for ${OS})"
