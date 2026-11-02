@@ -399,7 +399,7 @@ export const ANSWER_MAX = 16 * 1024;
 /** Sent and not yet taken: a pending final answer for the current rev, or a pending reply. */
 export const answered = (r: Request, ps: Pending[]) => ps.some((p) => p.kind === "reply" || (p.kind !== undefined && p.rev === r.rev));
 
-const age = (s: number) => (s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h`);
+export const age = (s: number) => (s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h`);
 export function list(s: Store, all: boolean): { requests: (Request & { age_s: number; pending: Pending[]; answered: boolean; unanswered: string[] })[]; errors: { file: string; error: string }[] } {
   const a = scan(s.dir, s.wref), c = all ? scan(at(s.dir, "closed"), s.wref, "closed/") : { ok: [], errors: [] };
   const now = fromDateIso8601(s.now)!;
