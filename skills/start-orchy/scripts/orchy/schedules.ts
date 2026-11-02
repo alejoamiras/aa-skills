@@ -355,7 +355,7 @@ function run(op: string, a: string[]): { out: string; err?: string } {
     case "view": {
       const v = view(a[0], schedules(json(1, "the list")), facts(json(2, "the facts")), now(3));
       if (a[4] === "1") return { out: `${JSON.stringify(v)}\n` };
-      return { out: v.schedules.map((e) => `${line(e)}\n`).join(""), err: v.errors.map((e) => `error: ${e.file}: ${e.error}\n`).join("") };
+      return { out: v.schedules.length ? v.schedules.map((e) => `${line(e)}\n`).join("") : "no schedules\n", err: v.errors.map((e) => `error: ${e.file}: ${e.error}\n`).join("") };
     }
     case "slots": {
       const t = now(2), rows = schedules(json(1, "the list")).flatMap((s) => {
