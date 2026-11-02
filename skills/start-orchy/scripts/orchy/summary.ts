@@ -1,7 +1,5 @@
-// orchy.summary/1, $ORCHY_HOME/summary.json: the one or two plain lines a viewer shows for the program (what it works on
-// now, what it waits on) and since when they have stood: {"schema": "orchy.summary/1", "since": "<UTC time>", "lines": [...]}.
-// set replaces the file whole, and only when the lines change. A lead can write the home as the owner's user, so every read
-// checks the file again and refuses one that is not this format.
+// orchy.summary/1: the one or two plain lines a viewer shows for the program, and since when they have stood (an unchanged
+// set keeps the time). A lead can write the home as the owner's user, so every read checks the file again.
 // Usage: ts_run summary set <file> <now> <line> [<line>]   ("summary set", or "summary unchanged since <since>")
 //        ts_run summary show <file> <now>                   ("since <since> (<age>)" and each line, or "no summary")
 import { closeSync, constants, fstatSync, fsyncSync, openSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -43,7 +41,8 @@ export function parse(o: unknown): Summary {
 
 /** The stored summary, or null when there is none; any other file refuses, so nothing is shown or written through it. */
 export function load(path: Buffer): Summary | null {
-  const p = path.toString(), fix = "; read it, remove it, then set the summary again";
+  // named, never the path: a home path may hold any byte, and a refusal is one plain line
+  const p = "summary.json", fix = "; read it, remove it, then set the summary again";
   let fd: number;
   try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
   catch (e) {

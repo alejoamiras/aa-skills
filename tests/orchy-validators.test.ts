@@ -227,11 +227,11 @@ describe("summary", () => {
     for (const [body, why] of stored) {
       writeFileSync(f, body);
       for (const op of [["set", f, t0, "a"], ["show", f, t0]])
-        expect(cli("summary", ...op)).toMatchObject({ code: 1, err: `refused: ${f} ${why}; read it, remove it, then set the summary again\n` });
+        expect(cli("summary", ...op)).toMatchObject({ code: 1, err: `refused: summary.json ${why}; read it, remove it, then set the summary again\n` });
       expect(readFileSync(f, "utf8")).toBe(body);
     }
     rmSync(f); symlinkSync(join(d, "elsewhere.json"), f);
-    expect(cli("summary", "set", f, t0, "a").err).toBe(`refused: ${f} is a symlink; read it, remove it, then set the summary again\n`);
+    expect(cli("summary", "set", f, t0, "a").err).toBe(`refused: summary.json is a symlink; read it, remove it, then set the summary again\n`);
     expect(readdirSync(d)).toEqual(["summary.json"]);
   });
   test("show prints since and its age, then each line; no summary when there is none", () => {
