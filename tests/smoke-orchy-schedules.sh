@@ -119,9 +119,9 @@ printf '%s\n' LEAD_DONE 'REPORT audit/security/r1/report.md' 'COMMIT none' 'FIND
 "$ORCHY" snapshot >/dev/null 2>&1
 jq -e '.status == "done" and .counts.high == 1 and .cost_usd == 1.25' <<<"$(ss_rec sec)" >/dev/null || ss_fail "the resumed run's settle: $(ss_rec sec)"
 
-# --- two schedules of one focus due on one UTC date share its lane: the second's wt-new refuses, and its run is a skip
+# --- two schedules of one focus due on one UTC date share its lane: while the first's worktree stands the second is a skip
 SCH add sec2 security low mon 09:00 UTC >/dev/null; ss_back sec2
-o=$(SCH start sec2); [[ $o =~ ^skipped\ sec2:\ $ls:\ worktree\ exists\ at\ .+/$ls\;\ refusing$ ]] || ss_fail "a same-date run: $o"
+o=$(SCH start sec2); [ "$o" = "skipped sec2: the worktree $ls already stands" ] || ss_fail "a same-date run: $o"
 
 # --- two due at once with one heavy slot left: one starts, the other skips with launch's own reason and makes no worktree
 SCH add q quality medium Tue 10:00 Europe/London >/dev/null; SCH add b bugs low Wed 11:00 America/New_York --skip-filed >/dev/null; ss_back q; ss_back b

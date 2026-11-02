@@ -214,7 +214,8 @@ describe("view", () => {
     const why = (s: Schedule, f = NO_FACTS) => view(root, [s], f, now).schedules[0].why;
     expect(why(sched({ paused: true }), { ...NO_FACTS, mode: "triage" })).toBe("paused");
     expect(why(sched(), { ...NO_FACTS, mode: "triage", hold: "other:peer-x" })).toBe("the program is in triage mode");
-    expect(why(sched(), { ...NO_FACTS, hold: "other:peer-x" })).toBe("held by other:peer-x");
+    expect(why(sched(), { ...NO_FACTS, hold: "other:peer-x", open: [LANE] })).toBe("held by other:peer-x");
+    expect(why(sched(), { ...NO_FACTS, open: [LANE] })).toBe(`the worktree ${LANE} already stands`);
     const v = view(root, [sched(), sched({ id: "tue", focus: "quality", when: "tue 09:00 UTC", skip_filed: true, paused: true })], NO_FACTS, now);
     expect(v.schedules.map(line)).toEqual(["DUE weekly: harden security high, slot 2026-11-09T09:00:00Z; ORCHY schedule start weekly",
       "tue: harden quality high, skips filed, tue 09:00 UTC; paused"]);
@@ -226,15 +227,16 @@ describe("view", () => {
       .toBe(`tue: harden security high, tue 09:00 UTC; next 2026-11-10T09:00:00Z; last blocked 2026-11-09T09:07:00Z: the tree was dirty; running ${KEY} on atlas`);
     expect(last(run(), false)).toEndWith(`; last started 2026-11-09T09:07:00Z; ${KEY} has no live lead and no final marker`);
   });
-  test("a worktree an earlier run left never blocks the next slot; those of its started runs are counted, newest first", () => {
-    const root = join(T, "h5", "runs"), lane = (d: string) => `harden-security-202610${d}`;
+  test("a worktree an earlier run left never blocks the next slot; those of its runs that were not skipped are counted, newest first", () => {
+    const root = join(T, "h5", "runs"), lane = (d: string) => `harden-security-202610${d}`, key = (d: string) => `${lane(d)}-202610${d}0907`;
     mkdirSync(join(root, "weekly"), { recursive: true });
-    for (const [d, status] of [["12", "skipped"], ["19", "done"], ["26", "blocked"]])
+    for (const [d, status] of [["12", "skipped"], ["19", "done"], ["26", "started"]])
       writeFileSync(join(root, "weekly", `202610${d}T090700Z.json`), JSON.stringify(run({ slot: `2026-10-${d}T09:00:00Z`, start: `2026-10-${d}T09:07:00Z`,
-        status, lane: lane(d), key: status === "skipped" ? null : `${lane(d)}-202610${d}0907` })));
-    const e = view(root, [sched()], { ...NO_FACTS, open: [lane("12"), lane("19"), lane("26"), "harden-quality-20261026"] }, t("2026-11-09T09:05:00Z")).schedules[0];
+        status, lane: lane(d), key: status === "skipped" ? null : key(d) })));
+    const f = { ...NO_FACTS, open: [lane("12"), lane("19"), lane("26"), "harden-quality-20261026"], alive: [key("26")] };
+    const e = view(root, [sched()], f, t("2026-11-09T09:05:00Z")).schedules[0];
     expect(e).toMatchObject({ lane: LANE, due: "2026-11-09T09:00:00Z", will_start: true, open: [lane("26"), lane("19")] });
     expect(line(e)).toBe("DUE weekly: harden security high, slot 2026-11-09T09:00:00Z; ORCHY schedule start weekly; 2 worktrees wait on you");
-    expect(line({ ...e, due: null, open: [lane("26")] })).toEndWith("; last blocked 2026-10-26T09:07:00Z; 1 worktree waits on you");
+    expect(line({ ...e, due: null, open: [lane("26")] })).toEndWith(`; running ${key("26")} on atlas; 1 worktree waits on you`);
   });
 });

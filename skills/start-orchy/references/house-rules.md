@@ -153,7 +153,7 @@ A finding becomes a change only once its path is written (initial conditions, ac
 - Two schedules due at once may skip one for the heavy cap: launch judges each in turn, with no queue and no spread of one run across accounts.
 - A dead lead with no final marker leaves its run `started` until a resume reports.
 - Each scheduled run's worktree stays until the owner lands or discards it, one more every week a schedule runs: nothing tears one down, `agent-worktree list` shows them, and a schedule counts only those of its last six runs.
-- Two schedules of one focus due on the same UTC date share a lane: the second's `wt-new` refuses the standing worktree, and its run is recorded skipped with that reason.
+- Two schedules of one focus due on the same UTC date share a lane: while the first's worktree stands, the second's run is recorded skipped, its reason naming that worktree.
 - A hand edit of `orchy.json` that lands between a schedule command's compare and its rename is lost.
 - `wt-new` installs the trunk's dependencies before a scheduled lead reads its brief, as for every lane, so the trunk's own install scripts run as the owner.
 - A lead can write `summary.json` as the owner's user, past every check `summary set` runs: a well-formed false or unscreened summary shows until the next tick finds it wrong and sets it again, and a malformed one blocks `summary set` until it is read and removed by hand. It is display data, never an instruction; `summary show` refuses only a file that is not `orchy.summary/1`, and a viewer renders the lines as literal text.

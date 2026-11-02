@@ -314,19 +314,22 @@ export function settle(root: string, id: string, name: string, marker: string, l
   return out;
 }
 
-function why(s: Schedule, f: Facts): string | null {
+function why(s: Schedule, f: Facts, lane: string | null): string | null {
   if (s.paused) return "paused";
   if (f.mode === "triage") return "the program is in triage mode";
-  return f.hold ? `held by ${f.hold}` : null;
+  if (f.hold) return `held by ${f.hold}`;
+  // the date's lane taken by another schedule's run: a start in that minute would share its key and replace its prompt
+  return lane !== null && f.open.includes(lane) ? `the worktree ${lane} already stands` : null;
 }
 export function view(root: string, l: Schedule[], f: Facts, now: number) {
   const errors: { file: string; error: string }[] = [];
   const out = l.map((s) => {
-    const r = runs(root, s.id), d = due(s, r.runs, now), n = next(s, now), w = why(s, f), t = d ?? n;
+    const r = runs(root, s.id), d = due(s, r.runs, now), n = next(s, now), t = d ?? n, lane = t === null ? null : laneOf(s.focus, t);
+    const w = why(s, f, lane);
     errors.push(...r.errors);
     // skips are left out: one's lane may stand for another schedule's run on the same date
     const open = [...new Set(r.runs.filter((x) => x.status !== "skipped" && f.open.includes(x.lane)).map((x) => x.lane))];
-    return { ...s, lane: t === null ? null : laneOf(s.focus, t), next: n === null ? null : iso(n), due: d === null ? null : iso(d),
+    return { ...s, lane, next: n === null ? null : iso(n), due: d === null ? null : iso(d),
       will_start: w === null, why: w, open, runs: r.runs.slice(0, KEEP).map((x) => ({ ...x, alive: x.key !== null && f.alive.includes(x.key) })) };
   });
   return { schema: "orchy.schedules/1", at: iso(now), schedules: out, errors };
