@@ -18,9 +18,9 @@ The real files live **here**; `~/.claude/skills/<name>` and `~/.agents/skills/<n
 | [`codex`](skills/codex/) | Second-opinion consults via the Codex CLI (GPT-6 Astra by default) — the foreign-reviewer leg for Claude Code-driven sessions; plus raster image generation/editing through Codex's built-in `image_gen` (gpt-image-2, ChatGPT plan, no API key) |
 | [`crew`](skills/crew/) | Live Claude Code workers on your other `claude-usage` accounts, one tmux session each, with two-way `SendMessage` between director and worker mid-task; spawn, peers, tail and owner-checked stop |
 | [`kimi`](skills/kimi/) | Second-opinion consults via the Kimi Code CLI (Moonshot K3/K2.x) — codex-style harness with a worktree-change tripwire (kimi has no read-only sandbox) |
-| [`start-orchy`](skills/start-orchy/) | Runs a repository's whole backlog as an unattended program from its root folder: issues triaged into lanes, one headless lead per lane arc on the owner's other `claude-usage` accounts (one worktree each), merges on a mechanical policy, every product decision on a signed decision page with pictures, a 35-minute tick until done. Claude Code driver only |
+| [`start-orchy`](skills/start-orchy/) | **Linux only.** Runs a repository's whole backlog as an unattended program from its root folder: issues triaged into lanes, one headless lead per lane arc on the owner's other `claude-usage` accounts (one worktree each), merges on a mechanical policy, every product decision on a signed decision page with pictures, a 35-minute tick until done. Claude Code driver only |
 | [`handoff`](skills/handoff/) | Continues the current Claude Code conversation on another `claude-usage` account with its full context: prints the one line to run after `/exit` |
-| [`pause-orchy`](skills/pause-orchy/) | Hands a start-orchy program's orchestrator seat over before moving it to another `claude-usage` account: stops the loop and the Monitor, writes the handover line and unlocks, while leads and watchers keep running for the next session to adopt |
+| [`pause-orchy`](skills/pause-orchy/) | **Linux only.** Hands a start-orchy program's orchestrator seat over before moving it to another `claude-usage` account: stops the loop and the Monitor, writes the handover line and unlocks, while leads and watchers keep running for the next session to adopt |
 | [`my-stack`](skills/my-stack/) | Project scaffolding: Bun, Biome, CI/CD conventions, supply-chain hardening, branch and release shapes |
 | [`run-isolation`](skills/run-isolation/) | Make a repo's local services/tests parallel-safe across many agents — shared `~/.agents` port registry, process-group teardown |
 | [`wallet-sdk`](skills/wallet-sdk/) | `@aztec/wallet-sdk` integration patterns for dApp frontends + wallet extensions |
@@ -46,7 +46,7 @@ git clone --recurse-submodules git@github.com:alejoamiras/aa-skills.git ~/Projec
 cd ~/Projects/aa-skills && ./install.sh
 ```
 
-`install.sh` symlinks each `skills/<name>` into `~/.claude/skills/<name>` (Claude Code) **and** `~/.agents/skills/<name>` (Codex — retiring any older link under `~/.codex/skills` that points here), backs up anything it replaces to `~/.claude/backups/`, and wires the repo's pre-commit hook. Rerunning is safe.
+`install.sh` symlinks each `skills/<name>` into `~/.claude/skills/<name>` (Claude Code) **and** `~/.agents/skills/<name>` (Codex — retiring any older link under `~/.codex/skills` that points here), backs up anything it replaces to `~/.claude/backups/`, and wires the repo's pre-commit hook. A skill with a `platforms` file (`uname -s` names, one per line, such as `Linux`) is installed only on those, and elsewhere its links from this repo are removed. Rerunning is safe.
 
 > **Note:** `claude/` is a **private submodule** (the owner's harness-neutral `AGENTS.md`, the thin `CLAUDE.md` that imports it, personal `statusline.sh`, managed `settings.json` keys). Cloning it will fail for everyone else — that's expected, and `install.sh` skips it gracefully. Everything under `skills/` works standalone.
 
@@ -69,7 +69,7 @@ Every PR runs one workflow per area. Each skips its jobs when the PR touches non
 | `shell` | shellcheck at warning severity over every shell file, the size budgets, and a check that every smoke and bun test runs in some workflow | any change (a shell file is known by its shebang, whatever its name) |
 | `actionlint` | actionlint | `.github/` |
 | `gitleaks` | secret scan of the commits the PR or push adds | every PR, and pushes to `main` |
-| `agent-worktree`, `claude-usage`, `crew`, `keyed`, `start-orchy` | that area's smokes, plus `start-orchy`'s bun test | that area's files |
+| `agent-worktree`, `claude-usage`, `crew`, `install`, `keyed`, `start-orchy` | that area's smokes, plus `start-orchy`'s bun test; `agent-worktree`, `claude-usage`, `crew` and `install` also on macOS through `checks/stock-macos.sh`: bash 3.2 and the BSD userland, none of Homebrew's GNU tools | that area's files |
 
 **Budgets.** A shell file may not grow past 800 lines, a function past 80, and a function name may live in only one file: code two scripts share belongs in a library both source. `checks/budget.json` records today's offenders at their current size, and they can only shrink. A record looser than the code also fails, so a change that shrinks an offender lowers its record in the same PR: `bun checks/budget.ts --write` lowers or drops entries and never raises or adds one. On a PR, CI also compares the record with the base branch's and fails any entry added or raised.
 
@@ -82,6 +82,7 @@ bun test tests/
 checks/wired.sh
 actionlint
 bash tests/smoke-<area>.sh    # one at a time
+checks/stock-macos.sh jq tmux -- bash tests/smoke-crew.sh   # on a Mac: as a fresh Mac would run it
 ```
 
 CI never runs `tests/smoke-memo-guard.sh` (it tests the private `claude/` submodule) or `tests/live-*.sh` (they use real accounts and repositories).

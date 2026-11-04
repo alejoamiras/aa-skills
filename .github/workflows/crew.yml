@@ -49,8 +49,25 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends tmux
       - run: bash tests/smoke-crew.sh
 
+  smoke-macos:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install tmux
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+        run: brew install tmux
+      # bash 3.2 and the BSD userland only, as on a fresh Mac: no Homebrew coreutils, flock, timeout or bash 5.
+      - run: checks/stock-macos.sh jq tmux -- bash tests/smoke-crew.sh
+
   crew-status:
-    needs: [changes, smoke]
+    needs: [changes, smoke, smoke-macos]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2

@@ -53,8 +53,20 @@ jobs:
         run: docker pull -q "$IMAGE" && docker tag "$IMAGE" bash:3.2
       - run: bash tests/smoke-claude-usage.sh
 
+  smoke-macos:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # bash 3.2 and the BSD userland only, as on a fresh Mac: no Homebrew coreutils, flock, timeout or bash 5.
+      - run: checks/stock-macos.sh jq -- bash tests/smoke-claude-usage.sh
+
   claude-usage-status:
-    needs: [changes, smoke]
+    needs: [changes, smoke, smoke-macos]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2

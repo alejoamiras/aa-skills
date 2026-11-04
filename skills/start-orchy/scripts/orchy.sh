@@ -89,6 +89,8 @@ usage() { sed -n '/^# Subcommands/,/^# End/p' "$0" | sed 's/^# \{0,1\}//'; exit 
 #                                Codex rounds; --json prints orchy.receipt/1 with per-run costs, --offline skips the gh joins
 #   teardown <slug>              remove a lane worktree whose HEAD is exactly a merged PR's head and whose tree is clean
 # End
+# Seats, leads and locks read /proc and call setsid, flock and GNU realpath/stat; elsewhere they would misjudge, not fail.
+[ "$(uname -s)" = Linux ] || { echo "orchy: start-orchy runs on Linux only; run the program on a Linux machine" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || { echo "orchy: $1 not found" >&2; exit 1; }; }
 need jq; need git
 ROOT=${ORCHY_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || true)}
