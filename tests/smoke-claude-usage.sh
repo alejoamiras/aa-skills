@@ -136,7 +136,7 @@ for a in "\$@"; do case \$a in -d|--date*|-r|-j|-f) exec "$REAL_DATE" "\$@";; es
 if "$REAL_DATE" --version >/dev/null 2>&1; then exec "$REAL_DATE" -d "@\$PINNED_NOW" "\$@"; else exec "$REAL_DATE" -r "\$PINNED_NOW" "\$@"; fi
 STUB
 chmod +x "$S/pinned/date"
-pinned() { local root=$1 now=$2; env PATH="$S/pinned:$PATH" PINNED_NOW="$now" CLAUDE_ACCOUNTS_ROOT="$root" XDG_CACHE_HOME="$root.cache" "$CU" --json; }
+pinned() { local root=$1 now=$2; env PATH="$S/pinned:$PATH" PINNED_NOW="$now" CLAUDE_ACCOUNTS_ROOT="$root" XDG_CACHE_HOME="$root.cache" "$CU" "${3:---json}"; }
 mkacct() { mkdir -p "$1"; echo "$2" > "$1/reset"; echo "$3" > "$1/zone"; }
 DR="$S/dst-root"; mkacct "$DR/ny" "Nov 1, 1:30am" America/New_York; mkacct "$DR/near" "Nov 5, 9am" UTC; mkacct "$DR/far" "Nov 9, 9am" UTC
 pinned "$DR" 1793507400 > "$S/dst.json"   # 2026-11-01 00:30 EDT: both of New York's 1:30ams lie inside the session window
@@ -149,7 +149,10 @@ t "epochs: nor in the half hour Lord Howe repeats" test "$(epochs "$S/lh.json" l
 t "epochs: nor in the two hours Troll repeats" test "$(epochs "$S/troll.json" troll)" = "null null null"
 t "epochs: a weekly reset within a week reads; one beyond has none" sh -c 'test "$1" = "null 1793869200 1793869200" && test "$2" = "null null null"' \
   _ "$(epochs "$S/dst.json" near)" "$(epochs "$S/dst.json" far)"
-t "table: the CLI's comma is dropped from week resets" sh -c '"$1" > "$2" && grep -q "aaa-late" "$2" && ! grep -qE "[A-Z][a-z]{2} [0-9]{1,2}, " "$2"' _ "$CU" "$S/table.out"
+pinned "$DR" 1793507400 table > "$S/dst.table"
+t "table: a reset reads as the time left, and as the CLI's text when it has no epoch" sh -c 'grep -qE "near +│[^│]*│[^│]*│ +50%  4d4h +│" "$1" &&
+  grep -qE "ny +│[^│]*│[^│]*│ +50%  Nov 1 1:30am +│" "$1"' _ "$S/dst.table"
+t "table --exact: the CLI's date, its comma dropped" sh -c '"$1" --exact > "$2" && grep -qE "aaa-late .*[A-Z][a-z]{2} [0-9]{1,2} [0-9]" "$2" && ! grep -qE "[A-Z][a-z]{2} [0-9]{1,2}, " "$2"' _ "$CU" "$S/table.out"
 
 "$CU" refresh
 # --json --cached serves the snapshot: no /usage probe, no background refresh even when stale, exit 1 with nothing cached
@@ -201,7 +204,10 @@ mkdir -p "$S/cold-root/a" "$S/cold-root/b"
 t "other: with no snapshot yet, still skips the caller" test "$(CLAUDE_ACCOUNTS_ROOT="$S/cold-root" CLAUDE_CONFIG_DIR="$S/cold-root/a" "$CU" resolve other 2>/dev/null)" = b
 rm -rf "$CLAUDE_ACCOUNTS_ROOT/fresh"
 "$CU" refresh
-t "best: no premium anywhere picks the soonest reset" grep -q '^zzz-soon (no Fable left' <("$CU" best)
+t "best: no premium anywhere picks the soonest reset" grep -qE '^zzz-soon \(no Fable left .* resets in 23h5[0-9]m\)$' <("$CU" best)
+t "best --exact: the reset as the CLI's date" grep -qE '^zzz-soon \(no Fable left .* resets [A-Z][a-z]{2} [0-9]{1,2}, [0-9]' <("$CU" best --exact)
+t "statusline: a spent pick says how long until it is back, --exact which day" sh -c 'export CLAUDE_CONFIG_DIR=$2/aaa-late
+  "$1" statusline | grep -qE "zzz-soon back 23h5[0-9]m" && "$1" --exact statusline | grep -qE "zzz-soon back [A-Z][a-z]{2} [0-9]{1,2}( |$)"' _ "$CU" "$CLAUDE_ACCOUNTS_ROOT"
 
 tn "add: lockfile-shaped name refused" "$CU" add evil.lock
 
@@ -355,7 +361,8 @@ t "pairing: current names it from the slot" test "$(nr current)" = tk-pair
 calls=$(wc -l < "$NET/argv")
 nr --json > /dev/null
 t "probe: a reading is reused within the TTL" test "$(wc -l < "$NET/argv")" -eq "$calls"
-t "table: a session shows its 5h reset time" grep -qE 'tk-free +│[^│]*│ +92%  ([A-Z][a-z]{2} [0-9]{1,2} )?[0-9]{1,2}(:[0-9]{2})?[ap]m' <(CLAUDE_USAGE_TTL=99999 nr)
+t "table: a token's resets read as the time left" grep -qE 'tk-free +│[^│]*│ +92%  5[0-9]m +│ +39%  23h5[0-9]m +│' <(CLAUDE_USAGE_TTL=99999 nr)
+t "table --exact: a session shows its 5h reset time" grep -qE 'tk-free +│[^│]*│ +92%  ([A-Z][a-z]{2} [0-9]{1,2} )?[0-9]{1,2}(:[0-9]{2})?[ap]m' <(CLAUDE_USAGE_TTL=99999 nr --exact)
 f=$(ls "$S"/cache-net/claude-usage/*/token2-tk-free.tsv); awk -F'\t' -v OFS='\t' -v r=$(( $(date +%s) - 60 )) '{ $7 = r; print }' "$f" > "$f.n" && mv "$f.n" "$f"
 t "table: a passed 5h reset reads as reset" grep -qE 'tk-free +│[^│]*│ +92%  reset +│' <(CLAUDE_USAGE_TTL=99999 nr)
 awk -F'\t' -v OFS='\t' -v r=$(( $(date +%s) + 86400 * 300 )) '{ $7 = r; print }' "$f" > "$f.n" && mv "$f.n" "$f"
@@ -619,6 +626,10 @@ printf 'k\tcx-a\ta@x\tplus\t40\t%s\t90\t%s\t-\tfalse\t%s\t0\t-\n' "$(( $(date +%
 cx --json --cached > "$S/cx.json"; sleep 1
 t "json: every --json reply parses strictly" test ! -s "$S/badjson"
 t "codex cached json: snapshot rows, never a probe or a refresh" sh -c 'grep -q "\"account\":\"cx-a\".*\"week_left_pct\":40" "$1" && ! test -s "$2"' _ "$S/cx.json" "$S/cx.calls"
+# The same row with an empty note, which is what makes it usable, in a cache of its own.
+ds=${d/cache-cx/cache-cxs}; mkdir -p "$ds"; sed 's/-$//' "$d/snapshot.tsv" > "$ds/snapshot.tsv"
+cxs() { env PATH="$S/cxbin:$PATH" CODEX_ACCOUNT=cx-a CODEX_ACCOUNTS_ROOT="$S/cx-accounts" XDG_CACHE_HOME="$S/cache-cxs" CODEX_USAGE_TTL=99999 "$ROOT/bin/codex-usage" "$@"; }
+t "codex statusline: the week's reset as the time left, --exact as a wall time" sh -c 'grep -qE "40% 23h5[0-9]m" "$1" && grep -qE "40% ([A-Z][a-z]{2} [0-9]{1,2} )?[0-9]{1,2}(:[0-9]{2})?[ap]m" "$2"' _ <(cxs statusline) <(cxs statusline --exact)
 t "codex cached json: read with no codex CLI on PATH" sh -c 'env PATH="$1" CODEX_ACCOUNTS_ROOT="$2" XDG_CACHE_HOME="$3" "$4" --json --cached | grep -q "\"account\":\"cx-a\""' _ "$(without codex)" "$S/cx-accounts" "$S/cache-cx" "$ROOT/bin/codex-usage"
 
 # --- lib/usage.sh ---------------------------------------------------------------
@@ -633,6 +644,10 @@ t "lib: drop_label drops the exact key only" test "$(cat "$S/labels.conf")" = "$
 t "lib: jq_str escapes quotes and backslashes, drops control chars" test "$(lib jq_str $'a"b\\c\td\ne')" = 'a\"b\\cde'
 t "lib: pad_cell pads to the plain width, not the painted one" test "$(lib pad_cell $'\e[1mab\e[0m' ab 5 left)|$(lib pad_cell x x 3 right)" = $'\e[1mab\e[0m   |  x'
 t "lib: hrule draws two dashes past each width" test "$(lib hrule '<' '+' '>' 1 0)" = '<───+──>'
+at() { env PATH="$S/pinned:$PATH" PINNED_NOW=1000000 bash -c '. "$1"; shift; "$@"' _ "$ROOT/lib/usage.sh" "$@"; }
+t "lib: time left as days and hours, hours and minutes, minutes, then <1m, now, and - for no epoch" test \
+  "$(at until_reset 1093784) $(at until_reset 1008000) $(at until_reset 1000420) $(at until_reset 1000030) $(at until_reset 1000000) $(at until_reset x) $(at in_reset 1093784) $(at in_reset 999999)" \
+  = "1d2h 2h13m 7m <1m now - in 1d2h now"
 mkdir -p "$S/race"
 won=$(bash -c '. "$1"; n=0; for ((i = 0; i < 200; i++)); do
   claim_dir "$2/$i" 2> /dev/null & a=$!; claim_dir "$2/$i" 2> /dev/null & b=$!

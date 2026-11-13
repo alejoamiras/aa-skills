@@ -1,7 +1,7 @@
 {
   "files": {
     "bin/claude-usage": 2052,
-    "bin/codex-usage": 923
+    "bin/codex-usage": 913
   },
   "functions": {
     "bin/agent-worktree": {
@@ -41,7 +41,6 @@
     "json_num": ["bin/claude-usage", "bin/codex-usage"],
     "mark_active": ["bin/claude-usage", "bin/codex-usage"],
     "ok": ["skills/start-orchy/page/smoke.sh", "tests/live-crew.sh"],
-    "paint_left": ["bin/claude-usage", "bin/codex-usage"],
     "pct_plain": ["bin/claude-usage", "bin/codex-usage"],
     "probe": ["bin/claude-usage", "bin/codex-usage"],
     "proc_start": ["bin/claude-usage", "skills/crew/scripts/crew.sh"],

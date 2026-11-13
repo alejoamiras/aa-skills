@@ -21,7 +21,11 @@
 # the slot to the roster by email and marks that account ACTIVE; a slot login
 # nobody in the roster matches is listed as "main" until you `add` it.
 #
-#   codex-usage                 table for every account
+#   codex-usage                 table for every account; a reset reads as the
+#                               time left (1d6h, 2h13m, 49m)
+#   codex-usage --exact [best|statusline]
+#                               resets as a date and time in this machine's zone:
+#                               unlike the time left, it stays true in a log
 #   codex-usage --json          machine-readable (statusline, cron)
 #   codex-usage --json --cached the snapshot's rows only: never probes or
 #                               spawns a refresh (exit 1 with no snapshot)
@@ -111,32 +115,17 @@ account_rows() {
   done
 }
 
-# Compact "time until <epoch>": 3d4h, 2h13m, 7m, now.
-until_reset() {
-  local rem d h m
-  [[ $1 =~ ^[0-9]+$ ]] || { printf -- '-'; return; }
-  rem=$(( $1 - $(date +%s) ))
-  ((rem <= 0)) && { printf 'now'; return; }
-  d=$((rem / 86400)); h=$(((rem % 86400) / 3600)); m=$(((rem % 3600) / 60))
-  if   ((d > 0)); then printf '%dd%dh' "${d}" "${h}"
-  elif ((h > 0)); then printf '%dh%dm' "${h}" "${m}"
-  else                 printf '%dm' "${m}"
-  fi
-}
-
-# Elapsed since <epoch>, same compact format.
+# Elapsed since <epoch>, in until_reset's compact format.
 elapsed() { until_reset $(( 2 * $(date +%s) - $1 )); }
 
-# Headroom, not consumption: red is the "about to be cut off" band.
-paint_left() {
-  local left="$1" colour
-  [[ ${left} == "-" || ${left} == "?" ]] && { printf '%s%s%s' "${DIM}" "${left}" "${RST}"; return; }
-  if   ((left <= 15)); then colour="${RED}"
-  elif ((left <= 50)); then colour="${YEL}"
-  else                      colour="${GRN}"
-  fi
-  printf '%s%s%%%s' "${colour}" "${left}" "${RST}"
-}
+# Whether a reset shows as its wall time: on --exact, while it is still ahead.
+exact() { [[ ${TIMES} == exact && $1 =~ ^[0-9]+$ ]] && (($1 > $(date +%s))); }
+
+# A reset epoch as the mode shows it: the time left (3d4h), or its wall time (Oct 12 5:30pm).
+reset_when() { if exact "$1"; then clock_when "$1"; else until_reset "$1"; fi; }
+
+# The same inside a sentence, where the time left reads "in 3d4h".
+reset_phrase() { if exact "$1"; then clock_when "$1"; else in_reset "$1"; fi; }
 
 # Credits: "-" (none reported), "∞", or the integer part painted by the
 # consult-round thresholds.
@@ -395,10 +384,10 @@ pct_plain() {
   if [[ $1 == "-" || $1 == "?" ]]; then printf '%s' "$1"; else printf '%s%%' "$1"; fi
 }
 
-# "73%  3d2h" — headroom then time to reset, both plain and painted.
+# "73%  3d2h" — headroom then the reset, both plain and painted.
 window_cells() {
   local left="$1" reset="$2" when
-  when=$(until_reset "${reset}")
+  when=$(reset_when "${reset}")
   if [[ ${left} == "-" || ${left} == "?" || ${when} == "-" ]]; then
     printf '%s\t%s' "$(pct_plain "${left}")" "$(paint_left "${left}")"
   else
@@ -688,13 +677,13 @@ cmd_best() {
   IFS=$'\t' read -r name wl wr cr un how < <(best_row <<< "${rows}") ||
     die "no usable account (all logged out?) — run: codex-usage"
   if [[ ${how} == fallback ]]; then
-    printf '%s (nothing usable right now; frees up first, in %s)\n' "${name}" "$(until_reset "${wr}")"
+    printf '%s (nothing usable right now; frees up first, %s)\n' "${name}" "$(reset_phrase "${wr}")"
   elif [[ ${un} == true ]]; then
     printf '%s (unlimited credits)\n' "${name}"
   elif [[ ${wl} =~ ^[0-9]+$ ]] && ((wl > 0)); then
     printf '%s (%s%% of the week left)\n' "${name}" "${wl}"
   else
-    printf '%s (week spent, %s credits left; resets in %s)\n' "${name}" "${cr%.*}" "$(until_reset "${wr}")"
+    printf '%s (week spent, %s credits left; resets %s)\n' "${name}" "${cr%.*}" "$(reset_phrase "${wr}")"
   fi
 }
 
@@ -749,7 +738,7 @@ cmd_statusline() {
     out="${out} ${RED}${cur_note%% —*}${RST}"
   else
     [[ ${cur_wl} != "-" ]] && out="${out} $(paint_left "${cur_wl}")"
-    [[ ${cur_wr} != "-" && ${cur_wl} != "?" ]] && out="${out} ${DIM}$(until_reset "${cur_wr}")${RST}"
+    [[ ${cur_wr} != "-" && ${cur_wl} != "?" ]] && out="${out} ${DIM}$(reset_when "${cur_wr}")${RST}"
     # Credits are only drawn on once the subscription windows are spent, so a
     # zero balance is noise while there is headroom; a positive one is worth
     # knowing about either way.
@@ -765,7 +754,7 @@ cmd_statusline() {
       if [[ ${best_how} == fallback ]]; then
         # A fallback pick is not usable yet; quoting its headroom would read
         # as "switch here now".
-        out="${out} ${DIM}back $(until_reset "${best_wr}")${RST}"
+        out="${out} ${DIM}back $(reset_when "${best_wr}")${RST}"
       elif [[ ${best_un} == true ]]; then
         out="${out} ${GRN}∞${RST}"
       elif [[ ${best_wl} =~ ^[0-9]+$ ]] && ((best_wl > 0)); then
@@ -774,7 +763,7 @@ cmd_statusline() {
         out="${out} $(paint_credits "${best_cr}" "${best_un}")${DIM}cr${RST}"
       fi
     elif [[ ${best_how} == fallback ]]; then
-      out="${out} ${DIM}all spent, back $(until_reset "${best_wr}")${RST}"
+      out="${out} ${DIM}all spent, back $(reset_when "${best_wr}")${RST}"
     else
       out="${out} ${GRN}✓${RST}"
     fi
@@ -906,6 +895,7 @@ cmd_show() {
   jq -s '{account: (map(select(.id == 2)) | first | .result.account), limits: (map(select(.id == 3)) | first | (.result // .error))}' <<< "${out}"
 }
 
+exact_flag "$@" && shift
 case "${1:-table}" in
   table|'')   table ;;
   --json)     if [[ ${2:-} == --cached ]]; then json cached; else json; fi ;;

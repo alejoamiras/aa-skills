@@ -23,7 +23,10 @@
 # ACTIVE; a slot login nobody in the roster matches is listed as "main" until
 # you `add` it.
 #
-#   claude-usage                 table for every account
+#   claude-usage                 table for every account; a reset reads as the
+#                                time left (1d6h, 2h13m, 49m)
+#   claude-usage --exact [best|statusline]
+#                                resets as a date and time, which stays true in a log
 #   claude-usage --json          machine-readable (statusline, cron); each
 #                                reset also as epoch seconds (*_resets_at, or null);
 #                                session_window: present, unknown, or none (no 5h window)
@@ -213,10 +216,6 @@ token_days_left() {
   if ((secs > 0)); then printf '%s' "$((secs / 86400))"; else printf '%s' "$((-1 - (-secs) / 86400))"; fi
 }
 
-# Epoch -> formatted date. GNU first: GNU's -r reads a FILE's mtime, so a file
-# named like the number would answer for it.
-fmt_epoch() { date -d "@$1" "+$2" 2> /dev/null || date -r "$1" "+$2" 2> /dev/null; }
-
 token_expiry() {
   local added=""
   { IFS= read -r added || [[ -n ${added} ]]; } < "${ACCOUNTS_ROOT}/$1/${TOKEN_DATE}" 2> /dev/null
@@ -340,17 +339,6 @@ clause_epoch() { # clause_epoch <line> <reader> <args…>
   printf '%s' "${e}"
 }
 
-# Headroom, not consumption: red is the "about to be cut off" band.
-paint_left() {
-  local left="$1" colour
-  [[ ${left} == "-" ]] && { printf '%s-%s' "${DIM}" "${RST}"; return; }
-  if   ((left <= 15)); then colour="${RED}"
-  elif ((left <= 50)); then colour="${YEL}"
-  else                      colour="${GRN}"
-  fi
-  printf '%s%s%%%s' "${colour}" "${left}" "${RST}"
-}
-
 # Run the CLI against one account. CLAUDE_CONFIG_DIR namespaces the keychain
 # entry, so the primary account is only reachable with the variable UNSET —
 # exporting it, even pointed at ~/.claude, looks like a different account.
@@ -455,7 +443,7 @@ token_org() {
 # reset_day already read.
 fmt_reset() {
   [[ $1 =~ ^[0-9]+$ ]] || { printf -- '-'; return; }
-  fmt_epoch "$1" '%b %-d at %-I:%M%p' | sed -E -e 's/AM$/am/' -e 's/PM$/pm/' -e 's/:00(am|pm)$/\1/'
+  fmt_clock "$1" '%b %-d at %-I:%M%p'
 }
 
 # Utilization fraction ("0.34") -> whole percent LEFT, "-" when unparseable.
@@ -946,22 +934,31 @@ session_epoch() {
   printf '%s' "${e}"
 }
 
-# A 5h reset as its table cell shows it: the time alone when it falls today, with the day otherwise;
-# "reset" once it has passed (the reading predates it, so its percentage is stale); nothing when it is
-# unreadable or beyond one window ahead, which also rejects to_epoch's year rollover of an old reading.
-# Assumes the CLI prints this machine's timezone, as WEEK does.
+# Whether a reset reads as the time left: not on --exact, and not without its epoch, which a wall
+# time that a DST fall-back repeats does not have. Its text, as the CLI spelled it, is shown then.
+relative() { [[ ${TIMES} == relative && $1 =~ ^[0-9]+$ ]]; }
+
+# A 5h reset as its table cell shows it, from its text and its epoch: the time left, else its wall
+# time (alone when it falls today, with the day otherwise); "reset" once it has passed (the reading
+# predates it, so its percentage is stale); nothing when it is unreadable or beyond one window ahead,
+# which also rejects to_epoch's year rollover of an old reading. The wall time assumes the CLI prints
+# this machine's timezone, as WEEK does.
 session_when() {
   local e now
   now=$(date +%s)
-  e=$(session_epoch "$1" "${now}")
+  if relative "$2"; then e=$2; else e=$(session_epoch "$1" "${now}"); fi
   [[ -z ${e} ]] && return 0
   ((e <= now)) && { printf 'reset'; return 0; }
   ((e > now + SESSION_WINDOW)) && return 0
-  if [[ $(fmt_epoch "${e}" '%F') == "$(date '+%F')" ]]; then
-    fmt_epoch "${e}" '%-I:%M%p' | sed -E -e 's/AM$/am/' -e 's/PM$/pm/' -e 's/:00(am|pm)$/\1/'
-  else
-    fmt_epoch "${e}" '%b %-d %-I:%M%p' | sed -E -e 's/AM$/am/' -e 's/PM$/pm/' -e 's/:00(am|pm)$/\1/'
-  fi
+  if relative "$2"; then until_reset "${e}"; else clock_when "${e}"; fi
+}
+
+# A weekly reset as its table cell shows it, from its text and its epoch: the time left ("reset" once
+# it has passed), else the CLI's text without its " at " or comma.
+week_when() {
+  local when=${1/ at / }
+  relative "$2" && { when=$(until_reset "$2"); printf '%s' "${when/#now/reset}"; return 0; }
+  printf '%s' "${when//,/}"
 }
 
 table() {
@@ -987,7 +984,7 @@ table() {
       if [[ ${plabel} == PREMIUM || ${plabel} == "${up}" ]]; then plabel="${up}"; else plabel="PREMIUM"; fi
     fi
 
-    when=${wr/ at / }; when=${when//,/}
+    when=$(week_when "${wr}" "${wa}")
     if [[ ${active} == 1 ]]; then
       n_c+=("▶ ${name}")
       if [[ ${name} == main ]]; then
@@ -1018,7 +1015,7 @@ table() {
       fi
     fi
     p_c+=("${plan}")
-    swhen=$(session_when "${sr}")
+    swhen=$(session_when "${sr}" "${sa}")
     spct=$(pct_plain "${sl}"); [[ ${sl} == none ]] && nowin=1
     if [[ -z ${swhen} ]]; then
       s_pl+=("$(printf '%4s' "${spct}")")
@@ -1167,7 +1164,7 @@ current_account() {
   fi
 }
 
-# The pick for TARGET_MODEL, as "name \t p_left \t p_label \t w_reset \t how":
+# The pick for TARGET_MODEL, as "name \t p_left \t p_label \t w_reset \t how \t w_at":
 # how is ok (measured headroom), unknown (nothing measured has any; this one
 # has missing measurements and no known spent bucket; p_label is "token" for
 # a token account) or fallback (everything is spent; this one frees up first).
@@ -1179,21 +1176,22 @@ best_row() {
     # Expiry is re-checked live: the snapshot can predate it.
     [[ ${plan} == token && $(token_days_left "$(key_for "${name}")") == -* ]] && continue
     case ${tier} in
-      0) printf '%s\t%s\t%s\t%s\tok\n' "${name}" "${pv}" "${pl}" "${wr}"; return 0 ;;
+      0) printf '%s\t%s\t%s\t%s\tok\t%s\n' "${name}" "${pv}" "${pl}" "${wr}" "${wa}"; return 0 ;;
       1) [[ ${plan} == token ]] && pl=token
-         printf '%s\t%s\t%s\t%s\tunknown\n' "${name}" "${pv}" "${pl}" "${wr}"; return 0 ;;
-      2) printf '%s\t%s\t%s\t%s\tfallback\n' "${name}" "${pv}" "${pl}" "${wr}"; return 0 ;;
+         printf '%s\t%s\t%s\t%s\tunknown\t%s\n' "${name}" "${pv}" "${pl}" "${wr}" "${wa}"; return 0 ;;
+      2) printf '%s\t%s\t%s\t%s\tfallback\t%s\n' "${name}" "${pv}" "${pl}" "${wr}" "${wa}"; return 0 ;;
     esac
   done < <(rank_rows <<< "${rows}")
   return 1
 }
 
 cmd_best() {
-  local name pv pl wr how rows
+  local name pv pl wr how wa rows
   ensure_snapshot live
   rows=$(cached_rows) || die "no snapshot yet — run: claude-usage refresh"
-  IFS=$'\t' read -r name pv pl wr how < <(best_row <<< "${rows}") ||
+  IFS=$'\t' read -r name pv pl wr how wa < <(best_row <<< "${rows}") ||
     die "no usable account (all logged out?) — run: claude-usage"
+  relative "${wa}" && wr=$(in_reset "${wa}")
   if [[ ${how} == fallback && ${pv} == 0 ]]; then
     printf '%s (no %s left on any usable account; frees up first, resets %s)\n' "${name}" "${pl}" "${wr}"
   elif [[ ${how} == fallback ]]; then
@@ -1235,7 +1233,7 @@ token_warnings() {
 # Deliberately omits 5h/week percentages: the status line already gets those
 # live for the current account, and the snapshot's copy would only be staler.
 cmd_statusline() {
-  local rows cur best_name best_pv best_wr best_how cur_pv cur_pl found=0 age oldest
+  local rows cur best_name best_pv best_wr best_how best_wa back cur_pv cur_pl found=0 age oldest
   local key name email plan sl sr wl wr pl pv active org obs sa wa pa note out now
 
   rows=$(cached_rows) || return 0
@@ -1243,11 +1241,12 @@ cmd_statusline() {
 
   # Both halves of the segment come from ONE snapshot read: two reads could
   # straddle a refresh and render a current/best pair that never coexisted.
-  if ! IFS=$'\t' read -r best_name best_pv _ best_wr best_how < <(best_row <<< "${rows}"); then
+  if ! IFS=$'\t' read -r best_name best_pv _ best_wr best_how best_wa < <(best_row <<< "${rows}"); then
     out=$(token_warnings)
     [[ -n ${out} ]] && printf '%s\n' "${out# }"
     return 0
   fi
+  if relative "${best_wa}"; then back=$(until_reset "${best_wa}"); else back=$(reset_day "${best_wr}"); fi
 
   # Token readings are not refreshed by the status line's own trigger, so the
   # age that matters is the oldest reading shown, not the snapshot's.
@@ -1272,14 +1271,14 @@ cmd_statusline() {
     elif [[ ${best_how} == fallback ]]; then
       # A fallback pick is not usable yet; quoting its premium headroom would
       # read as "switch here now".
-      out="${out} ${DIM}back $(reset_day "${best_wr}")${RST}"
+      out="${out} ${DIM}back ${back}${RST}"
     elif [[ ${best_pv} != "-" ]] && ((best_pv > 0)); then
       out="${out} $(paint_left "${best_pv}")"
     else
-      out="${out} ${DIM}$(reset_day "${best_wr}")${RST}"
+      out="${out} ${DIM}${back}${RST}"
     fi
   elif [[ ${best_how} == fallback ]]; then
-    out="${out} ${DIM}all spent, back $(reset_day "${best_wr}")${RST}"
+    out="${out} ${DIM}all spent, back ${back}${RST}"
   else
     out="${out} ${GRN}✓${RST}"
   fi
@@ -1531,7 +1530,7 @@ best_key() {
         print line[i]
       }
     }' <<< "${rows}")
-  IFS=$'\t' read -r name _ _ _ how < <(best_row <<< "${rows}") || return 2
+  IFS=$'\t' read -r name _ _ _ how _ < <(best_row <<< "${rows}") || return 2
   # Rows carry display names. Exactly one account must still answer to it:
   # none means a rename since the snapshot, two a rename racing an add.
   case $(account_rows | cut -f1 | grep -cxF -- "${name}") in
@@ -2029,6 +2028,7 @@ cmd_run() {
 
 spawn_refresh_if_stale() { (($(snapshot_age) > TTL)) && spawn_refresh; return 0; }
 
+exact_flag "$@" && shift
 case "${1:-table}" in
   table|'')   table ;;
   --json)     if [[ ${2:-} == --cached ]]; then json cached; else json; fi ;;

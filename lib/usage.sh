@@ -156,6 +156,18 @@ take_refresh_lock() {
   return 0
 }
 
+# Headroom, not consumption: red is the "about to be cut off" band. "-" (not reported) and "?"
+# (unreadable) are dimmed as they are.
+paint_left() {
+  local left="$1" colour
+  [[ ${left} == "-" || ${left} == "?" ]] && { printf '%s%s%s' "${DIM}" "${left}" "${RST}"; return; }
+  if   ((left <= 15)); then colour="${RED}"
+  elif ((left <= 50)); then colour="${YEL}"
+  else                      colour="${GRN}"
+  fi
+  printf '%s%s%%%s' "${colour}" "${left}" "${RST}"
+}
+
 # Pad a cell to a visible width: printf's %-Ns counts ANSI escapes as
 # characters, so colour + %-Ns silently shreds the column alignment.
 pad_cell() {
@@ -183,4 +195,50 @@ hrule() {
 
 jq_str() {
   printf '%s' "$1" | tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# How a reset reads: "relative" is the time left (1d6h), "exact" a date and time. --exact sets it.
+TIMES=relative
+
+# Reads --exact, given first or after table, best or statusline. Status 0 when it came first, for the
+# caller to shift it away.
+exact_flag() {
+  case "${1:-} ${2:-}" in
+    "--exact "*) TIMES=exact; return 0 ;;
+    "table --exact" | "best --exact" | "statusline --exact") TIMES=exact ;;
+  esac
+  return 1
+}
+
+# Compact time until <epoch>: 3d4h, 2h13m, 7m, <1m, now; "-" for anything but an epoch.
+until_reset() {
+  local rem d h m
+  [[ $1 =~ ^[0-9]+$ ]] || { printf -- '-'; return; }
+  rem=$(( $1 - $(date +%s) ))
+  ((rem <= 0)) && { printf 'now'; return; }
+  d=$((rem / 86400)); h=$(((rem % 86400) / 3600)); m=$(((rem % 3600) / 60))
+  if   ((d > 0)); then printf '%dd%dh' "${d}" "${h}"
+  elif ((h > 0)); then printf '%dh%dm' "${h}" "${m}"
+  elif ((m > 0)); then printf '%dm' "${m}"
+  else                 printf '<1m'
+  fi
+}
+
+# The same inside a sentence: "in 3d4h", or "now" once it has passed.
+in_reset() {
+  local t; t=$(until_reset "$1")
+  if [[ ${t} == now || ${t} == "-" ]]; then printf '%s' "${t}"; else printf 'in %s' "${t}"; fi
+}
+
+# Epoch -> formatted date. GNU first: GNU's -r reads a FILE's mtime, so a file
+# named like the number would answer for it.
+fmt_epoch() { date -d "@$1" "+$2" 2> /dev/null || date -r "$1" "+$2" 2> /dev/null; }
+
+# The same in the CLI's spelling of a time: lowercase am/pm, ":00" dropped ("5pm", "5:30pm").
+fmt_clock() { fmt_epoch "$1" "$2" | sed -E -e 's/AM$/am/' -e 's/PM$/pm/' -e 's/:00(am|pm)$/\1/'; }
+
+# Epoch -> its wall time in this machine's zone: the time alone when it falls today ("5:30pm"),
+# with the day otherwise ("Oct 12 5:30pm").
+clock_when() {
+  if [[ $(fmt_epoch "$1" '%F') == "$(date '+%F')" ]]; then fmt_clock "$1" '%-I:%M%p'; else fmt_clock "$1" '%b %-d %-I:%M%p'; fi
 }
