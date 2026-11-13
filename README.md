@@ -93,3 +93,7 @@ CI never runs `tests/smoke-memo-guard.sh` (it tests the private `claude/` submod
 - CI runs gitleaks over the commits each PR and each push to `main` adds.
 - GitHub secret scanning + push protection enabled on the remote.
 - No transcripts, history, `settings.local.json`, or credentials are ever tracked here.
+
+## License
+
+[MIT](LICENSE). The `claude/` and `memo/` submodules are separate repositories and are not covered by it.
