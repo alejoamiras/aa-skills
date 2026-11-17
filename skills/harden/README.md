@@ -60,7 +60,7 @@ Effort scales **agent intelligence and depth, never phase composition** — all 
 
 The coordinator deliberately switches family at `max`+: the map phase becomes Claude-heavy there, so a Codex judge at the reduce stage catches what Anthropic-family models share as blind spots.
 
-> **Models:** the top-tier slot the table calls Fable runs on the model you pick at Phase 0 — **Opus 5.5** (default) or **Fable 5.1** (opt-in: slower and more expensive). Sonnet and Haiku are aliases that track the newest of each. The Codex legs run on the model you pick at Phase 0 too — **GPT-6.1 Sol** (default: near-Astra quality, much faster and cheaper) or **GPT-6 Astra** (opt-in: strongest, slower and more expensive).
+> **Models:** the top-tier slot the table calls Fable runs on the model you pick at Phase 0 — **Opus 5.5** (default) or **Fable 5.1** (opt-in: slower and more expensive). Sonnet and Haiku are aliases that track the newest of each. The Codex legs run on the model you pick at Phase 0 too — **GPT-6.2 Sol** (default: OpenAI's everyday tier, far lighter on plan usage) or **GPT-6.2 Astra** (opt-in: strongest; by OpenAI's rough estimate about a third as many messages per plan window).
 
 ## Severity, per focus
 

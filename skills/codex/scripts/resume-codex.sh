@@ -14,8 +14,8 @@
 #   model        Optional. Defaults to the model run-codex.sh recorded in
 #                <codex-dir>/model, so a session stays on the model it
 #                started with; without that record, $CODEX_MODEL, else
-#                gpt-6-astra. A UUID-only resume of a non-Astra session
-#                must therefore name its model here.
+#                gpt-6.2-astra. A UUID-only resume of a session on any
+#                other model must therefore name its model here.
 #
 # The session is resumed in the CODEX_HOME recorded by run-codex.sh
 # (<codex-dir>/codex_home) — sessions live under the home that created them, so
@@ -118,7 +118,7 @@ fi
 # The session's own model beats the script default: a resume that silently
 # switched a Sol session to Astra would change the reviewer mid-conversation.
 [[ -z "$MODEL" && -s "$CODEX_DIR/model" ]] && MODEL=$(cat "$CODEX_DIR/model")
-MODEL="${MODEL:-${CODEX_MODEL:-gpt-6-astra}}"
+MODEL="${MODEL:-${CODEX_MODEL:-gpt-6.2-astra}}"
 MODEL_ARGS=(-m "$MODEL")
 [[ -f "$CODEX_DIR/model" ]] || printf '%s' "$MODEL" > "$CODEX_DIR/model"
 
