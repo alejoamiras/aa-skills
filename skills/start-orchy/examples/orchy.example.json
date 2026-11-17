@@ -42,7 +42,7 @@
   "leads": {
     "model": "opus",
     "model_name": "Claude Opus 5.5",
-    "codex_model": "gpt-6.1-sol",
+    "codex_model": "gpt-6.2-sol",
     "codex_model_short": "sol",
     "codex_effort": "high",
     "tier_default": "mid",

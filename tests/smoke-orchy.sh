@@ -36,13 +36,13 @@ cp -r "$K/scripts" "$T/scripts-copy"; printf 'echo STRAY-SOURCED; exit 9\n' > "$
 o=$("$T/scripts-copy/orchy.sh" config .trunk 2>&1) && [ "$o" = dev ] || fail "a stray orchy/zzz.sh was sourced: $o"
 "$ORCHY" lock >/dev/null || fail "lock"
 # render: every token substituted; a token left over is exit 1
-out=$("$ORCHY" render common-brief.md REPO=example/app PRODUCT="the app" TRUNK=dev WORKTREE=/w/x BRANCH=worktree-x LANE=x KEY=x-plan PLANS_DIR=plans ARCHIVE_DIR=plans/archive ORCHY_HOME="$ORCHY_HOME" CODEX_EFFORT=high CODEX_MODEL=gpt-6.1-sol CODEX_MODEL_SHORT=sol LEAD_MODEL=opus LEAD_MODEL_NAME="Claude Opus 5.5" QUALITY_BAR=production GATES="lint, test" PROTECTED=main KNOWN_LIMIT_LABEL=known-limit DELEGATIONS="" NEVER_OPEN="")
+out=$("$ORCHY" render common-brief.md REPO=example/app PRODUCT="the app" TRUNK=dev WORKTREE=/w/x BRANCH=worktree-x LANE=x KEY=x-plan PLANS_DIR=plans ARCHIVE_DIR=plans/archive ORCHY_HOME="$ORCHY_HOME" CODEX_EFFORT=high CODEX_MODEL=gpt-6.2-sol CODEX_MODEL_SHORT=sol LEAD_MODEL=opus LEAD_MODEL_NAME="Claude Opus 5.5" QUALITY_BAR=production GATES="lint, test" PROTECTED=main KNOWN_LIMIT_LABEL=known-limit DELEGATIONS="" NEVER_OPEN="")
 grep -q 'example/app backlog program (the app)' <<<"$out" || fail "render substitution"
 "$ORCHY" render --keep LANE,KEY,WORKTREE,BRANCH common-brief.md REPO=example/app PRODUCT=x TRUNK=dev PLANS_DIR=plans ARCHIVE_DIR=plans/archive ORCHY_HOME="$ORCHY_HOME" CODEX_EFFORT=high CODEX_MODEL=m CODEX_MODEL_SHORT=s LEAD_MODEL=opus LEAD_MODEL_NAME=x QUALITY_BAR=p GATES=g PROTECTED=main KNOWN_LIMIT_LABEL=k DELEGATIONS= NEVER_OPEN= | grep -q '<WORKTREE>' || fail "render --keep did not keep the lead-bound tokens"
 if "$ORCHY" render common-brief.md REPO=x >/dev/null 2>&1; then fail "render must fail on a leftover token"; fi
 for t in planner-brief implementer-brief lane-brief plan-spawn arc-spawn closeout-spawn shots-spawn quick-spawn release-spawn tick; do [ -f "$K/templates/$t.md" ] || fail "template $t missing"; done
 "$ORCHY" render tick.md REPO=example/app ORCHY_SH="$ORCHY" > "$T/tick.txt" || fail "render tick left a token"; "$ORCHY" check-text "$T/tick.txt" >/dev/null || fail "check-text tick"
-"$ORCHY" render quick-spawn.md LANE=qk KEY=qk-a1 WORKTREE=/w/qk BRANCH=worktree-qk TRUNK=dev BASE=dev ORCHY_HOME="$ORCHY_HOME" DECISIONS=none CODEX_MODEL=gpt-6.1-sol CODEX_EFFORT=high CLOSES="Delivers ask3" DATE=2031-01-15 STATE="a fresh lane" NEVER_OPEN="" > "$T/quick.md" || fail "render quick-spawn left a token"
+"$ORCHY" render quick-spawn.md LANE=qk KEY=qk-a1 WORKTREE=/w/qk BRANCH=worktree-qk TRUNK=dev BASE=dev ORCHY_HOME="$ORCHY_HOME" DECISIONS=none CODEX_MODEL=gpt-6.2-sol CODEX_EFFORT=high CLOSES="Delivers ask3" DATE=2031-01-15 STATE="a fresh lane" NEVER_OPEN="" > "$T/quick.md" || fail "render quick-spawn left a token"
 "$ORCHY" check-text "$T/quick.md" >/dev/null || fail "check-text quick-spawn"
 "$ORCHY" render release-spawn.md LANE=release-7 KEY=release-7-a1 WORKTREE=/w/r BRANCH=worktree-release-7 TRUNK=dev ORCHY_HOME="$ORCHY_HOME" \
   RELEASE_SKILL=/w/r/.claude/skills/release/SKILL.md PROFILE="$ORCHY_HOME/scratch/release-7/profile.json" LEGS="none yet" DATE=2031-01-15 \

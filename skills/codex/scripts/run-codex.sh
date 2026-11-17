@@ -9,15 +9,16 @@
 #                approve-for-me, which becomes --approve-for-me: workspace-write
 #                plus a model auto-reviewer that may rerun a command outside
 #                the sandbox. Refused unless this machine opted in (see Env).
-#   model        Optional. Defaults to $CODEX_MODEL, else gpt-6-astra.
-#                (gpt-6-astra became the default 2026-09-04: OpenAI's
-#                flagship since 2026-09-03 (Codex CLI >= 0.153.1), runs on
-#                ChatGPT-account auth, verified end to end at xhigh.
-#                gpt-6.1-sol — near-Astra, faster and cheaper, Codex CLI
-#                >= 0.159.1 — is what blueprint and harden pass when the
-#                user picks it. The GPT-5.6 family — gpt-5.6-sol / -terra /
-#                -luna — stays valid as cheaper overrides. Pass a 5th arg
-#                or set $CODEX_MODEL to override per call.)
+#   model        Optional. Defaults to $CODEX_MODEL, else gpt-6.2-astra.
+#                (gpt-6.2-astra became the default 2026-11-17, the day
+#                OpenAI shipped it as its frontier model. gpt-6.2-sol — the
+#                everyday tier, lighter on plan usage — is what blueprint
+#                and harden pass by default. Both need a Codex CLI newer
+#                than 0.160.0 (0.169.0 runs them). The previous
+#                generation — gpt-6-astra (CLI >= 0.153.1), gpt-6.1-sol
+#                (>= 0.159.1) — and the GPT-5.6 family stay valid
+#                overrides. Pass a 5th arg or set $CODEX_MODEL to override
+#                per call.)
 #
 # Env: CODEX_ACCOUNT  Optional. A `codex-usage` roster account to run on, or
 #                     "best" to let it pick the one with headroom. The run then
@@ -52,7 +53,7 @@ PROMPT_FILE="${1:-}"
 CWD="${2:-$PWD}"
 EFFORT="${3:-xhigh}"
 SANDBOX="${4:-read-only}"
-MODEL="${5:-${CODEX_MODEL:-gpt-6-astra}}"
+MODEL="${5:-${CODEX_MODEL:-gpt-6.2-astra}}"
 # A roster home carries AGENTS.md but no config.toml, so a global
 # project_doc_max_bytes never reaches it and instructions silently truncate at
 # Codex's 32 KiB default. Pass it per call so every home agrees.
@@ -60,17 +61,28 @@ DOC_MAX="${CODEX_PROJECT_DOC_MAX_BYTES:-131072}"
 MODEL_ARGS=()
 [[ -n "$MODEL" ]] && MODEL_ARGS=(-m "$MODEL")
 
-# An older CLI gets a 400 for this model that reads like an entitlement problem
+# An older CLI gets a 400 for a newer model that reads like an entitlement problem
 # ("not supported when using Codex with a ChatGPT account"); name the real cause.
 # An unreadable version, or a sort without -V, lets the call through to that 400.
-if [[ "$MODEL" == gpt-6.1-* ]]; then
-  CLI_VERSION=$(codex --version 2> /dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
-  OLDEST=$(printf '%s\n' 0.159.1 "$CLI_VERSION" | sort -V 2> /dev/null | head -n 1 || true)
-  if [[ -n "$CLI_VERSION" && -n "$OLDEST" && "$OLDEST" != 0.159.1 ]]; then
-    echo "ERROR: $MODEL needs Codex CLI >= 0.159.1 (found $CLI_VERSION): run 'codex update', or pass gpt-6-astra" >&2
+# OpenAI publishes no floor for 6.2: 0.160.0 is refused and 0.169.0 runs it, so
+# FLOOR there is only the first version not known to fail, and UNSUPPORTED_HINT
+# covers the untested versions between. Floors are ChatGPT sign-in's, the only
+# auth a consult runs on.
+FLOOR="" NEEDS="" OLDER_MODEL=""
+case "$MODEL" in
+  gpt-6.2-astra) FLOOR=0.161.0 NEEDS="a Codex CLI newer than 0.160.0" OLDER_MODEL=gpt-6-astra ;;
+  gpt-6.2-*) FLOOR=0.161.0 NEEDS="a Codex CLI newer than 0.160.0" OLDER_MODEL="gpt-6.1-sol (CLI >= 0.159.1; below that, gpt-6-astra)" ;;
+  gpt-6.1-sol) FLOOR=0.159.1 NEEDS="Codex CLI >= 0.159.1" OLDER_MODEL=gpt-6-astra ;;
+esac
+CLI_VERSION=$(codex --version 2> /dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
+if [[ -n "$FLOOR" ]]; then
+  OLDEST=$(printf '%s\n' "$FLOOR" "$CLI_VERSION" | sort -V 2> /dev/null | head -n 1 || true)
+  if [[ -n "$CLI_VERSION" && -n "$OLDEST" && "$OLDEST" != "$FLOOR" ]]; then
+    echo "ERROR: $MODEL needs $NEEDS (found $CLI_VERSION): run 'codex update', or pass $OLDER_MODEL" >&2
     exit 2
   fi
 fi
+UNSUPPORTED_HINT="HINT: this CLI and account cannot run $MODEL. Check the Codex CLI version (found ${CLI_VERSION:-unknown}; 'codex update'), the slug, and whether the plan still includes the model."
 
 # The override file may only name approve-for-me: a stray file must never be
 # able to widen a consult to danger-full-access.
@@ -197,6 +209,10 @@ if [[ $EXIT -ne 0 ]]; then
   echo "ERROR: codex exec exited with status $EXIT" >&2
   echo "--- log tail ---" >&2
   tail -50 "$LOG_FILE" >&2
+  # Error events only: a consult that read this repo quotes the same text in its tool output.
+  if grep -qE '^\{"type":"(error|turn\.failed)".*not supported when using Codex with a ChatGPT account' "$LOG_FILE" 2> /dev/null; then
+    echo "$UNSUPPORTED_HINT" >&2
+  fi
 fi
 
 echo "CODEX_DIR=$CODEX_DIR"
