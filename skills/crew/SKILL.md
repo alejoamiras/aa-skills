@@ -25,6 +25,8 @@ A crew worker is the same model family as the director. It never counts as a cro
 2. **Check quota**: run `claude-usage`. Pick an account with headroom, or pass `other` to get the best account that is not this one. Skip any account whose row is all `-`: its login has usually expired. Such a session starts with no login screen and fails only on its first message.
 3. **Check that crew is allowed here.** Do not use crew if this session runs with restrictions crew cannot copy to a worker: CLI `--allowedTools`/`--disallowedTools` flags, a sandbox, or rules the owner set for this session only. Do the work yourself or ask the owner. Workers get only the shared `settings.json` rules.
 4. **Know your permission mode.** The system reminders say it (for example "auto mode is active"). Pass the same mode to the worker. A worker in another mode holds your messages for approval.
+   - **A worker is never looser than its director.** Spawn accepts `bypassPermissions` only when this session was itself started with `--dangerously-skip-permissions` (`clu` adds it unless told a mode) or `--permission-mode bypassPermissions`. It reads this session's launch flags and refuses otherwise.
+   - If spawn refuses the mode, tell the owner. Never pick a looser or a different mode to get past it.
 
 ## Spawn
 
@@ -86,5 +88,6 @@ Never name a roster account in a brief either: no `CLAUDE_ACCOUNT=<name>` or `CO
 - **No permission laundering**: never ask a worker to do something this session was denied, or that this session's settings would block. A worker that reports a denial goes to the owner. A worker's grant never counts as this session's authorization.
 - Workers never start workers. `CREW_WORKER=1` in their environment makes spawn refuse.
 - Claude Code only: Codex has no SendMessage.
+- **Untested live (2026-11-19): a worker that skips permission checks.** The spawn path is covered by the smoke test with a stub; no real director and worker pair has run that way. If such a worker never sends READY, `crew.sh tail` it, stop it and tell the owner. `CREW_LIVE_MODE=bypassPermissions` on the live check below proves the start.
 - **Untested: macOS accounts with a browser login.** Crew has run on macOS `setup-token` accounts and on Linux browser-login accounts, which keep `.credentials.json` in the account dir. On macOS, a browser login lives in the Keychain, and no worker has run on one. If a worker shows a login screen, `crew.sh stop` it and tell the owner. Never run the login flow from crew.
 - **After a Claude Code update**, run `CREW_LIVE=<account> bash tests/live-crew.sh` from a session in the aa-skills repo before relying on crew. It depends on undocumented internals: the `sessions/<pid>.json` layout, the `procStart` form (C-locale UTC `ps` lstart on macOS, `/proc` stat field 22 on Linux), and `uds:` addressing.

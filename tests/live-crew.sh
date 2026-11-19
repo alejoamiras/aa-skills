@@ -3,7 +3,10 @@
 # confirm it registered with no first-run prompt, stop it, confirm it exited.
 # Spends a sliver of that account's quota (one session start, no prompt).
 #
-#   CREW_LIVE=<account> bash tests/live-crew.sh
+#   CREW_LIVE=<account> [CREW_LIVE_MODE=<mode>] bash tests/live-crew.sh
+#
+# CREW_LIVE_MODE is the worker's permission mode (default: default). Spawn
+# accepts bypassPermissions only from a session started that way.
 #
 # Run it from a Claude Code session's Bash tool: spawn needs the director's
 # CLAUDE_PID and messaging socket. Without CREW_LIVE it skips.
@@ -34,7 +37,7 @@ FAIL=0
 ok() { echo "ok    $1"; }
 bad() { echo "FAIL  $1"; FAIL=1; }
 
-"$CREW" spawn "$CREW_LIVE" "$DIR" --permission-mode default --name live > "$OUT"; rc=$?
+"$CREW" spawn "$CREW_LIVE" "$DIR" --permission-mode "${CREW_LIVE_MODE:-default}" --name live > "$OUT"; rc=$?
 PID=$(sed -n 's/^CREW_PID=//p' "$OUT")
 KEY=$(sed -n 's/^CREW_ACCOUNT=//p' "$OUT")
 if [ "$rc" -eq 0 ] && [ -n "$PID" ]; then ok "spawn: $KEY registered as pid $PID"; else bad "spawn exited $rc"; exit 1; fi
@@ -47,7 +50,7 @@ else
   bad "registration file incomplete"
 fi
 PANE=$(tmux -L "$CREW_TMUX_SOCKET" capture-pane -p -t "=crew-live:")
-if printf '%s' "$PANE" | grep -qiE 'trust (this|the files)|choose the text style|select.*theme'; then bad "a first-run prompt is on screen"; else ok "no first-run prompt on screen"; fi
+if printf '%s' "$PANE" | grep -qiE 'trust (this|the files)|choose the text style|select.*theme|yes, I accept'; then bad "a first-run prompt is on screen"; else ok "no first-run prompt on screen"; fi
 
 if "$CREW" stop live > /dev/null; then ok "stop: crew-live stopped"; else bad "stop refused"; fi
 for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$PID" 2> /dev/null || break; sleep 1; done

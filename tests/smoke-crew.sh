@@ -25,7 +25,7 @@ export PATH="$S/bin:$ROOT/bin:$PATH" STUBSOCK="/tmp/cs-smoke-$$"
 unset CLAUDE_CONFIG_DIR CREW_WORKER CLAUDE_ACCOUNT TMUX
 # The director: this shell, with a messaging token a worker must never see.
 export CLAUDE_PID=$$ CLAUDE_CODE_MESSAGING_SOCKET="$S/director.sock" CLAUDE_CODE_MESSAGING_TOKEN=director-secret
-mkdir -p "$HOME/.claude" "$S/bin" "$CLAUDE_ACCOUNTS_ROOT"/{wa,wb,wc,wd,we,wf,wg} "$S/work"/{a,b,c,d,e,f,g,h} "$S/work/semi;" "$S/untrusted"
+mkdir -p "$HOME/.claude" "$S/bin" "$CLAUDE_ACCOUNTS_ROOT"/{wa,wb,wc,wd,we,wf,wg,wh} "$S/work"/{a,b,c,d,e,f,g,h,i} "$S/work/semi;" "$S/untrusted"
 WORK="$(cd "$S/work" && pwd -P)"
 printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$WORK" > "$HOME/.claude.json"
 FAIL=0
@@ -46,6 +46,7 @@ cat > "$S/bin/claude" << 'STUB'
 [[ $1 == auth ]] && { echo '{"loggedIn":true}'; exit 0; }
 h="${CLAUDE_CONFIG_DIR:?}"
 env > "$h/env.$$"
+printf '%s\n' "$@" > "$h/args.$$"
 mode=$(cat "$h/mode" 2> /dev/null || echo register)
 [[ $mode == exit ]] && { echo "stub: boom"; exit 3; }
 [[ $mode == hupproof ]] && trap '' HUP
@@ -63,7 +64,7 @@ fi
 exec sleep 600
 STUB
 chmod +x "$S/bin/claude"
-for a in wa wb wc wd we wf wg; do echo "$STUBSOCK-$a" > "$CLAUDE_ACCOUNTS_ROOT/$a/sockbase"; done
+for a in wa wb wc wd we wf wg wh; do echo "$STUBSOCK-$a" > "$CLAUDE_ACCOUNTS_ROOT/$a/sockbase"; done
 val() { sed -n "s/^$1=//p" "$2"; }
 T() { tmux -L "$CREW_TMUX_SOCKET" "$@"; }
 
@@ -89,12 +90,20 @@ t "spawn: the reservation is released once registered" sh -c '[ -z "$(ls -A "$0/
 
 tn "refuse: inside a worker" env CREW_WORKER=1 "$CREW" spawn wb "$S/work/b" --permission-mode auto
 tn "refuse: outside a Claude Code director" env -u CLAUDE_PID "$CREW" spawn wb "$S/work/b" --permission-mode auto
-tn "refuse: a mode that skips permission checks" "$CREW" spawn wb "$S/work/b" --permission-mode bypassPermissions
+tn "refuse: a worker that skips permission checks, from a director that does not" "$CREW" spawn wb "$S/work/b" --permission-mode bypassPermissions
 tn "refuse: no permission mode" "$CREW" spawn wb "$S/work/b"
 tn "refuse: a taken name" "$CREW" spawn wb "$S/work/b" --permission-mode auto --name wa-a
 tn "refuse: a dir the director does not trust" "$CREW" spawn wb "$S/untrusted" --permission-mode auto
 tn "refuse: a dir ending in ';'" "$CREW" spawn wb "$S/work/semi;" --permission-mode auto --name semi
 t "refuse: none of them left a session behind" test "$(T list-sessions -F '#{session_name}' | grep -c '^crew-')" -eq 1
+
+# A director started without permission checks: only its argv says so.
+python3 -c 'import time; time.sleep(600)' --dangerously-skip-permissions & BD=$!
+for _ in $(seq 50); do ps -o args= -p "$BD" | grep -q -- --dangerously-skip-permissions && break; sleep 0.1; done
+CLAUDE_PID=$BD "$CREW" spawn wh "$S/work/i" --permission-mode bypassPermissions > "$S/sp5" 2> /dev/null; rc=$?
+P5=$(val CREW_PID "$S/sp5")
+t "spawn: a director started without permission checks gets a worker started the same way" sh -c '[ "$0" -eq 0 ] && grep -qx -- --dangerously-skip-permissions "$1"' "$rc" "$CLAUDE_ACCOUNTS_ROOT/wh/args.$P5"
+CLAUDE_PID=$BD "$CREW" stop wh-i > /dev/null 2>&1; kill "$BD"
 
 echo exit > "$CLAUDE_ACCOUNTS_ROOT/wb/mode"
 "$CREW" spawn wb "$S/work/b" --permission-mode auto > /dev/null 2> "$S/sp2.err"; rc=$?

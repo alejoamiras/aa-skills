@@ -7,7 +7,8 @@
 #                 [--model <model>] [--ssh-agent]
 #       start a worker; prints CREW_* lines (session, account, pid, address,
 #       director address, attach command). The brief is sent afterwards with
-#       SendMessage, never as an argument.
+#       SendMessage, never as an argument. bypassPermissions is accepted
+#       only when the director itself was started without permission checks.
 #       exit 1 refused · 2 account busy or locked · 3 started but not
 #       registered (kept) · 4 died or could not be tagged (removed)
 #   crew.sh peers [--json]      live Claude Code sessions on every account
@@ -79,6 +80,36 @@ my_owner() {
   [[ -n ${s} ]] && printf '%s:%s' "${CLAUDE_PID}" "${s}"
 }
 
+# A session's mode is recorded nowhere a script can read; only the flag it was
+# started with shows. ps joins argv with spaces, so off Linux a prompt that
+# quotes the flag reads as the flag.
+director_skips_checks() {
+  local -a argv=()
+  local a i
+  if [[ -r /proc/${CLAUDE_PID}/cmdline ]]; then
+    while IFS= read -r -d '' a; do argv+=("${a}"); done < "/proc/${CLAUDE_PID}/cmdline"
+  else
+    read -r -a argv <<< "$(ps -o args= -p "${CLAUDE_PID}" 2> /dev/null)"
+  fi
+  for ((i = 0; i < ${#argv[@]}; i++)); do
+    case "${argv[i]}" in
+      --dangerously-skip-permissions | --permission-mode=bypassPermissions) return 0 ;;
+      --permission-mode) [[ ${argv[i + 1]:-} == bypassPermissions ]] && return 0 ;;
+    esac
+  done
+  return 1
+}
+
+check_mode() {
+  case "$1" in
+    '') die "--permission-mode is required: pass this session's own mode" ;;
+    bypassPermissions) director_skips_checks ||
+      die "a worker skips permission checks only when this session was started that way (--dangerously-skip-permissions): pass this session's own mode" ;;
+    default | manual | acceptEdits | plan | auto | dontAsk) ;;
+    *) die "unknown permission mode: $1" ;;
+  esac
+}
+
 account_home() { [[ $1 == main ]] && printf '%s' "${HOME}/.claude" || printf '%s' "${ROOT}/$1"; }
 
 homes() {
@@ -131,12 +162,7 @@ cmd_spawn() {
   if [[ -z ${CLAUDE_CODE_MESSAGING_SOCKET:-} ]] || ! owner=$(my_owner); then
     die "spawn runs only from a Claude Code session (CLAUDE_PID and CLAUDE_CODE_MESSAGING_SOCKET)"
   fi
-  case "${mode}" in
-    '') die "--permission-mode is required: pass this session's own mode" ;;
-    bypassPermissions) die "crew never starts a worker that skips permission checks" ;;
-    default | acceptEdits | plan | auto | dontAsk) ;;
-    *) die "unknown permission mode: ${mode}" ;;
-  esac
+  check_mode "${mode}"
   [[ -d ${dir} ]] || die "not a directory: ${dir}"
   phys=$(cd "${dir}" && pwd -P) || die "cannot enter ${dir}"
   key=$("${CU_BIN}" resolve "${account}") || die "cannot resolve account ${account}"
@@ -160,7 +186,9 @@ cmd_spawn() {
   ((rc == 0)) || exit "${rc}"
 
   T set-option -g remain-on-exit on 2> /dev/null
-  local -a run=("${CU_BIN}" run "=${key}" --permission-mode "${mode}")
+  local -a run=("${CU_BIN}" run "=${key}")
+  # The flag clu starts sessions with; the mode name alone is unproven here.
+  if [[ ${mode} == bypassPermissions ]]; then run+=(--dangerously-skip-permissions); else run+=(--permission-mode "${mode}"); fi
   [[ -n ${model} ]] && run+=(--model "${model}")
   out=$(T -f "${CONF}" new-session -d -P -F '#{session_id} #{pane_pid}' -s "crew-${slug}" -c "${phys}" -x 220 -y 50 -- \
     "${ENV_BIN}" -i "${wenv[@]}" "${run[@]}") ||
