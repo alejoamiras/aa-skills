@@ -6,6 +6,7 @@ How it stays safe to run next to everything else:
 
 - **Clean environment.** The worker's env is rebuilt from a short allowlist inside the pane's exec chain. The director's messaging token, and anything a tmux server carries globally, never reach it.
 - **Trust is copied, never granted.** `claude-usage prepare` trusts a folder for the worker's account only where the director already trusts it or a parent.
+- **Never looser than the director.** A worker skips permission checks only when the director was itself started that way; spawn reads the director's launch flags and refuses otherwise.
 - **No config races.** `.claude.json` changes go through a fail-closed per-account lock. They are refused while a session or a pending launch lives on the account.
 - **Ownership.** Every worker is tagged with its director's pid and start time. `stop` checks the worker's identity before any signal, and never acts by name.
 
