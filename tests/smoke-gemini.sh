@@ -215,4 +215,23 @@ echo failed > "$D3/ended.txt"
 (cd "$S/caller" && "$RES" "$D3" "$P") > "$S/o" 2> "$S/e"; rc=$?
 gm_t "turn 0 ended: resume gives the turn-0 line, claiming nothing" sh -c "$REFUSED"' && [ ! -e "$4/followup-1.md" ]' "$rc" "$S/o" "$S/e" "turn 0 has no answer: see its log's NEXT line, then start again with run-gemini.sh" "$D3"
 
+# --- the launcher ------------------------------------------------------------------------
+cp -R "$ROOT/skills/gemini" "$S/probe"
+cat > "$S/probe/engines/api.ts" << 'PROBE'
+console.log(Object.keys(process.env).sort().join(" "));
+console.log(process.cwd());
+PROBE
+mkdir -p "$S/pcaller"
+printf '#!/bin/sh\ntouch "%s/fake-bun-ran"\n' "$S" > "$S/pcaller/bun"
+chmod 755 "$S/pcaller/bun"
+printf 'require("node:fs").writeFileSync("%s/preload-ran", "")\n' "$S" > "$S/evil.ts"
+printf 'GM_DOTENV=1\n' > "$S/pcaller/.env"
+printf 'preload = ["%s/evil.ts"]\n' "$S" > "$S/pcaller/bunfig.toml"
+(cd "$S/pcaller" && PATH=".:$PATH" BUN_OPTIONS="--preload $S/evil.ts" BUN_CONFIG_VERBOSE_FETCH=curl TMPDIR=rel ../probe/engines/api /x 0 submit) > "$S/po" 2>&1; rc=$?
+gm_t "launcher: a call by relative path runs the probe and exits with bun's status" test "$rc" -eq 0
+gm_t "launcher: the bun planted in the caller's cwd never ran" test ! -e "$S/fake-bun-ran"
+gm_t "launcher: no inherited or cwd preload ran" test ! -e "$S/preload-ran"
+gm_t "launcher: only PATH and XDG_CONFIG_HOME reach api.ts" sh -c '[ "$(sed -n 1p "$0")" = "PATH XDG_CONFIG_HOME" ]' "$S/po"
+gm_t "launcher: the probe ran in an empty dir that is gone afterwards" sh -c 'd=$(sed -n 2p "$0"); case $d in /*/gemini-api.*) [ ! -e "$d" ] ;; *) exit 1 ;; esac' "$S/po"
+
 exit "$FAIL"
