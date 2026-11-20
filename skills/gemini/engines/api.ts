@@ -15,9 +15,9 @@ const WAIT = 30 * 60_000;
 const FAILS = 5;
 const ID = /^[A-Za-z0-9_-]{1,512}$/;
 const MODEL = /^[a-z0-9][a-z0-9.-]*$/;
-// URL-unreserved characters only: JSON escaping and percent-encoding leave them as they are, so an echoed key
-// stays a literal match for the redactor.
-const KEY_LINE = /^GEMINI_API_KEY=([A-Za-z0-9._~-]+)\n?$/;
+// JSON, percent and form encoding all leave these characters as they are, so an echoed key stays a literal match for
+// the redactor.
+const KEY_LINE = /^GEMINI_API_KEY=([A-Za-z0-9._-]+)\n?$/;
 const EFFORTS = ["low", "medium", "high"];
 const STATUSES = new Set(["in_progress", "completed", "failed", "cancelled", "incomplete", "requires_action", "requires_continuation"]);
 // GET returns this turn's user_input too; any other step type (a tool call or result) withholds the answer.
@@ -136,11 +136,11 @@ function chainedId(dir: string, turn: number, uid: number): string {
 
 function readKey(path: string, uid: number): string {
   const m = KEY_LINE.exec(readOwned(path, uid, true));
-  if (!m) throw new Refusal(`${path} must hold one line GEMINI_API_KEY=<letters, digits and . _ ~ - only>`);
+  if (!m) throw new Refusal(`${path} must hold one line GEMINI_API_KEY=<letters, digits and . _ - only>`);
   return m[1];
 }
 
-// Temp file, then a hard link that never replaces: the final name appears complete or not at all.
+// The final name appears complete and is never replaced.
 function publish(dir: string, name: string, data: string): boolean {
   const tmp = join(dir, `.${name}.${randomBytes(8).toString("hex")}`);
   try {
@@ -215,7 +215,7 @@ async function submitTurn(t: Turn, effort: string, input: string, parent: string
   return id;
 }
 
-// A GET submits nothing, so it is retried; any wait that ends leaves the turn pending and collectable.
+// Transient failures are retried; a timeout or exhausted retries leave the turn pending.
 async function collect(t: Turn, id: string): Promise<number> {
   const { deps, log, end } = t;
   const url = `${ENDPOINT}/${encodeURIComponent(id)}`;
@@ -246,15 +246,16 @@ async function collect(t: Turn, id: string): Promise<number> {
       return end(undefined, `Google refused the poll: HTTP ${res.status}${err ? ` ${log.field(err.code)}: ${log.field(err.message)}` : ""}`, auth + NEXT.wait);
     } else {
       const r = parse(text);
+      // Before any excerpt: another interaction's id is not hidden, so its body never reaches the log.
+      if (isObj(r) && typeof r.id === "string" && r.id !== id) {
+        log.line(`poll ${n}: another interaction`);
+        return end(undefined, "Google returned another interaction than the one this turn saved; nothing was published",
+          "do not resend; if fetch-gemini.sh keeps reporting this, abandon the turn and start a new conversation with run-gemini.sh");
+      }
       if (!isObj(r) || typeof r.id !== "string" || typeof r.status !== "string" || !STATUSES.has(r.status)) {
         log.line(`poll ${n}: unexpected body`);
         log.body(res, text);
         return end(undefined, "a poll returned an unexpected body", NEXT.wait);
-      }
-      if (r.id !== id) {
-        log.line(`poll ${n}: another interaction`);
-        return end(undefined, "Google returned another interaction than the one this turn saved; nothing was published",
-          "do not resend; if fetch-gemini.sh keeps reporting this, abandon the turn and start a new conversation with run-gemini.sh");
       }
       log.line(`poll ${n}: ${r.status}`);
       if (r.status !== "in_progress") return finish(t, r);
@@ -281,7 +282,7 @@ function finish(t: Turn, r: Json): number {
     case "cancelled":
       return end("cancelled", "the run was cancelled at Google", NEXT.terminal);
     case "incomplete":
-      return end("incomplete", `the run ended incomplete, which usually means the output cap of ${MAX_OUTPUT_TOKENS} tokens, thinking included`, `${NEXT.terminal}; if the output cap stopped it, the answer did not fit`);
+      return end("incomplete", `the run ended incomplete, which can mean the output cap of ${MAX_OUTPUT_TOKENS} tokens, thinking included`, `${NEXT.terminal}; if the output cap stopped it, the answer did not fit`);
     case "requires_action":
       return end("requires_action", "the run paused for a client action, which a tool-free consult never offers", NEXT.terminal);
     case "requires_continuation":
@@ -383,7 +384,6 @@ export async function main(argv: string[], deps: Deps): Promise<number> {
 
 if (import.meta.main) {
   process.exitCode = await main(process.argv.slice(2), {
-    // HOME is unset, so this is the passwd home: no variable can move the key path.
     keyPath: join(userInfo().homedir, ".config", "gemini", ".env"),
     fetch: (url, init) => fetch(url, init),
     uid: process.getuid?.() ?? -1,

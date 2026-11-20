@@ -244,7 +244,7 @@ describe("terminal resources", () => {
   test("incomplete ends the turn with its marker, naming the output cap only as the usual cause", async () => {
     const r = await run(conv(), [running(), done({ status: "incomplete" })]);
     expect([r.file("ended.txt"), r.file("response.md")]).toEqual(["incomplete\n", undefined]);
-    expect(r.lines.at(-2)).toBe("ERROR: the run ended incomplete, which usually means the output cap of 65536 tokens, thinking included");
+    expect(r.lines.at(-2)).toBe("ERROR: the run ended incomplete, which can mean the output cap of 65536 tokens, thinking included");
     expect(r.lines.at(-1)).toMatch(/; if the output cap stopped it, the answer did not fit$/);
   });
 
@@ -268,6 +268,8 @@ describe("terminal resources", () => {
     ["a positive total_tool_use_tokens", { usage: { total_tool_use_tokens: 12 } }, "tool use"],
     ["a non-empty grounding_tool_count", { usage: { grounding_tool_count: [{ type: "google_search", count: 1 }] } }, "tool use"],
     ["only tool_use_tokens_by_modality set", { usage: { tool_use_tokens_by_modality: [{ modality: "TEXT", token_count: 5 }] } }, "tool use"],
+    ["a tool counter that is a non-empty object", { usage: { tool_use_tokens_by_modality: { TEXT: 5 } } }, "tool use"],
+    ["a tool counter of an unexpected kind", { usage: { total_tool_use_tokens: "5" } }, "tool use"],
     [
       "an answer holding the key across two items",
       { steps: [{ type: "model_output", content: [{ type: "text", text: `a ${KEY.slice(0, 10)}` }, { type: "text", text: `${KEY.slice(10)} b` }] }] },
@@ -291,9 +293,11 @@ describe("terminal resources", () => {
     expect([r.file("ended.txt"), r.file("response.md")]).toEqual([undefined, "Hello, world."]);
   });
 
-  test("a resource with another id publishes nothing and leaves no marker", async () => {
-    const r = await run(conv(), [running(), done({ id: "int-other" })]);
+  test.each(["completed", "an-unknown-status"])("a resource with another id and status %s publishes nothing, logs neither id", async (status) => {
+    const r = await run(conv(), [running(), done({ id: "int-other", status })]);
     expect([r.code, r.file("ended.txt"), r.file("response.md")]).toEqual([1, undefined, undefined]);
+    expect(r.lines).toContain("poll 1: another interaction");
+    expect([r.log.includes("int-other"), r.log.includes(ID)]).toEqual([false, false]);
   });
 
   test("earlier turns' steps in the resource give only this turn's answer", async () => {
@@ -352,7 +356,7 @@ describe("the key", () => {
     ["owned by another uid", "is not owned by uid", () => (statSync("/etc/passwd").uid === UID ? "" : "/etc/passwd")],
     ["without a key line", "must hold one line GEMINI_API_KEY=", (p: string) => (writeFileSync(p, "OTHER=1\n", { mode: 0o600 }), p)],
     ["a value with a U+200B", "must hold one line GEMINI_API_KEY=", (p: string) => (writeFileSync(p, `GEMINI_API_KEY=${KEY}\u200b\n`, { mode: 0o600 }), p)],
-    ...["%", "=", "\\", "<"].map((ch) => [`a value with ${ch}`, "must hold one line GEMINI_API_KEY=", (p: string) => (writeFileSync(p, `GEMINI_API_KEY=${KEY}${ch}x\n`, { mode: 0o600 }), p)] as const),
+    ...["%", "=", "\\", "<", "~"].map((ch) => [`a value with ${ch}`, "must hold one line GEMINI_API_KEY=", (p: string) => (writeFileSync(p, `GEMINI_API_KEY=${KEY}${ch}x\n`, { mode: 0o600 }), p)] as const),
   ])("a key file %s is refused by path and reason, nothing sent", async (_, why, make) => {
     const keyPath = make(join(root, `refused${++seq}.env`));
     expect(keyPath).not.toBe("");
