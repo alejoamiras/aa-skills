@@ -138,12 +138,16 @@ describe("submit", () => {
   test.each([
     ["a lost reply", () => new TypeError("socket closed")],
     ["a 504", () => error(504, "deadline_exceeded", "late")],
+    ["a 408", () => error(408, "request_timeout", "slow")],
+    ["a 499", () => error(499, "cancelled", "cancelled")],
     ["a reply with a bad id shape", () => json({ id: "bad/id", status: "in_progress" })],
+    ["a reply id holding the key", () => json({ id: KEY, status: "in_progress" })],
   ])("%s leaves unknown, its NEXT line and no GET", async (_, reply) => {
     const r = await run(conv(), [reply()]);
     expect(r.calls.length).toBe(1);
     expect(r.file("ended.txt")).toBe("unknown\n");
     expect(r.file("id.txt")).toBeUndefined();
+    expect(leaks(r.log)).toBe(false);
     expect(r.lines.at(-1)).toMatch(/^NEXT: it may be running and billed with no id to collect, and sending it again may be charged twice$/);
   });
 
@@ -151,6 +155,7 @@ describe("submit", () => {
     ["a 400 safety block", 0, error(400, "safety", "blocked"), /Google rejected the submission: HTTP 400 safety: blocked/],
     ["a follow-up whose parent expired", 1, error(404, "not_found", "Result not found."), /no longer stored at Google; start a new one with run-gemini.sh/],
     ["a follow-up whose error quotes the parent id", 1, error(400, "invalid_request", "int-parent-7 is in_progress"), /invalid_request: \[redacted\] is in_progress/],
+    ["an error whose code is an object that cannot become a string", 0, json({ error: { code: { toString: null }, message: "x" } }, 400), /HTTP 400 unknown: x$/],
   ])("%s is rejected with no id file", async (_, turn, reply, line) => {
     const c = conv();
     if (turn) {
@@ -218,6 +223,15 @@ describe("collect", () => {
     expect(r.log.includes("remote words")).toBe(false);
   });
 
+  test.each([
+    ["missing", undefined],
+    ["not a string", 5],
+  ])("a resource whose id is %s is an unexpected body, with no marker", async (_, id) => {
+    const r = await run(conv(), [running(), done({ id })]);
+    expect(r.lines).toContain("poll 1: unexpected body");
+    expect([r.code, r.file("ended.txt"), r.file("response.md")]).toEqual([1, undefined, undefined]);
+  });
+
   test("a bad id file fails before any GET and leaves no marker", async () => {
     const c = conv();
     writeFileSync(join(c.dir, "id.txt"), "bad/id");
@@ -227,10 +241,11 @@ describe("collect", () => {
 });
 
 describe("terminal resources", () => {
-  test("incomplete ends the turn with its marker and the output-cap NEXT line", async () => {
+  test("incomplete ends the turn with its marker, naming the output cap only as the usual cause", async () => {
     const r = await run(conv(), [running(), done({ status: "incomplete" })]);
     expect([r.file("ended.txt"), r.file("response.md")]).toEqual(["incomplete\n", undefined]);
-    expect(r.lines.at(-1)).toMatch(/the answer did not fit the output cap$/);
+    expect(r.lines.at(-2)).toBe("ERROR: the run ended incomplete, which usually means the output cap of 65536 tokens, thinking included");
+    expect(r.lines.at(-1)).toMatch(/; if the output cap stopped it, the answer did not fit$/);
   });
 
   test("failed prints its errors[] redacted", async () => {
@@ -241,17 +256,39 @@ describe("terminal resources", () => {
     expect(leaks(r.log)).toBe(false);
   });
 
+  test("failed still ends the turn when errors[] holds values that cannot become strings", async () => {
+    const r = await run(conv(), [running(), done({ status: "failed", errors: [{ code: { toString: null }, message: { toString: null } }] })]);
+    expect(r.file("ended.txt")).toBe("failed\n");
+    expect(r.lines.find((l) => l.startsWith("ERROR: "))).toBe("ERROR: the run failed at Google: [non-text]: [non-text]");
+  });
+
   test.each([
     ["an unexpected step type", { steps: [{ type: "google_search_call" }, { type: "model_output", content: [{ type: "text", text: "x" }] }] }, "google_search_call step"],
     ["a non-text model_output item", { steps: [{ type: "model_output", content: [{ type: "image", data: "AAAA" }] }] }, "not text"],
     ["a positive total_tool_use_tokens", { usage: { total_tool_use_tokens: 12 } }, "tool use"],
     ["a non-empty grounding_tool_count", { usage: { grounding_tool_count: [{ type: "google_search", count: 1 }] } }, "tool use"],
+    ["only tool_use_tokens_by_modality set", { usage: { tool_use_tokens_by_modality: [{ modality: "TEXT", token_count: 5 }] } }, "tool use"],
+    [
+      "an answer holding the key across two items",
+      { steps: [{ type: "model_output", content: [{ type: "text", text: `a ${KEY.slice(0, 10)}` }, { type: "text", text: `${KEY.slice(10)} b` }] }] },
+      "holds the API key",
+    ],
     ["a model mismatch", { model: "gemini-3.8-flash" }, "served gemini-3.8-flash for the requested gemini-4-carbon; the answer is withheld and retrying is not worth it: pass a concrete model ID"],
     ["an empty answer", { steps: [{ type: "model_output", content: [{ type: "text", text: "" }] }] }, "empty"],
   ])("%s withholds the answer", async (_, over, why) => {
     const r = await run(conv(), [running(), done(over)]);
     expect([r.file("ended.txt"), r.file("response.md")]).toEqual(["withheld\n", undefined]);
     expect(r.lines.find((l) => l.startsWith("ERROR: "))).toContain(why);
+    expect(leaks(r.log)).toBe(false);
+  });
+
+  test.each([
+    ["0", 0],
+    ["[]", []],
+    ["{}", {}],
+  ])("a grounding_tool_count of %s does not withhold", async (_, grounding: unknown) => {
+    const r = await run(conv(), [running(), done({ usage: { total_tool_use_tokens: 0, grounding_tool_count: grounding } })]);
+    expect([r.file("ended.txt"), r.file("response.md")]).toEqual([undefined, "Hello, world."]);
   });
 
   test("a resource with another id publishes nothing and leaves no marker", async () => {
@@ -296,11 +333,13 @@ describe("the key", () => {
 
   test("a throw inside main is printed through the redactor", async () => {
     const sleep = async () => {
-      throw new Error(`sleep failed holding ${KEY}`);
+      throw new Error(`sleep failed holding ${KEY} ${"x".repeat(1000)}`);
     };
     const r = await run(conv(), [running(), running()], { sleep });
+    const prefix = "ERROR: the engine stopped unexpectedly: ";
     expect(r.code).toBe(1);
-    expect(r.lines.at(-2)).toBe("ERROR: the engine stopped unexpectedly: Error: sleep failed holding [redacted]");
+    expect(r.lines.at(-2)?.startsWith(`${prefix}Error: sleep failed holding [redacted] xxx`)).toBe(true);
+    expect(r.lines.at(-2)?.length).toBe(prefix.length + 500);
     expect(leaks(r.log)).toBe(false);
   });
 
@@ -313,6 +352,7 @@ describe("the key", () => {
     ["owned by another uid", "is not owned by uid", () => (statSync("/etc/passwd").uid === UID ? "" : "/etc/passwd")],
     ["without a key line", "must hold one line GEMINI_API_KEY=", (p: string) => (writeFileSync(p, "OTHER=1\n", { mode: 0o600 }), p)],
     ["a value with a U+200B", "must hold one line GEMINI_API_KEY=", (p: string) => (writeFileSync(p, `GEMINI_API_KEY=${KEY}\u200b\n`, { mode: 0o600 }), p)],
+    ...["%", "=", "\\", "<"].map((ch) => [`a value with ${ch}`, "must hold one line GEMINI_API_KEY=", (p: string) => (writeFileSync(p, `GEMINI_API_KEY=${KEY}${ch}x\n`, { mode: 0o600 }), p)] as const),
   ])("a key file %s is refused by path and reason, nothing sent", async (_, why, make) => {
     const keyPath = make(join(root, `refused${++seq}.env`));
     expect(keyPath).not.toBe("");

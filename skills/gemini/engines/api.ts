@@ -2,7 +2,7 @@
 // Usage: api <absolute gemini-dir> <turn> submit|collect
 // It writes only the turn's id file, answer and ended marker, each complete or not at all; its output is the turn's log.
 import { randomBytes } from "node:crypto";
-import { closeSync, constants, fstatSync, linkSync, lstatSync, openSync, readFileSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants, fstatSync, linkSync, lstatSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -15,8 +15,9 @@ const WAIT = 30 * 60_000;
 const FAILS = 5;
 const ID = /^[A-Za-z0-9_-]{1,512}$/;
 const MODEL = /^[a-z0-9][a-z0-9.-]*$/;
-// Printable ASCII with no space or quote: fetch puts a header value it refuses, key and all, into its error text.
-const KEY_LINE = /^GEMINI_API_KEY=([\x21\x23-\x26\x28-\x7E]+)\n?$/;
+// URL-unreserved characters only: JSON escaping and percent-encoding leave them as they are, so an echoed key
+// stays a literal match for the redactor.
+const KEY_LINE = /^GEMINI_API_KEY=([A-Za-z0-9._~-]+)\n?$/;
 const EFFORTS = ["low", "medium", "high"];
 const STATUSES = new Set(["in_progress", "completed", "failed", "cancelled", "incomplete", "requires_action", "requires_continuation"]);
 // GET returns this turn's user_input too; any other step type (a tool call or result) withholds the answer.
@@ -40,7 +41,8 @@ type Outcome = "not-sent" | "rejected" | "unknown" | "failed" | "cancelled" | "i
 
 class Refusal extends Error {}
 
-// Every line goes out redacted and flattened, so no path, a stray throw included, can print a secret or split the log.
+// Every line passes here: literal matches of the key and of the ids this call read are redacted, and control characters
+// flattened, so no line splits the log.
 class Log {
   private hidden: string[] = [];
   constructor(private readonly out: (line: string) => void) {}
@@ -50,9 +52,10 @@ class Log {
   line(text: string) {
     this.out(this.flat(text));
   }
-  // Cut only after redaction: a secret straddling the cut would otherwise leave a fragment.
+  // Never String() on a remote object, which can throw; redacted before the cut, so a secret straddling it leaves no fragment.
   field(value: unknown) {
-    return Array.from(this.flat(String(value ?? ""))).slice(0, 500).join("");
+    const text = typeof value === "string" ? value : typeof value === "number" || typeof value === "boolean" ? String(value) : value == null ? "" : "[non-text]";
+    return Array.from(this.flat(text)).slice(0, 500).join("");
   }
   body(res: Response, text: string) {
     const cp = Array.from(this.redact(text));
@@ -71,6 +74,10 @@ const isObj = (v: unknown): v is Json => typeof v === "object" && v !== null && 
 const errCode = (e: unknown) => (isObj(e) && typeof e.code === "string" ? e.code : "error");
 const exists = (path: string) => lstatSync(path, { throwIfNoEntry: false }) !== undefined;
 const count = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? String(v) : "?");
+const errText = (e: unknown) => (e instanceof Error ? `${e.name}: ${e.message}` : typeof e === "string" ? e : "a non-error value");
+// A usage value of an unexpected kind counts as use: the tool check fails closed.
+const used = (v: unknown) =>
+  v == null ? false : typeof v === "number" ? v > 0 : Array.isArray(v) ? v.length > 0 : isObj(v) ? Object.keys(v).length > 0 : true;
 
 function parse(text: string): unknown {
   try {
@@ -83,7 +90,8 @@ function parse(text: string): unknown {
 function apiError(text: string) {
   const b = parse(text);
   const e = isObj(b) && isObj(b.error) ? b.error : undefined;
-  return e && typeof e.message === "string" ? { code: String(e.code ?? "unknown"), message: e.message } : undefined;
+  const code = typeof e?.code === "string" || typeof e?.code === "number" ? String(e.code) : "unknown";
+  return e && typeof e.message === "string" ? { code, message: e.message } : undefined;
 }
 
 function turnFiles(turn: number) {
@@ -91,7 +99,8 @@ function turnFiles(turn: number) {
   return { prompt: turn === 0 ? "prompt.md" : `followup-${turn}.md`, id: `id${s}.txt`, response: `response${s}.md`, ended: `ended${s}.txt` };
 }
 
-// One no-follow, non-blocking open, checked and read through that descriptor: a symlink, FIFO or swapped file is refused.
+// The checks and the read use one no-follow, non-blocking descriptor, so a swap after the open changes nothing, and a symlink
+// or FIFO is refused.
 function readOwned(path: string, uid: number, secret: boolean): string {
   let fd: number;
   try {
@@ -127,14 +136,20 @@ function chainedId(dir: string, turn: number, uid: number): string {
 
 function readKey(path: string, uid: number): string {
   const m = KEY_LINE.exec(readOwned(path, uid, true));
-  if (!m) throw new Refusal(`${path} must hold one line GEMINI_API_KEY=<printable ASCII, no spaces or quotes>`);
+  if (!m) throw new Refusal(`${path} must hold one line GEMINI_API_KEY=<letters, digits and . _ ~ - only>`);
   return m[1];
 }
 
 // Temp file, then a hard link that never replaces: the final name appears complete or not at all.
 function publish(dir: string, name: string, data: string): boolean {
   const tmp = join(dir, `.${name}.${randomBytes(8).toString("hex")}`);
-  writeFileSync(tmp, data, { flag: "wx", mode: 0o600 });
+  try {
+    writeFileSync(tmp, data, { flag: "wx", mode: 0o600 });
+  } catch (e) {
+    // EEXIST means the name was someone else's; any other failure may have left ours half-written.
+    if (errCode(e) !== "EEXIST") rmSync(tmp, { force: true });
+    throw e;
+  }
   try {
     linkSync(tmp, join(dir, name));
     return true;
@@ -174,14 +189,14 @@ async function submitTurn(t: Turn, effort: string, input: string, parent: string
     });
     text = await res.text();
   } catch (e) {
-    return end("unknown", `the submission got no reply (${log.field(e)})`, NEXT.unknown);
+    return end("unknown", `the submission got no reply (${log.field(errText(e))})`, NEXT.unknown);
   }
   if (!res.ok) {
     const err = apiError(text);
     if (!err) log.body(res, text);
     const detail = `HTTP ${res.status}${err ? ` ${log.field(err.code)}: ${log.field(err.message)}` : ""}`;
-    // A gateway can fail after the run was accepted: only a 4xx proves nothing started.
-    if (res.status < 400 || res.status >= 500) return end("unknown", `the submission's outcome is unknown: ${detail}`, NEXT.unknown);
+    // Only a 4xx other than a timeout (408) or a cancellation (499) proves no run started: a gateway can fail after acceptance.
+    if (res.status < 400 || res.status >= 500 || res.status === 408 || res.status === 499) return end("unknown", `the submission's outcome is unknown: ${detail}`, NEXT.unknown);
     if (turn > 0 && (res.status === 404 || err?.code === "not_found")) {
       return end("rejected", "the conversation is no longer stored at Google; start a new one with run-gemini.sh", NEXT.gone);
     }
@@ -194,6 +209,7 @@ async function submitTurn(t: Turn, effort: string, input: string, parent: string
     log.body(res, text);
     return end("unknown", "the submission's reply holds no valid interaction id", NEXT.unknown);
   }
+  if (id.includes(t.key)) return end("unknown", "the submission's reply id holds the API key, so it is neither saved nor polled", NEXT.unknown);
   if (!publish(dir, turnFiles(turn).id, id)) throw new Error(`${join(dir, turnFiles(turn).id)} appeared while submitting`);
   log.line("submitted");
   return id;
@@ -230,15 +246,15 @@ async function collect(t: Turn, id: string): Promise<number> {
       return end(undefined, `Google refused the poll: HTTP ${res.status}${err ? ` ${log.field(err.code)}: ${log.field(err.message)}` : ""}`, auth + NEXT.wait);
     } else {
       const r = parse(text);
-      if (isObj(r) && r.id !== id) {
-        log.line(`poll ${n}: another interaction`);
-        return end(undefined, "Google returned another interaction than the one this turn saved; nothing was published",
-          "do not resend; if fetch-gemini.sh keeps reporting this, abandon the turn and start a new conversation with run-gemini.sh");
-      }
-      if (!isObj(r) || typeof r.status !== "string" || !STATUSES.has(r.status)) {
+      if (!isObj(r) || typeof r.id !== "string" || typeof r.status !== "string" || !STATUSES.has(r.status)) {
         log.line(`poll ${n}: unexpected body`);
         log.body(res, text);
         return end(undefined, "a poll returned an unexpected body", NEXT.wait);
+      }
+      if (r.id !== id) {
+        log.line(`poll ${n}: another interaction`);
+        return end(undefined, "Google returned another interaction than the one this turn saved; nothing was published",
+          "do not resend; if fetch-gemini.sh keeps reporting this, abandon the turn and start a new conversation with run-gemini.sh");
       }
       log.line(`poll ${n}: ${r.status}`);
       if (r.status !== "in_progress") return finish(t, r);
@@ -265,7 +281,7 @@ function finish(t: Turn, r: Json): number {
     case "cancelled":
       return end("cancelled", "the run was cancelled at Google", NEXT.terminal);
     case "incomplete":
-      return end("incomplete", `the run stopped at the output cap of ${MAX_OUTPUT_TOKENS} tokens, thinking included`, `${NEXT.terminal}; the answer did not fit the output cap`);
+      return end("incomplete", `the run ended incomplete, which usually means the output cap of ${MAX_OUTPUT_TOKENS} tokens, thinking included`, `${NEXT.terminal}; if the output cap stopped it, the answer did not fit`);
     case "requires_action":
       return end("requires_action", "the run paused for a client action, which a tool-free consult never offers", NEXT.terminal);
     case "requires_continuation":
@@ -282,8 +298,7 @@ function finish(t: Turn, r: Json): number {
   );
   if (!textOnly) return withhold("a model_output item is not text");
   const usage = isObj(r.usage) ? r.usage : {};
-  const grounding = usage.grounding_tool_count;
-  if (Number(usage.total_tool_use_tokens) > 0 || (Array.isArray(grounding) ? grounding.length > 0 : grounding != null)) {
+  if (used(usage.total_tool_use_tokens) || used(usage.tool_use_tokens_by_modality) || used(usage.grounding_tool_count)) {
     return withhold("the response reports tool use");
   }
   // A GET may also carry earlier turns: only the steps after the last user_input belong to this one.
@@ -292,6 +307,7 @@ function finish(t: Turn, r: Json): number {
     .flatMap((s) => (s.type === "model_output" ? (s.content as Json[]).map((c) => c.text as string) : []))
     .join("");
   if (!answer.trim()) return withhold("the answer is empty");
+  if (answer.includes(t.key)) return withhold("the answer holds the API key, so it is not published");
   if (!publish(dir, turnFiles(turn).response, answer)) log.line("response: another collector published it first; left as it is");
   const u = (k: string) => count(usage[k]);
   log.line(`OK: ${log.field(served)} in=${u("total_input_tokens")} cached=${u("total_cached_tokens")} thought=${u("total_thought_tokens")} out=${u("total_output_tokens")} total=${u("total_tokens")}`);
@@ -343,8 +359,7 @@ async function consult(argv: string[], deps: Deps, log: Log): Promise<number> {
     key = readKey(deps.keyPath, deps.uid);
     log.hide(key);
   } catch (e) {
-    if (e instanceof Refusal) return refuse(e.message);
-    throw e;
+    return refuse(e instanceof Refusal ? e.message : `a local check failed: ${log.field(errText(e))}`);
   }
   const t: Turn = { deps, log, dir, turn, model, key, end };
   if (submit) {
@@ -360,7 +375,7 @@ export async function main(argv: string[], deps: Deps): Promise<number> {
   try {
     return await consult(argv, deps, log);
   } catch (e) {
-    log.line(`ERROR: the engine stopped unexpectedly: ${String(e)}`);
+    log.line(`ERROR: the engine stopped unexpectedly: ${log.field(errText(e))}`);
     log.line("NEXT: run fetch-gemini.sh on this conversation to see what was recorded; sending the prompt again may be charged twice");
     return 1;
   }
@@ -368,7 +383,7 @@ export async function main(argv: string[], deps: Deps): Promise<number> {
 
 if (import.meta.main) {
   process.exitCode = await main(process.argv.slice(2), {
-    // The launcher leaves HOME unset, so this is the passwd home: no variable can move the key path.
+    // HOME is unset, so this is the passwd home: no variable can move the key path.
     keyPath: join(userInfo().homedir, ".config", "gemini", ".env"),
     fetch: (url, init) => fetch(url, init),
     uid: process.getuid?.() ?? -1,
