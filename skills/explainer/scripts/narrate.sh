@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The only sanctioned way to run tts.ts with the ElevenLabs key (AGENTS.md's one named key-file exception).
+# The only sanctioned way to run tts.ts with the ElevenLabs key (one of AGENTS.md's two named key-file exceptions).
 # Usage: narrate.sh <abs narration.json> <abs out-dir>
 set -euo pipefail
 
