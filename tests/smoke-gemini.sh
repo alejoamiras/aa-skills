@@ -14,6 +14,8 @@ cp -R "$ROOT/skills/gemini" "$S/skill"
 mkdir -p "$S/skill/engines"
 ln -s "$S/skill" "$HOME/.claude/skills/gemini"
 RUN="$HOME/.claude/skills/gemini/scripts/run-gemini.sh"
+RES="$HOME/.claude/skills/gemini/scripts/resume-gemini.sh"
+FET="$HOME/.claude/skills/gemini/scripts/fetch-gemini.sh"
 ENG="$S/skill/engines/api"
 P="$S/prompt.md"
 printf 'Review this.\nSecond line.\n' > "$P"
@@ -106,5 +108,111 @@ exit 0
 STUB
 (cd "$S/caller" && "$RUN" "$P") > "$S/o" 2> "$S/e"; rc=$?
 gm_t "no outcome: an engine that writes nothing and exits 0 still gives exit 1" test "$rc" -eq 1
+
+# --- resume and fetch ----------------------------------------------------------------
+# A refusal: exit 2, no trailer, one stderr line holding the expected words.
+REFUSED='[ "$0" -eq 2 ] && [ ! -s "$1" ] && [ "$(wc -l < "$2")" -eq 1 ] && grep -qF "$3" "$2"'
+cat > "$ENG" << 'STUB'
+#!/usr/bin/env bash
+s=""; [ "$2" = 0 ] || s="-$2"
+{ pwd -P; printf '%s\n' "$@"; } > "$GM_CALLS"
+printf 'abc' > "$1/id$s.txt"
+printf 'answer %s\n' "$2" > "$1/response$s.md"
+echo "OK: turn $2"
+STUB
+(cd "$S/caller" && "$RUN" "$P") > "$S/o" 2> /dev/null
+D=$(gm_key GEMINI_DIR "$S/o")
+(cd "$S/caller" && "$RUN" "$P") > "$S/o" 2> /dev/null
+D2=$(gm_key GEMINI_DIR "$S/o")
+(cd "$S/caller" && "$RES" "$D" "$P") > /dev/null 2>&1
+(cd "$S/caller" && "$RES" "$D/" "$P") > "$S/o" 2> "$S/e"; rc=$?
+gm_t "resume: two resumes leave turn files 1 and 2" sh -c 'for n in 1 2; do for f in followup-$n.md id-$n.txt response-$n.md log-$n.txt; do [ -f "$0/$f" ] || exit 1; done; done' "$D"
+gm_t "resume: the second exits 0 and the engine got <dir> 2 submit" sh -c '[ "$0" -eq 0 ] && [ "$(sed -n 2,4p "$1" | paste -sd" " -)" = "$2 2 submit" ]' "$rc" "$GM_CALLS" "$D"
+printf 'GEMINI_DIR=%s\nRESPONSE_FILE=%s\nLOG_FILE=%s\nENGINE=api\n' "$D" "$D/response-2.md" "$D/log-2.txt" > "$S/want-t"
+gm_t "resume: the turn-2 trailer on stdout, and leading stderr" sh -c 'cmp -s "$0" "$1" && head -n 4 "$2" | cmp -s - "$0"' "$S/want-t" "$S/o" "$S/e"
+gm_t "resume: followup-2.md is the preamble, the reviewer line, a blank line, then the prompt" cmp -s "$S/want" "$D/followup-2.md"
+
+echo keep > "$S/sentinel"
+ln -s "$S/sentinel" "$D/log-3.txt"
+ln -s "$S/nowhere" "$D/response-4.md"
+echo x > "$D/.response-5.md.x"
+(cd "$S/caller" && "$RES" "$D" "$P") > "$S/o" 2> "$S/e"; rc=$?
+gm_t "resume: a symlinked log-3, a dangling response-4 take their slots, a temp name does not" test "$rc" -eq 0 -a "$(gm_key LOG_FILE "$S/o")" = "$D/log-5.txt"
+gm_t "resume: the sentinel behind log-3.txt is unchanged" sh -c '[ "$(cat "$0")" = keep ]' "$S/sentinel"
+
+cat > "$ENG" << 'STUB'
+#!/usr/bin/env bash
+s=""; [ "$2" = 0 ] || s="-$2"
+{ pwd -P; printf '%s\n' "$@"; } > "$GM_CALLS"
+if [ "$3" = submit ]; then printf 'abc' > "$1/id$s.txt"; echo "poll 1: in_progress"; exit 0; fi
+printf 'answer %s\n' "$2" > "$1/response$s.md"
+echo "OK: turn $2 collected"
+STUB
+(cd "$S/caller" && "$RUN" "$P") > "$S/o" 2> /dev/null
+D3=$(gm_key GEMINI_DIR "$S/o")
+(cd "$S/caller" && "$RES" "$D" "$P") > "$S/o" 2> "$S/e"; rc=$?
+gm_t "resume: turn 6 left pending exits 3" test "$rc" -eq 3 -a "$(gm_key LOG_FILE "$S/o")" = "$D/log-6.txt"
+(cd "$S/caller" && "$RES" "$D" "$P") > "$S/o" 2> "$S/e"; rc=$?
+gm_t "resume: refused while turn 6 is pending, with the fetch line, claiming nothing" sh -c "$REFUSED"' && [ ! -e "$4/followup-7.md" ]' "$rc" "$S/o" "$S/e" "run fetch-gemini.sh $D" "$D"
+rm -f "$GM_CALLS"
+(cd "$S/caller" && "$FET" "$D") > "$S/o" 2> "$S/e"; rc=$?
+printf 'GEMINI_DIR=%s\nRESPONSE_FILE=%s\nLOG_FILE=%s\nENGINE=api\n' "$D" "$D/response-6.md" "$D/log-6.txt" > "$S/want-t"
+gm_t "fetch: collects turn 6: <dir> 6 collect, exit 0, the turn-6 trailer" sh -c '[ "$0" -eq 0 ] && [ "$(sed -n 2,4p "$1" | paste -sd" " -)" = "$2 6 collect" ] && cmp -s "$3" "$4"' "$rc" "$GM_CALLS" "$D" "$S/want-t" "$S/o"
+rm -f "$GM_CALLS"
+(cd "$S/caller" && "$FET" "$D") > "$S/o" 2> "$S/e"; rc=$?
+gm_t "fetch: again on the answered turn: exit 0, same trailer, its OK: line, no engine" sh -c '[ "$0" -eq 0 ] && cmp -s "$1" "$2" && grep -qx "OK: turn 6 collected" "$3" && [ ! -e "$4" ]' "$rc" "$S/want-t" "$S/o" "$S/e" "$GM_CALLS"
+grep -v '^OK: ' "$D/log-6.txt" > "$S/cut"
+cat "$S/cut" > "$D/log-6.txt"
+(cd "$S/caller" && "$FET" "$D") > "$S/o" 2> "$S/e"; rc=$?
+gm_t "fetch: still exit 0 with the OK: line cut from the log" sh -c '[ "$0" -eq 0 ] && cmp -s "$1" "$2" && [ ! -e "$3" ]' "$rc" "$S/want-t" "$S/o" "$GM_CALLS"
+
+cat > "$ENG" << 'STUB'
+#!/usr/bin/env bash
+s=""; [ "$2" = 0 ] || s="-$2"
+printf 'abc' > "$1/id$s.txt"
+printf 'failed' > "$1/ended$s.txt"
+STUB
+(cd "$S/caller" && "$RES" "$D" "$P") > /dev/null 2>&1; rc=$?
+(cd "$S/caller" && "$FET" "$D") > "$S/o" 2> "$S/e"; rc2=$?
+gm_t "fetch: turn 7 ended exits 1 with its word and the turn-7 trailer" sh -c '[ "$0" -eq 1 ] && [ "$1" -eq 1 ] && grep -qw failed "$2" && grep -qx "RESPONSE_FILE=$4/response-7.md" "$3"' "$rc" "$rc2" "$S/e" "$S/o" "$D"
+cat > "$ENG" << 'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+(cd "$S/caller" && "$RES" "$D" "$P") > /dev/null 2>&1; rc=$?
+gm_t "resume: turn 8 left as a prompt only exits 1" test "$rc" -eq 1 -a -f "$D/followup-8.md"
+(cd "$S/caller" && "$RES" "$D" "$P") > "$S/o" 2> "$S/e"; rc=$?
+gm_t "resume: refused on turn 8 with the no-outcome line, claiming nothing" sh -c "$REFUSED"' && [ ! -e "$4/followup-9.md" ]' "$rc" "$S/o" "$S/e" "turn 8 has no recorded outcome" "$D"
+(cd "$S/caller" && "$FET" "$D") > "$S/o" 2> "$S/e"; rc=$?
+gm_t "fetch: refused on turn 8 with the no-outcome line" sh -c "$REFUSED" "$rc" "$S/o" "$S/e" "turn 8 has no recorded outcome"
+
+rm -f "$GM_CALLS"
+(cd "$S/caller" && "$RES" "$D2") > "$S/o" 2> "$S/e"; rc=$?
+gm_t "resume: one argument is a usage error" sh -c "$REFUSED" "$rc" "$S/o" "$S/e" "usage:"
+(cd "$S/caller" && "$RES" "" "$P") > "$S/o" 2> "$S/e"; rc=$?
+gm_t "resume: an empty dir argument is a usage error" sh -c "$REFUSED" "$rc" "$S/o" "$S/e" "usage:"
+# label|reason|setup|undo: each runs resume, then fetch, on the otherwise answerable D2.
+while IFS='|' read -r label reason setup undo; do
+  sh -c "$setup" "$D2" "$S"
+  (cd "$S/caller" && "$RES" "$(cat "$S/target")" "$P") > "$S/o" 2> "$S/e"; rc=$?
+  gm_t "resume: refuses $label" sh -c "$REFUSED" "$rc" "$S/o" "$S/e" "$reason"
+  (cd "$S/caller" && "$FET" "$(cat "$S/target")") > "$S/o" 2> "$S/e"; rc=$?
+  gm_t "fetch: refuses $label" sh -c "$REFUSED" "$rc" "$S/o" "$S/e" "$reason"
+  sh -c "$undo" "$D2" "$S"
+done << 'CASES'
+a symlinked dir|not a conversation dir|ln -s "$0" "$1/dlink" && echo "$1/dlink" > "$1/target"|rm "$1/dlink"
+a symlinked dir given with a trailing slash|not a conversation dir|ln -s "$0" "$1/dlink" && echo "$1/dlink/" > "$1/target"|rm "$1/dlink"
+a dir with mode 750|not a conversation dir|chmod 750 "$0" && echo "$0" > "$1/target"|chmod 700 "$0"
+a symlinked effort record|effort must be a regular file|mv "$0/effort" "$0/effort.real" && ln -s effort.real "$0/effort" && echo "$0" > "$1/target"|rm "$0/effort" && mv "$0/effort.real" "$0/effort"
+CASES
+gm_t "refusals: no engine ran and no turn was claimed" sh -c '[ ! -e "$0" ] && [ ! -e "$1/followup-1.md" ]' "$GM_CALLS" "$D2"
+(cd "$S/caller" && "$RES" "$D3" "$P") > "$S/o" 2> "$S/e"; rc=$?
+gm_t "turn 0 pending: resume gives the fetch line" sh -c "$REFUSED" "$rc" "$S/o" "$S/e" "run fetch-gemini.sh $D3"
+rm "$D3/id.txt"
+(cd "$S/caller" && "$RES" "$D3" "$P") > "$S/o" 2> "$S/e"; rc=$?
+gm_t "turn 0 prompt only: resume gives the no-outcome line" sh -c "$REFUSED" "$rc" "$S/o" "$S/e" "turn 0 has no recorded outcome"
+echo failed > "$D3/ended.txt"
+(cd "$S/caller" && "$RES" "$D3" "$P") > "$S/o" 2> "$S/e"; rc=$?
+gm_t "turn 0 ended: resume gives the turn-0 line, claiming nothing" sh -c "$REFUSED"' && [ ! -e "$4/followup-1.md" ]' "$rc" "$S/o" "$S/e" "turn 0 has no answer: see its log's NEXT line, then start again with run-gemini.sh" "$D3"
 
 exit "$FAIL"
