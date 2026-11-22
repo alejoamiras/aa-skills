@@ -85,7 +85,7 @@ Never paste a secret, a credential or anything that must not be stored at Google
 ## Effort and model
 
 - Effort is Gemini's thinking level: `low`, `medium` or `high` (default). Keep `high` for reviews.
-- Pass concrete model IDs, never an alias. The engine withholds an answer when the served model is not the requested ID (or that ID with a version suffix such as `-001`); an alias fails that check, and retrying it is not worth it.
+- Pass concrete model IDs, never an alias. The engine withholds an answer when the served model is not the requested ID (or that ID with a version suffix such as `-001`); an alias fails that check, and retrying it is not worth it. On 2026-11-22 a request for `gemini-4-carbon` was served as exactly `gemini-4-carbon`, with no suffix, so the default model passed the check as of that date.
 - The model argument can spend on any model the key allows. Keep Carbon (the default) unless the owner names another model.
 
 ## Cost and data
