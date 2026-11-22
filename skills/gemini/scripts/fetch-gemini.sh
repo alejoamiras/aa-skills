@@ -47,6 +47,10 @@ TRAILER="GEMINI_DIR=$GEMINI_DIR
 RESPONSE_FILE=$RESPONSE_FILE
 LOG_FILE=$LOG_FILE
 ENGINE=api"
+# A copied or unpacked dir can plant links here: tail would print their target, and the engine's output append to it.
+for f in "$RESPONSE_FILE" "$ENDED" "$GEMINI_DIR/id$NS.txt" "$LOG_FILE"; do
+  if [[ -L "$f" || (-e "$f" && ! -f "$f") ]]; then echo "ERROR: $f must be a regular file, not a symlink" >&2; exit 2; fi
+done
 
 if [[ ! -e "$RESPONSE_FILE" && ! -e "$ENDED" ]]; then
   [[ -e "$GEMINI_DIR/id$NS.txt" ]] || { echo "$NO_OUTCOME" >&2; exit 2; }

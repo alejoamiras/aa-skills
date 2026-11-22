@@ -3,7 +3,6 @@
 # nonce that only Google's stored conversation holds, and a new conversation inviting hosted tools must exit 0, so its
 # response showed no tool step or tool usage: evidence about what the response reveals, not proof that tools stay off.
 #   GEMINI_LIVE=spend bash tests/live-gemini.sh
-# Without GEMINI_LIVE=spend it prints skip and exits 0.
 set -euo pipefail
 [[ "${GEMINI_LIVE:-}" == spend ]] || { echo "skip  set GEMINI_LIVE=spend to run three paid Gemini turns"; exit 0; }
 CONF="${HOME:-}/.agents/gemini-engine"
@@ -40,7 +39,7 @@ for TURN in 1 2 3; do
     NEXT="$(grep '^NEXT: ' "$LOG" 2> /dev/null | tail -n 1 || true)"
   fi
   if [[ $rc -eq 0 ]]; then
-    # response.md pairs with id.txt and response-N.md with id-N.txt; the id itself is never printed.
+    # The id never leaves this script: only its length and character classes are printed.
     IDF="${RESP%.md}.txt" && IDF="${IDF%/response*}/id${IDF##*/response}"
     MASK=""
     if [[ -f "$IDF" ]]; then MASK="$(LC_ALL=C sed 's/[A-Za-z]/a/g; s/[0-9]/9/g' "$IDF")"; fi

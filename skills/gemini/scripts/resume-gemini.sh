@@ -73,7 +73,7 @@ REVIEWER="You are consulted as an independent reviewer. You cannot read files or
 # noclobber creates a missing file exclusively: this is the claim on turn N.
 set -C
 { : > "$FOLLOWUP"; } 2> /dev/null || { echo "ERROR: another call is using this conversation" >&2; exit 2; }
-{ echo "$MEMO_PREAMBLE"; echo "$REVIEWER"; echo; cat "$PROMPT_FILE"; } >> "$FOLLOWUP" || { echo "ERROR: cannot write $FOLLOWUP" >&2; exit 2; }
+{ echo "$MEMO_PREAMBLE"; echo "$REVIEWER"; echo; cat < "$PROMPT_FILE"; } >> "$FOLLOWUP" || { echo "ERROR: cannot write $FOLLOWUP" >&2; exit 2; }
 
 TRAILER="GEMINI_DIR=$GEMINI_DIR
 RESPONSE_FILE=$RESPONSE_FILE

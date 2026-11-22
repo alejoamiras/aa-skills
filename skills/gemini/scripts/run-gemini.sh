@@ -43,7 +43,7 @@ REVIEWER="You are consulted as an independent reviewer. You cannot read files or
 set -C
 # The engine re-reads both on every turn: chaining at Google does not carry generation_config.
 if ! { printf '%s' "$EFFORT" > "$GEMINI_DIR/effort" && printf '%s' "$MODEL" > "$GEMINI_DIR/model" &&
-  { echo "$MEMO_PREAMBLE"; echo "$REVIEWER"; echo; cat "$PROMPT_FILE"; } > "$GEMINI_DIR/prompt.md"; }; then
+  { echo "$MEMO_PREAMBLE"; echo "$REVIEWER"; echo; cat < "$PROMPT_FILE"; } > "$GEMINI_DIR/prompt.md"; }; then
   echo "ERROR: cannot write the turn's files in $GEMINI_DIR" >&2
   exit 2
 fi

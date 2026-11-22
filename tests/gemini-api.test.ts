@@ -1,7 +1,7 @@
 // The gemini api engine's core against a scripted fetch, an injected clock and sleep, and a temp key file with a fake
 // value: no port, no real key. Key values are compared only as booleans, so a failing assertion never prints one.
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main } from "../skills/gemini/engines/api.ts";
@@ -345,6 +345,18 @@ describe("the key", () => {
     expect(r.lines.at(-2)?.startsWith(`${prefix}Error: sleep failed holding [redacted] xxx`)).toBe(true);
     expect(r.lines.at(-2)?.length).toBe(prefix.length + 500);
     expect(leaks(r.log)).toBe(false);
+  });
+
+  test("a prompt holding the key is not sent, and no line or file the engine writes holds it", async () => {
+    const c = conv();
+    writeFileSync(join(c.dir, "prompt.md"), `review this config:\nGEMINI_API_KEY=${KEY}\n`);
+    const r = await run(c, [running(), done()]);
+    expect(r.code).toBe(1);
+    expect(r.calls.length).toBe(0);
+    expect(r.file("ended.txt")).toBe("not-sent\n");
+    expect(r.lines.slice(-2)).toEqual(["ERROR: the prompt holds the API key, so it is not sent", `NEXT: nothing was sent or billed; ${join(c.dir, "prompt.md")} holds a copy of the key: delete it`]);
+    expect(leaks(r.log)).toBe(false);
+    expect(readdirSync(c.dir).sort()).toEqual(["effort", "ended.txt", "model", "prompt.md"]);
   });
 
   const line = `GEMINI_API_KEY=${KEY}\n`;
