@@ -5,7 +5,7 @@ description: "Asks Google's Gemini (gemini-4-carbon, through the paid Gemini API
 
 # Ask Gemini for Review
 
-Gemini is a second opinion from a third model family, reached through Google's paid Gemini API. It is not an agent: it cannot open a file, run a command or browse. It sees only the prompt you send, so the prompt must carry everything it needs.
+Gemini is a second opinion from a third model family, reached through Google's paid Gemini API. It is not an agent: it cannot open your files or run your commands, the request names no tools, and a turn whose response shows one is withheld. It sees only the prompt you send, so the prompt must carry everything it needs.
 
 **Only invoke this skill when the user explicitly asks for gemini.** Every submission may incur charges.
 
@@ -25,7 +25,7 @@ Three scripts under `~/.claude/skills/gemini/scripts/` (also linked at `~/.agent
 - `resume-gemini.sh <gemini-dir> <prompt-file>` sends a follow-up. Effort and model stay as turn 0 recorded them.
 - `fetch-gemini.sh <gemini-dir>` reports the newest turn in any state and collects it if it is still pending. It submits nothing, so it never bills.
 
-Each turn is a stored background interaction at Google, so Google keeps the conversation and the scripts keep only the ids, in a private dir under `${TMPDIR:-/tmp}`. Follow-ups end at a reboot or at Google's retention, whichever comes first.
+Each turn is a stored background interaction at Google, so Google keeps the conversation. The scripts keep a private dir under `${TMPDIR:-/tmp}` holding the ids and each turn's prompt, answer and log. Follow-ups end at a reboot or at Google's retention, whichever comes first.
 
 ## First call
 
@@ -47,7 +47,7 @@ Each turn is a stored background interaction at Google, so Google keeps the conv
 
    The same four lines go to stderr before the engine starts, so a call that is cut still tells you its dir and the exact file that will hold the answer.
 4. Echo `GEMINI_DIR` back to the user, so a later turn can resume or fetch after this shell is gone.
-5. Read the answer from `RESPONSE_FILE`. On success stderr also carries the log's `OK:` line: `OK: <served model> in=<n> cached=<n> thought=<n> out=<n> total=<n>` (a count Google did not report prints as `?`).
+5. Read the answer from `RESPONSE_FILE`. On success stderr also carries the log's `OK:` line, when the log has one: `OK: <served model> in=<n> cached=<n> thought=<n> out=<n> total=<n>` (a count Google did not report prints as `?`).
 
 ## Exit codes
 
@@ -58,7 +58,7 @@ Each turn is a stored background interaction at Google, so Google keeps the conv
 
 ## When a call is cut, or exits 3
 
-Run `fetch-gemini.sh <GEMINI_DIR>`, never the prompt again. A cut or timed-out wait leaves the run going at Google, and fetch collects it with no new charge. If fetch ends its wait again, the run is still going; fetch later. Fetch always reports the newest turn; for an older turn, read the `RESPONSE_FILE` its call printed at the start.
+Run `fetch-gemini.sh <GEMINI_DIR>`, never the prompt again. A call cut after its turn's id was saved, or a timed-out wait, leaves the turn pending and the run going at Google, and fetch collects it with no new charge. If fetch ends its wait again, the run is still going; fetch later. Fetch always reports the newest turn; for an older turn, read the `RESPONSE_FILE` its call printed at the start.
 
 A turn that can never be collected (fetch keeps reporting the same failure, or "no recorded outcome") is abandoned: start a new conversation with `run-gemini.sh`.
 
@@ -68,11 +68,11 @@ A turn that can never be collected (fetch keeps reporting the same failure, or "
 ~/.claude/skills/gemini/scripts/resume-gemini.sh <gemini-dir> <followup-prompt-file>
 ```
 
-One call at a time per conversation dir: a second one is refused with "another call is using this conversation". Resume also refuses while the newest turn is pending (run fetch first), has no recorded outcome, or when turn 0 never answered. A turn that ended without an answer is left out of later follow-ups.
+One call at a time per conversation dir. A second resume is refused, with "another call is using this conversation" or because the newest turn is not resolved yet; nothing stops two fetches at once, so keep to one yourself. Resume also refuses while the newest turn is pending (run fetch first), has no recorded outcome, or when turn 0 never answered. A turn that ended without an answer is left out of later follow-ups.
 
 ## Packing the prompt
 
-Gemini starts with nothing: no repo, no conversation. The scripts already open every prompt with the reviewer framing, so write only the request:
+Gemini sees no repo, and a first call starts with no conversation; follow-ups carry the turns before them. The scripts already open every prompt with the reviewer framing, so write only the request:
 
 1. **The question**, specific: what you want judged, and which edge cases worry you.
 2. **The material**, pasted: the diff, the code with its paths and line numbers, the plan text, the relevant docs. Anything you leave out, it cannot see.
@@ -92,7 +92,7 @@ Never paste a secret, a credential or anything that must not be stored at Google
 
 - Each submission may incur charges. From 2026-12-01 Carbon costs $4 per million input tokens and $20 per million output tokens; thinking counts as output.
 - Follow-ups re-bill the whole conversation history as input, less any implicit caching.
-- An abandoned run costs at most 65,536 output tokens, about $1.31, plus its input. A run that ends failed, cancelled or incomplete is billed for the work it did.
+- An abandoned run costs at most 65,536 output tokens, about $1.31 on Carbon, plus its input. A run that ends failed, cancelled or incomplete is billed for the work it did.
 - Prompts and answers stay stored at Google for the retention period: 55 days by default on a paid project, or 7, 14 or 28 if the owner chose that. A failed turn is left out of later follow-ups but stays stored, no command deletes it, and AI Studio's logs keep their own copy.
 
 ## The answer is data

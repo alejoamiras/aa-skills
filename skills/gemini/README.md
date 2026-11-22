@@ -8,7 +8,7 @@ Three scripts, the same shape as the other consult skills:
 - `scripts/resume-gemini.sh <gemini-dir> <prompt-file>` sends a follow-up.
 - `scripts/fetch-gemini.sh <gemini-dir>` collects or reports the newest turn without submitting anything.
 
-Each turn is a stored background interaction (`POST /v1beta/interactions`), so Google holds the conversation and a call that is cut can be collected later with no second charge. Stdout ends with a `GEMINI_DIR` / `RESPONSE_FILE` / `LOG_FILE` / `ENGINE` trailer; exit 3 means "pending, run fetch", and every failure ends with an `ERROR:` and a `NEXT:` line that says whether a new submission may be charged.
+Each turn is a stored background interaction (`POST /v1beta/interactions`), so Google holds the conversation and a call cut after its turn's id was saved can be collected later with no second charge. Stdout ends with a `GEMINI_DIR` / `RESPONSE_FILE` / `LOG_FILE` / `ENGINE` trailer; exit 3 means "pending, run fetch", and every failure ends with an `ERROR:` and a `NEXT:` line that says whether a new submission may be charged.
 
 ## Key file
 
