@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Smoke test for the gemini skill's scripts: skills/gemini/scripts beside a stub engine, a temp HOME and TMPDIR. The real
-# launcher is staged only beside a synthetic api.ts, and a failed setup step aborts before any script runs.
+# launcher is staged only beside a synthetic api.ts.
 # shellcheck disable=SC2016 # literal $… in sh -c bodies
 set -uo pipefail
 export LC_ALL=C

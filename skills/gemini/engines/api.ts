@@ -362,9 +362,10 @@ async function consult(argv: string[], deps: Deps, log: Log): Promise<number> {
   } catch (e) {
     return refuse(e instanceof Refusal ? e.message : `a local check failed: ${log.field(errText(e))}`);
   }
-  // The wrappers copy whatever the prompt path names, so a link or alias to the key file arrives here as text.
-  if (submit && input.includes(key)) {
-    return end("not-sent", "the prompt holds the API key, so it is not sent", `nothing was sent or billed; ${at(files.prompt)} holds a copy of the key: delete it`);
+  // The wrappers copy whatever the prompt path names; the key file can be replaced between that copy and this read, so the
+  // caller text (after the preamble's blank line) may be a key-file line holding an earlier key.
+  if (submit && (input.includes(key) || KEY_LINE.test(input.slice(input.indexOf("\n\n") + 2)))) {
+    return end("not-sent", "the prompt holds an API key, so it is not sent", `nothing was sent or billed; ${at(files.prompt)} holds a key: delete it`);
   }
   const t: Turn = { deps, log, dir, turn, model, key, end };
   if (submit) {

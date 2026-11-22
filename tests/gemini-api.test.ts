@@ -78,7 +78,7 @@ const done = (over: Record<string, unknown> = {}) =>
   });
 const header = (init: RequestInit, name: string) => new Headers(init.headers).get(name);
 // Any 5-character run of the key in the log counts as a leak.
-const leaks = (log: string) => Array.from({ length: KEY.length - 4 }, (_, i) => KEY.slice(i, i + 5)).some((w) => log.includes(w));
+const leaks = (log: string, key = KEY) => Array.from({ length: key.length - 4 }, (_, i) => key.slice(i, i + 5)).some((w) => log.includes(w));
 
 describe("submit", () => {
   test("one POST to the fixed URL with three headers and the body fields; the id is saved before the first GET", async () => {
@@ -354,9 +354,25 @@ describe("the key", () => {
     expect(r.code).toBe(1);
     expect(r.calls.length).toBe(0);
     expect(r.file("ended.txt")).toBe("not-sent\n");
-    expect(r.lines.slice(-2)).toEqual(["ERROR: the prompt holds the API key, so it is not sent", `NEXT: nothing was sent or billed; ${join(c.dir, "prompt.md")} holds a copy of the key: delete it`]);
+    expect(r.lines.slice(-2)).toEqual(["ERROR: the prompt holds an API key, so it is not sent", `NEXT: nothing was sent or billed; ${join(c.dir, "prompt.md")} holds a key: delete it`]);
     expect(leaks(r.log)).toBe(false);
     expect(readdirSync(c.dir).sort()).toEqual(["effort", "ended.txt", "model", "prompt.md"]);
+  });
+
+  test("caller text that is only a key-file line is not sent, whatever key it holds; a longer text naming one is", async () => {
+    const preamble = "You are a subagent. Don't run memo.\nYou are consulted as an independent reviewer. You cannot read files or run commands: judge only the material below, and say what is missing instead of guessing.\n\n";
+    const OLD = "fake-old-key-dddd-eeee-ffff";
+    const c = conv();
+    writeFileSync(join(c.dir, "prompt.md"), `${preamble}GEMINI_API_KEY=${OLD}\n`);
+    const r = await run(c, [running(), done()]);
+    expect(r.calls.length).toBe(0);
+    expect(r.file("ended.txt")).toBe("not-sent\n");
+    expect(leaks(r.log) || leaks(r.log, OLD)).toBe(false);
+    const sent = conv();
+    writeFileSync(join(sent.dir, "prompt.md"), `${preamble}Is it safe to commit a .env line such as GEMINI_API_KEY=${OLD}?\n`);
+    const s = await run(sent, [running(), done()]);
+    expect(s.code).toBe(0);
+    expect(s.file("response.md")).toBe("Hello, world.");
   });
 
   const line = `GEMINI_API_KEY=${KEY}\n`;
