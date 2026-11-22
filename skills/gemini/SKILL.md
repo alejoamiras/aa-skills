@@ -58,7 +58,7 @@ Each turn is a stored background interaction at Google, so Google keeps the conv
 
 ## When a call is cut, or exits 3
 
-Run `fetch-gemini.sh <GEMINI_DIR>`, never the prompt again. A call cut after its turn's id was saved, or a timed-out wait, leaves the turn pending and the run going at Google, and fetch collects it with no new charge. If fetch ends its wait again, the run is still going; fetch later. Fetch always reports the newest turn; for an older turn, read the `RESPONSE_FILE` its call printed at the start.
+Run `fetch-gemini.sh <GEMINI_DIR>`, never the prompt again. A call cut after its turn's id was saved, or a timed-out wait, leaves the turn pending and the run going at Google, and fetch collects it with no new charge. If fetch ends its wait again, the run may still be going, and a later fetch can collect it while Google retains it. Fetch always reports the newest turn; for an older turn, read the `RESPONSE_FILE` its call printed at the start.
 
 A turn that can never be collected (fetch keeps reporting the same failure, or "no recorded outcome") is abandoned: start a new conversation with `run-gemini.sh`.
 
@@ -91,7 +91,7 @@ Never paste a secret, a credential or anything that must not be stored at Google
 ## Cost and data
 
 - Each submission may incur charges. From 2026-12-01 Carbon costs $4 per million input tokens and $20 per million output tokens; thinking counts as output.
-- Follow-ups re-bill the whole conversation history as input, less any implicit caching.
+- Expect a follow-up to be billed for the conversation history as input, less any implicit caching: in the 2026-11-22 live check, a second turn's input count held the first turn.
 - An abandoned run costs at most 65,536 output tokens, about $1.31 on Carbon, plus its input. A run that ends failed, cancelled or incomplete is billed for the work it did.
 - Prompts and answers stay stored at Google for the retention period: 55 days by default on a paid project, or 7, 14 or 28 if the owner chose that. A failed turn is left out of later follow-ups but stays stored, no command deletes it, and AI Studio's logs keep their own copy.
 
