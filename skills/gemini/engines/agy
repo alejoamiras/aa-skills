@@ -1,0 +1,15 @@
+#!/bin/bash
+# Runs agy.ts with only the WORKER_* values the CLI passes, from the state dir: an inherited BUN_OPTIONS preloads code,
+# and a cwd .env or bunfig.toml would load. HOME stays unset, so agy.ts finds the pin and the key under the passwd home.
+ulimit -c 0
+unset CDPATH
+case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
+here="$(cd -P -- "$here" && pwd -P)" || { echo "ERROR: cannot resolve the engine's dir"; exit 2; }
+if [[ ${1:-} == tui ]]; then state="${2:-}"; else state="${1:-}"; fi
+[[ $state == /* ]] && cd -P -- "$state" || { echo "ERROR: the state dir must be an existing absolute path"; exit 2; }
+# Looked up from the state dir, so a relative PATH entry cannot find a bun planted in the worktree.
+bun="$(PATH="${WORKER_PATH:-}" command -v bun)"
+[[ $bun == /* ]] || { echo "ERROR: no bun on WORKER_PATH"; exit 2; }
+exec /usr/bin/env -i PATH=/usr/bin:/bin XDG_CONFIG_HOME="$state" WORKER_PATH="${WORKER_PATH:-}" WORKER_USER="${WORKER_USER:-}" \
+  WORKER_LOGNAME="${WORKER_LOGNAME:-}" WORKER_SHELL="${WORKER_SHELL:-}" WORKER_LANG="${WORKER_LANG:-}" WORKER_TMPDIR="${WORKER_TMPDIR:-}" \
+  "$bun" --no-env-file --no-install "$here/agy.ts" "$@"

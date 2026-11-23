@@ -48,6 +48,7 @@ jobs:
       - uses: ./.github/actions/setup-bun
       - run: bash tests/smoke-gemini.sh
       - run: bun test tests/gemini-api.test.ts
+      - run: bun test tests/gemini-agy.test.ts
 
   gemini-status:
     needs: [changes, smoke]
