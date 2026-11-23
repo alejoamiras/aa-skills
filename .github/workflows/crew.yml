@@ -27,6 +27,7 @@ jobs:
               - 'skills/crew/**'
               - 'bin/claude-usage'
               - 'lib/usage.sh'
+              - 'lib/director.sh'
               - 'tests/smoke-crew.sh'
               - 'tests/**'
               - 'checks/**'
