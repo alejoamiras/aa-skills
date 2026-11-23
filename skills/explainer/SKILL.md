@@ -131,9 +131,9 @@ The manifest pins the hashes of `plan.md` and of the ELI5 source the explainer w
 
 The driver launches the job as a **background worker** right after it publishes the ELI5 and asks for approval, so the owner can approve without waiting. Claude Code: the `Agent` tool with `run_in_background: true` (the plan's `claude_model`); completion arrives as a task notification. Codex: a spawned subagent. The worker writes files and reports; the **driver** shows the style board, relays the owner's pick, merges and republishes (steps 3 and 7). Cancelling means stopping the worker AND confirming no `tts.ts` process it started is still alive.
 
-## The key: one named exception to the secrets rule
+## The key: one of two named exceptions to the secrets rule
 
-The owner chose a plaintext key file for this one key (AGENTS.md → Defaults): `~/.config/elevenlabs/.env`, mode 600, outside every repo, holding `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`. The key must be restricted to Text to Speech, with a monthly character quota. No other key joins this exception by analogy.
+The owner chose a plaintext key file for this one key (AGENTS.md → Defaults): `~/.config/elevenlabs/.env`, mode 600, outside every repo, holding `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`. The key must be restricted to Text to Speech, with a monthly character quota. The `gemini` skill's API key is the only other exception; no other key joins either by analogy.
 
 - Only `scripts/tts.ts` reads the key, and only when launched by `scripts/narrate.sh`. The launcher strips the environment and gives Bun an empty home and working directory, so no Bun preload, bunfig or `.env` loads beside it. The key never sits in an argv or an inherited environment.
 - `tts.ts` parses the file (never sources it), reads only those two names, and refuses a file other users can read.

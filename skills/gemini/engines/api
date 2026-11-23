@@ -1,0 +1,18 @@
+#!/bin/bash
+# Runs api.ts from an empty dir with only PATH and XDG_CONFIG_HOME: an inherited BUN_OPTIONS preloads code,
+# BUN_CONFIG_VERBOSE_FETCH prints the key header, and a cwd .env or bunfig.toml would load. HOME stays unset, so
+# api.ts finds the key under the passwd home. Builtins and absolute paths only, except the one bun lookup.
+ulimit -c 0
+unset CDPATH
+case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
+here="$(cd -P -- "$here" && pwd -P)" || { echo "ERROR: cannot resolve the engine's dir"; echo "NEXT: nothing was sent or billed"; exit 1; }
+empty="$(/usr/bin/mktemp -d /tmp/gemini-api.XXXXXXXX)" && cd -P -- "$empty" ||
+  { echo "ERROR: cannot make an empty dir under /tmp"; echo "NEXT: nothing was sent or billed; fix /tmp and call again"; exit 1; }
+# Looked up only from the empty dir, so a relative PATH entry cannot find a bun planted in the caller's repo.
+bun="$(command -v bun)"
+case "$bun" in
+  /*) /usr/bin/env -i XDG_CONFIG_HOME="$empty" PATH=/usr/bin:/bin "$bun" --no-env-file --no-install "$here/api.ts" "$@"; rc=$? ;;
+  *) echo "ERROR: no bun binary on PATH"; echo "NEXT: nothing was sent or billed; install bun and call again"; rc=1 ;;
+esac
+cd / && /bin/rmdir "$empty"
+exit "$rc"
