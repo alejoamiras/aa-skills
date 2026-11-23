@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Smoke test for skills/gemini/scripts/worker-gemini.sh: real tmux on private sockets, real Bun, a temp HOME and a stand-in
-# agy compiled from tests/fixtures/agy-stub.ts. skills/gemini and lib are copied to a temp tree whose engines/agy.ts is a
-# harness running the real pump core with that home, short limits and real signals. No real agy, key or network.
+# agy compiled from tests/fixtures/agy-stub.ts. Only what a worker needs is staged in a temp tree (the launcher, the CLI,
+# the shims and lib/director.sh), with an engines/agy.ts that is a harness running the real pump core with that home,
+# short limits and real signals. No consult entry point, real agy, key or network.
 # shellcheck disable=SC2016 # literal $… in sh -c bodies
 set -uo pipefail
 export LC_ALL=C
@@ -48,7 +49,9 @@ REPO="$S/repo" WT1="$S/repo/.claude/worktrees/w1" WT2="$S/repo/.claude/worktrees
   printf 'path=%s\nsha256=%s\nversion=1.5.15-stub\n' "$HOME/bin/agy" "$SHA" > "$HOME/.agents/gemini-agy" &&
   echo '{ "modelProvider": "gemini" }' > "$HOME/.gemini/antigravity-cli/settings.json" &&
   echo "GEMINI_API_KEY=$CANARY" > "$HOME/.config/gemini/.env" && mkfifo "$GWS_FIFO" &&
-  cp -R "$ROOT/skills/gemini" "$S/tree/skills/gemini" && cp -R "$ROOT/lib" "$S/tree/lib"; } ||
+  mkdir -p "$S/tree/skills/gemini/engines" "$S/tree/skills/gemini/scripts" "$S/tree/lib" &&
+  cp "$ROOT/skills/gemini/engines/agy" "$S/tree/skills/gemini/engines/agy" && cp -R "$ROOT/skills/gemini/shims" "$S/tree/skills/gemini/shims" &&
+  cp "$ROOT/skills/gemini/scripts/worker-gemini.sh" "$S/tree/skills/gemini/scripts/worker-gemini.sh" && cp "$ROOT/lib/director.sh" "$S/tree/lib/director.sh"; } ||
   { echo "FAIL  fixture setup: the stub, the home and the tree"; exit 1; }
 cat > "$S/tree/skills/gemini/engines/agy.ts" << EOF || { echo "FAIL  fixture setup: the harness"; exit 1; }
 // The real pump core with the smoke's home, short limits and real signals. The stub records itself first thing, so a
@@ -332,7 +335,17 @@ gws_t "tui: under a terminal, a refused argument exits 2" sh -c '[ "$0" = 2 ] &&
 "${NOAGENT[@]}" CLAUDE_PID=$$ script -qec "$CLI tui models" /dev/null < /dev/null > "$S/t2" 2>&1; rc=$?
 gws_t "tui: under a terminal, CLAUDE_PID alone exits 2" sh -c '[ "$0" = 2 ] && grep -q "CLAUDE_PID is set" "$1"' "$rc" "$S/t2"
 echo '{"child":true}' > "$HOME/stub.json"
+# .tui is reused: a bunfig.toml left there must never load into the pump. Its preload records the argv of whatever
+# loads it, and is shown to load when Bun starts in that dir on a file at .../engines/agy.ts.
+{ { [ -d "$SR/.tui" ] || mkdir -m 700 "$SR/.tui"; } && mkdir -p "$S/proof/engines" && : > "$S/proof/engines/agy.ts" &&
+  printf 'require("node:fs").appendFileSync("%s", process.argv.join(" ") + "\\n");\n' "$S/tui-mark" > "$SR/.tui/mark.ts" &&
+  echo 'preload = ["./mark.ts"]' > "$SR/.tui/bunfig.toml"; } || echo "FAIL  fixture: plant a bunfig.toml in .tui"
+(cd "$SR/.tui" && env -i PATH=/usr/bin:/bin XDG_CONFIG_HOME="$SR/.tui" "$(command -v bun)" --no-env-file --no-install "$S/proof/engines/agy.ts")
+gws_t "fixture: the planted bunfig.toml loads when Bun starts in .tui" grep -q '/engines/agy\.ts' "$S/tui-mark"
+rm -f "$S/tui-mark"
 "${NOAGENT[@]}" script -qec "$CLI tui models" /dev/null < /dev/null > "$S/t3" 2>&1; rc=$?
+# The stub agy is a Bun executable itself and loads it from its cwd, .tui; only the pump must not.
+gws_tn "tui: the pump starts outside the reused .tui dir, so a bunfig.toml there never loads into it" grep -q '/engines/agy\.ts' "$S/tui-mark"
 R9=$(ls -t "$HOME"/stub/*.json | head -n 1)
 gws_t "tui: the owner's own run reaches the pinned stub through the launcher, in the tui state dir" sh -c '[ "$0" = 0 ] && jq -e --arg d "$1" ".args == [\"models\"] and .cwd == \$d" "$2"' "$rc" "$SR/.tui" "$R9"
 gws_t "tui: nothing it started is left, its child ignoring HUP and TERM included" sh -c "$EMPTY" "$R9"

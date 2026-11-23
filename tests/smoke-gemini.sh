@@ -54,6 +54,11 @@ done
 (cd "$S/caller" && "$RUN" "$P") > "$S/o" 2> "$S/e"; rc=$?
 gm_t "engine: a symlinked engines/api gives exit 2, no stdout, no dir" sh -c '[ "$0" -eq 2 ] && [ ! -s "$1" ] && [ "$(ls -A "$2" | wc -l)" -eq "$3" ]' "$rc" "$S/o" "$TMPDIR" "$N0"
 { rm "$ENG" && mv "$S/real-stub" "$ENG"; } || { echo "FAIL  fixture setup: unlink the stub"; exit 1; }
+KEY="$HOME/.config/gemini/.env"
+# Refused by identity before any read, so its content does not matter.
+{ mkdir -p "${KEY%/*}" && echo placeholder > "$KEY"; } || { echo "FAIL  fixture setup: the key file"; exit 1; }
+(cd "$S/caller" && "$RUN" "$KEY") > "$S/o" 2> "$S/e"; rc=$?
+gm_t "key file: run refuses it as a prompt with exit 2, no stdout, no dir" sh -c '[ "$0" -eq 2 ] && [ ! -s "$1" ] && [ "$(ls -A "$2" | wc -l)" -eq "$3" ] && grep -qx "ERROR: refusing the key file as a prompt: never send a secret to Gemini" "$4"' "$rc" "$S/o" "$TMPDIR" "$N0" "$S/e"
 gm_t "refusals: the engine never ran" test ! -e "$GM_CALLS"
 
 # --- an answered turn -------------------------------------------------------------
@@ -125,6 +130,8 @@ STUB
 D=$(gm_key GEMINI_DIR "$S/o")
 (cd "$S/caller" && "$RUN" "$P") > "$S/o" 2> /dev/null
 D2=$(gm_key GEMINI_DIR "$S/o")
+(cd "$S/caller" && "$RES" "$D2" "$KEY") > "$S/o" 2> "$S/e"; rc=$?
+gm_t "key file: resume refuses it as a prompt, claiming no turn" sh -c "$REFUSED"' && [ ! -e "$4/followup-1.md" ]' "$rc" "$S/o" "$S/e" "ERROR: refusing the key file as a prompt: never send a secret to Gemini" "$D2"
 (cd "$S/caller" && "$RES" "$D" "$P") > /dev/null 2>&1
 rm -f "$GM_SNAP"
 (cd "$S/caller" && "$RES" "$D/" "$P") > "$S/o" 2> "$S/e"; rc=$?

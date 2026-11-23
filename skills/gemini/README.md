@@ -12,7 +12,7 @@ Each turn is a stored background interaction (`POST /v1beta/interactions`), so G
 
 ## Key file
 
-The key lives in `~/.config/gemini/.env`, mode 600, outside every repo: one line, `GEMINI_API_KEY=<value>`, the value only letters, digits and `. _ -` (JSON, percent and form encoding leave such a key as it is, so an echo stays a literal match for the log redactor). It is the second named key-file exception in AGENTS.md. Only `engines/api.ts` and, for a worker, `engines/agy.ts` read it. A consult's reader is started by `engines/api`, a launcher that runs Bun from an empty dir with only `PATH` and `XDG_CONFIG_HOME`, so no inherited `BUN_OPTIONS`, debug variable, `.env` or `bunfig.toml` reaches the process that holds the key. The key leaves only in the `x-goog-api-key` header, to a fixed Google origin, with redirects refused. Agents never read the file; their preflight is `ls -l`.
+The key lives in `~/.config/gemini/.env`, mode 600, outside every repo: one line, `GEMINI_API_KEY=<value>`, the value only letters, digits and `. _ -` (JSON, percent and form encoding leave such a key as it is, so an echo stays a literal match for the log redactor). It is the second named key-file exception in AGENTS.md. Only `engines/api.ts` and, for a worker, `engines/agy.ts` read it. A consult's reader is started by `engines/api`, a launcher that runs Bun from an empty dir with only `PATH` and `XDG_CONFIG_HOME`, so no inherited `BUN_OPTIONS`, debug variable, `.env` or `bunfig.toml` reaches the process that holds the key. A consult's key leaves only in the `x-goog-api-key` header, to a fixed Google origin, with redirects refused; a worker's path is under [Where the key goes](#where-the-key-goes). Agents never read the file; their preflight is `ls -l`.
 
 ## Owner setup
 

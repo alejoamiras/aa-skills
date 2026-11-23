@@ -11,7 +11,7 @@ Gemini is a second opinion from a third model family, reached through Google's p
 
 **Gemini is not an oracle.** It can be confidently wrong or miss context you did not paste. Weigh its answer on the merits; agreement does not confirm your position.
 
-**A live worker is a different tool.** `scripts/worker-gemini.sh` runs Gemini as an agent in its own git worktree, on Google's Antigravity CLI: it reads the repo and runs every command it decides on. Read [`WORKER.md`](WORKER.md) before starting one. Everything below this line is about consults only.
+**A live worker is a different tool.** `scripts/worker-gemini.sh` runs Gemini as an agent in its own git worktree, on Google's Antigravity CLI: it reads the repo and runs every command it decides on. Read [`WORKER.md`](WORKER.md) before starting one. The sections below are about consults, except Hard rules, which apply to both.
 
 ## Preflight
 

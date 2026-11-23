@@ -1,4 +1,5 @@
-// The gemini skill's api engine, the only process that reads the Gemini key. Start it through engines/api only.
+// The gemini skill's api engine, a consult's reader of the Gemini key; agy.ts imports its reader and redactor. Start it
+// through engines/api only.
 // Usage: api <absolute gemini-dir> <turn> submit|collect
 // It writes only the turn's id file, answer and ended marker, each complete or not at all; its output is the turn's log.
 import { randomBytes } from "node:crypto";

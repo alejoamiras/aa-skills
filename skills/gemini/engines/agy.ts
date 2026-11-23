@@ -235,7 +235,7 @@ function checkHomeConfig(home: string) {
 }
 
 type Checked = { bin: Bin; key: string };
-// In this order: the pin, the binary's hash, modelProvider, the home config, the key, then settings without the key.
+// The key is read only after the pin, the binary and the settings have passed.
 function checkAll(d: Deps, log: Log): Checked {
   const bin = openPinned(d.home, d.uid);
   try {
