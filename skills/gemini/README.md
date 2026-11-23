@@ -52,7 +52,7 @@ The worker uses the consult's key file; it does not need `~/.agents/gemini-engin
    ```
 
    Its three lines are `path=` (the binary's real path), `sha256=` (its hash) and `version=` (its `--version`). The worker hashes the binary at every start, runs exactly the file it hashed, and refuses any other. After every `agy` update, check the new binary, then rewrite the pin.
-6. In your own terminal, never inside Claude Code, run `~/.claude/skills/gemini/scripts/worker-gemini.sh tui`. It starts the pinned `agy` interactively with the key and without the permission flag, and refuses to run under an agent.
+6. In your own terminal, never inside Claude Code, run `~/.claude/skills/gemini/scripts/worker-gemini.sh tui`. It starts the pinned `agy` interactively with the key and without the permission flag, and refuses to run under an agent. When `agy` exits, `tui` ends whatever it left running.
    - Pick a colour scheme.
    - On "Terms of Service & Data Use", untick the data-collection box before Done: pressing Done accepts the terms.
    - Answer the folder-trust prompt.
@@ -64,7 +64,7 @@ A worker can plant files that run code with the key at every later start, your o
 
 ### Where the key goes
 
-The key is in the environment of `agy`, so every command a worker runs can read it, and so can any process of your user through `/proc`. The worker keeps it out of argv, tmux's environment, its log, its pane and its inbox. What `agy` writes on its own is outside that promise: scan for the literal key yourself now and then, never through an agent (`grep -rlFf <(sed -n 's/^GEMINI_API_KEY=//p' ~/.config/gemini/.env) ~/.gemini ~/.cache/gemini-worker`; no output means clean). The bounds are the key's "Gemini API only" restriction, the project spend cap and revoking the key.
+The key is in the environment of `agy`, so every command a worker runs can read it, and so can any process of your user through `/proc`. The worker keeps it out of argv, tmux's environment, its log, its pane and its inbox. What `agy` writes on its own is outside that promise: scan for the literal key yourself now and then, never through an agent (`grep -rlFf <(sed -n 's/^GEMINI_API_KEY=//p' ~/.config/gemini/.env) ~/.gemini ~/.cache/gemini-worker`; no output means clean). The bounds are the key's "Gemini API only" restriction, the project spend cap and revoking the key. Where `/proc/sys/kernel/core_pattern` pipes crashes to a collector, the launcher's `ulimit -c 0` does not stop the kernel handing that collector a crash image, which can hold the key; on the host this was built on, the collector stored nothing in a test with a canary key.
 
 ### Spend
 

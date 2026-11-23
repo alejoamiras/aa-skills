@@ -36,7 +36,7 @@ const result = (turns: number, response: string, usage: unknown) => ({
 });
 
 type Turn = { answer?: string; tools?: number; toolErrors?: number; stderr?: number; write?: string[]; editConfig?: string; usage?: unknown };
-type Config = { mode?: string; child?: boolean; delay?: number; tick?: number; turns?: Turn[] };
+type Config = { mode?: string; child?: boolean | "cleared"; split?: boolean; delay?: number; tick?: number; turns?: Turn[] };
 
 function writeAll(fd: number, text: string) {
   const buf = Buffer.from(text);
@@ -74,8 +74,11 @@ function stub() {
   const key = process.env.GEMINI_API_KEY ?? "";
   const stat = readFileSync("/proc/self/stat", "utf8");
   const f = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-  // Ignores HUP and TERM in a session of its own, as a command agy started would.
-  const child = cfg.child || mode === "child" ? spawn("/bin/sh", ["-c", "trap '' HUP TERM; while :; do sleep 1; done"], { detached: true, stdio: "ignore" }) : undefined;
+  // Ignores HUP and TERM in a session of its own, as a command agy started would. "cleared": that session's marked leader
+  // dies on TERM, and its child, with an empty environment, ignores both.
+  const loop = "trap '' HUP TERM; while :; do /bin/sleep 1; done";
+  const script = cfg.child === "cleared" ? `/usr/bin/env -i /bin/sh -c "${loop}" & wait` : loop;
+  const child = cfg.child || mode === "child" ? spawn("/bin/sh", ["-c", script], { detached: true, stdio: "ignore" }) : undefined;
   child?.unref();
   const keyFile = readFileSync(join(home, ".config", "gemini", ".env"), "utf8").trim().replace(/^GEMINI_API_KEY=/, "");
   writeFileSync(at(".json"), JSON.stringify({
@@ -97,6 +100,10 @@ function stub() {
     appendFileSync(at(".order"), `in ${n}\n`);
     put(step(s++, { state: "DONE", step_type: "user_input" }));
     if (mode === "eof") process.exit(0);
+    if (mode === "error-second" && n === 2) {
+      put(RECORDED[9]);
+      process.exit(1);
+    }
     if (mode === "late-duplicate" && n === 2) put(last);
     if (mode === "hang") {
       if (cfg.tick) setInterval(() => put(step(s, { state: "ACTIVE", step_type: "agent_response", text_delta: "." })), cfg.tick);
@@ -109,6 +116,17 @@ function stub() {
       put(toolStep(s, "DONE", i < (t.toolErrors ?? 0) ? "exit status 1" : undefined));
     }
     for (let i = 0; i < (t.stderr ?? 0); i++) writeAll(2, `stub notice ${i}\n`);
+    // The key split across two ACTIVE deltas of one step, then across an ACTIVE and its DONE.
+    if (cfg.split) {
+      const half = key.length >> 1;
+      put(step(s, { state: "ACTIVE", step_type: "agent_response", text_delta: `one ${key.slice(0, half)}` }));
+      put(step(s, { state: "ACTIVE", step_type: "agent_response", text_delta: key.slice(half) }));
+      put(step(s++, { state: "DONE", step_type: "agent_response", text_delta: " two" }));
+      put(step(s, { state: "ACTIVE", step_type: "agent_response", text_delta: key.slice(0, half) }));
+      put(step(s++, { state: "DONE", step_type: "agent_response", text_delta: `${key.slice(half)} three` }));
+    }
+    const late = mode === "late-done" && n === 1 ? s++ : undefined;
+    if (late !== undefined) put(toolStep(late, "ACTIVE"));
     if (mode === "leak-key") {
       put(key);
       const escaped = [...key].map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`).join("");
@@ -130,6 +148,15 @@ function stub() {
     if (mode === "duplicate") put(result(n, answer, bumped));
     if (mode === "late-duplicate") last = result(n, answer, bumped);
     if (mode === "background" && n === 1) setTimeout(() => put(step(s++, { state: "ACTIVE", step_type: "agent_response", text_delta: "unasked" })), cfg.delay ?? 100);
+    if (late !== undefined) setTimeout(() => put(toolStep(late, "DONE")), cfg.delay ?? 100);
+    // A turn no message asked for: num_turns moves on without one.
+    if (mode === "unasked-turn" && n === 1) {
+      setTimeout(() => {
+        n++;
+        put(step(s++, { state: "DONE", step_type: "agent_response", text_delta: "unasked" }));
+        put(result(n, "unasked", usageAt(n)));
+      }, cfg.delay ?? 100);
+    }
   }
 
   // Like agy, input that arrives mid-turn runs after the current turn; closing stdin ends the session once idle.

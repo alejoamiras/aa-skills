@@ -48,7 +48,7 @@ Run it in the foreground, never as a background task: `start` checks that it des
     GEMINI_WORKER_ATTACH=tmux -L gemini-worker attach -t =gemini-<slug>
     ```
     Give the owner the attach line. Ready means the checks passed and `agy` started, not that it can answer: an unknown model name fails only on the first turn.
-  - **2**: refused, nothing started. One stderr line says why. A pin, settings, home-config or key refusal prints `gone:` and `NEXT:` lines. Follow `NEXT`, which usually means telling the owner.
+  - **2**: refused, nothing started. One stderr line says why. "An earlier gemini-<slug> left processes running" means run `stop <slug>` first. A pin, settings, home-config or key refusal prints `gone:` and `NEXT:` lines. Follow `NEXT`, which usually means telling the owner.
   - **4**: the pump or `agy` died first, or neither was ready within 30 s. The worker is removed, and the log's last 20 lines are printed.
 
 ## The first message
@@ -80,7 +80,8 @@ Write each message to a fresh file (`mktemp`), then:
 
 - **0**: queued. Prints `GEMINI_WORKER_SEEN=<finished turns>` and `GEMINI_WORKER_QUEUED=<n>`.
 - **1**: the worker is gone. Nothing was queued, and its `gone:` line is printed.
-- **2**: usage, an unknown name, another director's worker, a file over 256 KiB, or 20 messages already queued (wait for a turn to end).
+- **2**: usage, an unknown name, another director's worker, the key file itself, a file over 256 KiB, or 20 messages already queued (wait for a turn to end).
+- The pump refuses a message whose text holds the API key: its `in` log line says `refused`, and nothing reaches the worker.
 
 Messages run one at a time, in send order. A message sent mid-turn waits for the turn to end; there is no mid-turn steering or cancel.
 
@@ -106,16 +107,18 @@ Run `wait` as a **background** Bash task (`run_in_background: true`). Its exit w
 
 ```
 turn <n>: from=director|owner|agy status=<s> tokens=<t> tools=<n> tool_errors=<n> stderr=<n> changed=<n>|unknown head=moved|same gitconfig=changed|same
-<up to 20 paths changed in this turn>
-<the answer, last 8,000 bytes>
+| <up to 20 paths changed in this turn>
+| <the answer, last 8,000 bytes>
 ```
+
+Every line the worker wrote starts with `| `: paths, answers, and the log lines a timeout or an unread answer prints. A line without it comes from the script, and a turn or `gone:` line is always one line.
 
 - `from=director` answers your message, and `from=owner` a line the owner typed in the pane. `from=agy` is a result no message asked for, whose usage still counts. When a `from=agy` turn follows yours, read both answers.
 - `tokens` is what the turn added to the running total; `?` means its usage was unreadable. `GEMINI_WORKER_TOKENS` is the whole worker's total: `agy` reports cumulative counts, cached reads included.
 - `tools` counts tool steps, and `tool_errors` the failed ones. `stderr` counts `agy`'s stderr lines, where its denial notices and warnings land.
 - `changed`, `head` and `gitconfig` compare `git status`, `HEAD` and the repo's git config with the previous turn. `unknown` means git did not answer within 10 s.
 - With no answer, the turn's last 20 log lines print instead.
-- Control characters are stripped.
+- Control characters are stripped, and newlines inside a turn or `gone:` line become spaces.
 
 ## Verifying
 
@@ -127,7 +130,7 @@ turn <n>: from=director|owner|agy status=<s> tokens=<t> tools=<n> tool_errors=<n
 ## How it behaves
 
 - Each command the worker runs leads a session of its own. `agy` ends what a command leaves behind once it exits. A command still running when the worker ends is killed at teardown: every command carries the worker's marker in its environment.
-- A command the worker leaves running can keep the worker busy after its answer. `agy` events with no message behind them count as a turn under the watchdog.
+- A command the worker leaves running can keep the worker busy after its answer. New `agy` steps with no message behind them count as a turn under the watchdog; a late step of a turn that already answered does not.
 - The worker ends on its own with a `gone:` reason in these cases:
   - `cap` when the cap is reached;
   - `usage unreadable` when a capped worker cannot count a turn;
@@ -139,7 +142,8 @@ turn <n>: from=director|owner|agy status=<s> tokens=<t> tools=<n> tool_errors=<n
 ## The owner's view
 
 - `tmux -L gemini-worker ls` lists the workers. The owner attaches with `GEMINI_WORKER_ATTACH` and detaches with `Ctrl-b d`.
-- In the pane, a typed line plus Enter is a message (`from=owner`), and Ctrl-C stops the worker.
+- In the pane, a typed line plus Enter is a message (`from=owner`), and Ctrl-C stops the worker. A typed line holding the API key is refused, not sent.
+- The pane and the log show a response's text once each response step finishes, never fragment by fragment.
 - Only the owner runs `worker-gemini.sh tui`, and only in their own terminal. It refuses to run under an agent.
 
 ## Stopping
@@ -149,7 +153,7 @@ turn <n>: from=director|owner|agy status=<s> tokens=<t> tools=<n> tool_errors=<n
 ```
 
 - It ends the tmux session and every process the worker started, found by the worker's marker. It sends TERM, then KILL after 5 s, and takes up to about 10 s.
-- It works from the log after the pump is gone.
+- It works from the log after the pump is gone. Once `agy` itself has died, it finds what is left by the marker alone, so a process in `agy`'s own session that cleared its environment and outlived `agy` is missed.
 - **0**: stopped, or already gone. **1**: something outlived KILL; its pids are printed, so tell the owner. **2**: usage, or another director's worker.
 - `--force` stops another director's worker. Use it only when the owner asks.
 - **Stop your workers before this session ends.**

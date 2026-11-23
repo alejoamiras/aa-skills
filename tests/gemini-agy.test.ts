@@ -8,7 +8,7 @@ import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { conversationOf, isStep, paneParts, resultOf, toolDone, userEvent } from "../skills/gemini/engines/agy-stream.ts";
-import { type Deps, LIMITS, type Limits, pump, type Spawn } from "../skills/gemini/engines/agy.ts";
+import { binaryRule, type Deps, LIMITS, type Limits, pump, type Spawn } from "../skills/gemini/engines/agy.ts";
 import { RECORDED, toolStep } from "./fixtures/agy-stub.ts";
 
 // Every third character is a capital, so no 5-character run of it occurs in timestamps, hex ids or plain words.
@@ -32,12 +32,17 @@ beforeAll(() => {
   if (r.status !== 0) throw new Error(`the stub did not compile: ${r.stderr}`);
   stubSha = sha(stubBin);
 }, 120_000);
-// A failed or timed-out test can leave a stub's HUP- and TERM-ignoring child looping; agy's environment, and so every
-// process it starts, carries TMPDIR=<root>.
+// A failed or timed-out test can leave a stub's HUP- and TERM-ignoring child looping. agy's environment, and so every
+// process it starts, carries TMPDIR=<root>; a child that cleared its environment is found by its recorded session.
 afterAll(() => {
+  const homes = readdirSync(root).filter((d) => d.startsWith("home"));
+  const sids = new Set(homes.flatMap((d) => records({ dir: join(root, d), bin: "" }).map((r) => r.child)).filter(Boolean));
   for (const pid of readdirSync("/proc").filter((n) => /^[0-9]+$/.test(n) && Number(n) !== process.pid)) {
     try {
-      if (statSync(`/proc/${pid}`).uid === UID && `\0${readFileSync(`/proc/${pid}/environ`, "latin1")}`.includes(`\0TMPDIR=${root}\0`)) process.kill(Number(pid), "SIGKILL");
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const sid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[3]);
+      const env = `\0${readFileSync(`/proc/${pid}/environ`, "latin1")}`;
+      if (statSync(`/proc/${pid}`).uid === UID && (sids.has(sid) || env.includes(`\0TMPDIR=${root}\0`))) process.kill(Number(pid), "SIGKILL");
     } catch {
       // gone, or another user's
     }
@@ -90,11 +95,15 @@ async function start(o: Opts = {}) {
   mkdirSync(state, { recursive: true, mode: 0o700 });
   const pane: string[] = [];
   let stop = (_signal: string) => {};
+  let typed = (_line: string) => {};
   const deps = makeDeps(home, pane, o, (fn) => {
     stop = fn;
   });
+  deps.input = (fn) => {
+    typed = fn;
+  };
   const done = pump([state, repo.wt, "gemini-4-carbon", "low", String(o.cap ?? 0), String(o.director ?? process.pid)], deps);
-  return { home, repo, state, pane, done, stop: () => stop("SIGINT") };
+  return { home, repo, state, pane, done, stop: () => stop("SIGINT"), type: (line: string) => typed(line) };
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: log entries are free-form JSON
@@ -301,14 +310,25 @@ describe("worker", () => {
     await finished(w);
   }, 30_000);
 
-  test("a 2 MiB line and a 100 KiB event are logged as parseable cut entries", async () => {
+  test("the key split across text deltas is logged and shown only as whole, redacted text", async () => {
+    const w = await start({ cfg: { split: true } });
+    await ready(w);
+    send(w, "split");
+    await turns(w, 1);
+    const texts = entries(w).flatMap((e) => (e.src === "agy" && typeof e.ev?.step_update?.text_delta === "string" ? [e.ev.step_update.text_delta] : []));
+    expect(texts.slice(0, 2)).toEqual(["one [redacted] two", "[redacted] three"]);
+    w.stop();
+    await finished(w);
+  }, 30_000);
+
+  test("a 2 MiB line is logged by its size only, and a 100 KiB event as a parseable cut entry", async () => {
     const w = await start({ cfg: { mode: "huge" } });
     await ready(w);
     send(w, "big");
     await turns(w, 1);
     const cut = entries(w).filter((e) => e.cut === true);
-    expect(cut.length).toBe(2);
-    expect(cut.every((e) => e.src === "agy" && e.head.startsWith(cut[0] === e ? "[redacted]" : '{"event"'))).toBe(true);
+    expect(cut.map((e) => [e.src, e.head.startsWith('{"event"')])).toEqual([["agy", true]]);
+    expect(entries(w).some((e) => e.src === "agy" && e.ev === `[an unparsed line of ${2 * 1024 * 1024 + 2 * CANARY.length} bytes]`)).toBe(true);
     w.stop();
     await finished(w);
   }, 30_000);
@@ -355,6 +375,77 @@ describe("worker", () => {
     await ready(w);
     send(w, "one");
     expect((await finished(w)).gone.reason).toBe("agy exited without a result");
+  }, 30_000);
+
+  test("a session whose marked leader dies on TERM is still emptied, its child with a cleared environment included", async () => {
+    const w = await start({ cfg: { child: "cleared" } });
+    await ready(w);
+    const rec = await until(() => records(w.home)[0]);
+    // The leader, its cleared child and that child's sleep share the leader's session.
+    await until(() => leftovers("none", [rec.child]).length >= 2);
+    w.stop();
+    await finished(w);
+  }, 30_000);
+
+  test("a message or a typed line holding the key is refused and never reaches agy", async () => {
+    const w = await start();
+    await ready(w);
+    send(w, `use ${CANARY}`);
+    await until(() => entries(w).find((e) => e.src === "in"));
+    w.type(`typed ${CANARY}`);
+    send(w, "clean");
+    const [t] = await turns(w, 1);
+    expect(t.answer).toBe("answer 1");
+    expect(entries(w).filter((e) => e.src === "in").map((e) => [e.text === null, e.refused])).toEqual([[true, "it holds the API key"], [false, undefined]]);
+    expect(w.pane.some((l) => l.includes("that line holds the API key; nothing was sent"))).toBe(true);
+    expect([gw(w, "queued").length, stubFile(w.home, ".in.ndjson").trim().split("\n").length]).toEqual([0, 1]);
+    w.stop();
+    await finished(w);
+  }, 30_000);
+
+  test("a result no message asked for moves the turn the next message expects", async () => {
+    const w = await start({ cfg: { mode: "unasked-turn" } });
+    await ready(w);
+    send(w, "one");
+    await turns(w, 2);
+    send(w, "two");
+    const t = await turns(w, 3);
+    expect(t.map((x) => [x.from, x.answer])).toEqual([
+      ["director", "answer 1"],
+      ["agy", "unasked"],
+      ["director", "answer 3"],
+    ]);
+    w.stop();
+    await finished(w);
+  }, 30_000);
+
+  test("a tool step that finishes after its turn's result is logged but leaves the worker idle", async () => {
+    const w = await start({ cfg: { mode: "late-done", delay: 200 }, limits: { silence: 1000 } });
+    await ready(w);
+    send(w, "one");
+    await turns(w, 1);
+    // Busy, a 1 s silence limit would have ended it by now.
+    await Bun.sleep(1800);
+    expect(gw(w, "gone").length).toBe(0);
+    const es = entries(w);
+    const late = es.findIndex((e) => e.src === "agy" && e.ev?.step_update?.step_type === "tool" && e.ev.step_update.state === "DONE");
+    expect(late).toBeGreaterThan(es.findIndex((e) => e.type === "turn"));
+    w.stop();
+    await finished(w);
+  }, 30_000);
+
+  test("a session-ending error result is a turn from agy, never usage unreadable, and the worker ends with agy", async () => {
+    const w = await start({ cfg: { mode: "error-second" }, cap: 1_000_000 });
+    await ready(w);
+    send(w, "one");
+    await turns(w, 1);
+    send(w, "two");
+    const f = await finished(w);
+    expect(f.turns.map((x) => [x.from, x.status, x.tokens])).toEqual([
+      ["director", "SUCCESS", 1510],
+      ["agy", "ERROR", null],
+    ]);
+    expect(f.gone.reason.startsWith("agy exited")).toBe(true);
   }, 30_000);
 
   test("the silence limit and the turn limit each end a hung agy", async () => {
@@ -409,6 +500,15 @@ describe("worker", () => {
     await finished(w);
   }, 60_000);
 
+  test("a pinned binary owned by another user is refused, one owned by root is not", () => {
+    const rule = binaryRule(1000);
+    expect([rule({ uid: 1001, mode: 0o100755 }), rule({ uid: 0, mode: 0o100755 }), rule({ uid: 1000, mode: 0o100775 })]).toEqual([
+      "is owned by uid 1001, neither this user nor root",
+      undefined,
+      "is writable by group or others",
+    ]);
+  });
+
   test("a file renamed over the pinned path after the hash never runs, and the next start refuses it", async () => {
     const home = makeHome();
     const marker = join(root, `marker${++seq}`);
@@ -461,12 +561,13 @@ describe("worker", () => {
   }, 30_000);
 
   test("tui runs the pinned agy with only an accepted argument, the listed environment, and the state dir as cwd", async () => {
-    const tui = async (home: Home, args: string[]) => {
-      writeFileSync(join(home.dir, "stub.json"), "{}");
+    const tui = async (home: Home, args: string[], cfg: object = {}) => {
+      writeFileSync(join(home.dir, "stub.json"), JSON.stringify(cfg));
       const state = join(root, `tui${++seq}`);
       mkdirSync(state, { recursive: true });
       const pane: string[] = [];
       const code = await pump(["tui", state, ...args], makeDeps(home, pane, {}));
+      // The pump's own lines, a refusal among them; agy writes straight to the terminal.
       expect(leaks(pane.join("\n"))).toBe(false);
       return { code, state, pane, ran: records(home) };
     };
@@ -476,6 +577,8 @@ describe("worker", () => {
     const rec = ok.ran[0];
     expect([rec.args, rec.argv0, rec.cwd, rec.envNames, rec.keyMatches]).toEqual([["models"], home.bin, realpathSync(ok.state), ENV_NAMES, true]);
     expect(rec.env.GEMINI_WORKER_ID.startsWith("tui.")).toBe(true);
+    const kid = (await tui(makeHome(), ["models"], { child: true })).ran[0];
+    expect([kid.child > 0, leftovers(kid.env.GEMINI_WORKER_ID, [kid.child])]).toEqual([true, []]);
     const changed = makeHome();
     copyFileSync(stubBin, `${changed.bin}.new`);
     writeFileSync(`${changed.bin}.new`, "x", { flag: "a" });

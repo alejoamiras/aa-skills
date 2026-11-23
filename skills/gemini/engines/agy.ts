@@ -12,7 +12,9 @@ import { userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { Log, readKey } from "./api.ts";
-import { conversationOf, fit, isObj, isStep, type Json, lines, paneText, type Result, resultOf, tail, toolDone, userEvent } from "./agy-stream.ts";
+import {
+  conversationOf, fit, isObj, isStep, type Json, lines, paneText, type Result, resultOf, stepIndex, tail, textStep, toolDone, userEvent, withText,
+} from "./agy-stream.ts";
 
 const SUBAGENT = "You are a subagent. Don't run memo.";
 const PREAMBLE = [
@@ -34,6 +36,7 @@ const INBOX_NAME = /^[0-9]+\.[0-9]{6}-(?:[0-9]+|owner)$/;
 const QUEUE_MAX = 20;
 const MESSAGE_MAX = 256 * 1024;
 const ANSWER_MAX = 8000;
+const TEXT_MAX = 256 * 1024;
 const PATHS_MAX = 20;
 const PATH_MAX = 512;
 const SHIMS = join(import.meta.dir, "..", "shims");
@@ -56,6 +59,7 @@ const NEXT = {
 
 export const LIMITS = { silence: 15 * 60_000, turn: 30 * 60_000, director: 30_000, grace: 5_000, sweep: 10_000, git: 10_000, poll: 500 };
 export type Limits = typeof LIMITS;
+const capped = (l: Limits) => Object.fromEntries(Object.entries(LIMITS).map(([k, v]) => [k, Math.min(v, l[k as keyof Limits])])) as Limits;
 export type Timers = { set: (fn: () => void, ms: number) => unknown; clear: (handle: unknown) => void };
 export type Spawn = (file: string, args: string[], opts: SpawnOptions) => ChildProcess | Promise<ChildProcess>;
 // Every outside effect but the filesystem, /proc, git and kill. Each limit is capped at its LIMITS value; env holds the
@@ -107,6 +111,47 @@ function processes(uid: number, entry: string): (Proc & { marked: boolean })[] {
   return out;
 }
 
+type Identity = { pid: number; sid: number; start: string };
+
+// agy's session, unless its pid now names a process with another start time; every process of this uid holding the
+// marker entry; every process an earlier scan returned that still has its start time; every member of a session holding
+// one of those. Never the pump or the pump's own session.
+function targets(uid: number, entry: string, kept: Map<number, string>, agy?: Identity): number[] {
+  const all = processes(uid, entry);
+  const live = new Map(all.map((p) => [p.pid, p]));
+  for (const [pid, start] of kept) if (live.get(pid)?.start !== start) kept.delete(pid);
+  const sids = new Set(all.filter((p) => p.marked || kept.has(p.pid)).map((p) => p.sid));
+  if (agy) {
+    const now = procStat(agy.pid);
+    if (!now || now.start === agy.start) sids.add(agy.sid);
+  }
+  const own = procStat(process.pid)?.sid;
+  if (own !== undefined) sids.delete(own);
+  const out = all.filter((p) => p.pid !== process.pid && (p.marked || kept.has(p.pid) || sids.has(p.sid)));
+  for (const p of out) kept.set(p.pid, p.start);
+  return out.map((p) => p.pid);
+}
+
+// TERM, then KILL after the grace, rescanning until nothing is left or the sweep time is up. agy leads its own session,
+// but each command it runs leads another, so the marker in agy's environment finds those and their sessions.
+async function sweep(d: Deps, lim: Limits, entry: string, agy?: Identity) {
+  // Kept across scans: TERM can kill a session's marked leader while a child that cleared its environment lives on.
+  const kept = new Map<number, string>();
+  const start = d.now();
+  let termed = false;
+  for (;;) {
+    const left = targets(d.uid, entry, kept, agy);
+    const elapsed = d.now() - start;
+    if (!left.length || elapsed >= lim.sweep) return;
+    const kill = elapsed >= lim.grace;
+    if (kill || !termed) {
+      for (const pid of left) attempt(() => process.kill(pid, kill ? "SIGKILL" : "SIGTERM"), false);
+      termed = true;
+    }
+    await new Promise<void>((done) => d.timers.set(done, 50));
+  }
+}
+
 // When spawn returns, the exec has happened, so /proc/<pid>/exe names the executed inode; an agy already gone has none.
 const exeOf = (pid: number | undefined): Stats | undefined => (pid === undefined ? undefined : attempt(() => statSync(`/proc/${pid}/exe`), undefined));
 
@@ -138,7 +183,10 @@ function readChecked(path: string, next: string, rule?: (st: Stats) => string | 
   }
 }
 
-const noGroupWrite = (st: Stats) => (st.mode & 0o022 ? "is writable by group or others" : undefined);
+const noGroupWrite = (st: Pick<Stats, "mode">) => (st.mode & 0o022 ? "is writable by group or others" : undefined);
+// Another user could rewrite a binary they own in place, under the pin.
+export const binaryRule = (uid: number) => (st: Pick<Stats, "uid" | "mode">) =>
+  st.uid !== uid && st.uid !== 0 ? `is owned by uid ${st.uid}, neither this user nor root` : noGroupWrite(st);
 
 const fileHash = (path: string) => attempt(() => createHash("sha256").update(readFileSync(path)).digest("hex"), "unreadable");
 
@@ -150,7 +198,7 @@ function openPinned(home: string, uid: number): Bin {
   const m = PIN.exec(pin);
   if (!m) throw new Refusal(`${pinPath} must hold the lines path=<absolute path>, sha256=<64 hex> and version=<agy --version>`, NEXT.pin);
   const [, path, sha, version] = m;
-  const fd = openChecked(path, NEXT.pin, noGroupWrite);
+  const fd = openChecked(path, NEXT.pin, binaryRule(uid));
   const st = fstatSync(fd);
   const hash = createHash("sha256");
   const buf = Buffer.alloc(1 << 20);
@@ -243,11 +291,11 @@ class Worker {
   private readonly marker: string;
   private logFd = -1;
   private child?: ChildProcess;
-  private id?: { pid: number; sid: number; start: string };
+  private id?: Identity;
+  private key = "";
   private director = { pid: 0, start: "" };
   private conversation: string | null = null;
   private first = true;
-  private dispatched = 0;
   private inFlight: { n: number; from: From } | null = null;
   private background = false;
   private settling = false;
@@ -258,6 +306,9 @@ class Worker {
   private total = 0;
   private turns = 0;
   private count = { tools: 0, toolErrors: 0, stderr: 0, steps: new Set<number>() };
+  private texts = new Map<number, { parts: string[]; bytes: number; last: Json }>();
+  private maxStep = -1;
+  private settledStep = -1;
   private snap?: Snap;
   private gitConfig?: string;
   private lastTyped = 0;
@@ -274,7 +325,7 @@ class Worker {
     private readonly a: Args,
     private readonly d: Deps,
   ) {
-    this.lim = Object.fromEntries(Object.entries(LIMITS).map(([k, v]) => [k, Math.min(v, d.limits[k as keyof Limits])])) as Limits;
+    this.lim = capped(d.limits);
     this.log = new Log((line) => {
       this.sink.line = line;
     });
@@ -322,6 +373,7 @@ class Worker {
     if (!statSync(this.a.worktree, { throwIfNoEntry: false })?.isDirectory()) throw new Refusal(`${this.a.worktree} is not a directory`, NEXT.start);
     if (this.ended) return;
     const c = checkAll(this.d, this.log);
+    this.key = c.key;
     const flags = ["--input-format", "stream-json", "--output-format", "stream-json", "--dangerously-skip-permissions", "--model", this.a.model, "--effort", this.a.effort];
     let child: ChildProcess;
     try {
@@ -363,7 +415,7 @@ class Worker {
     const ended = () => {
       this.chain = this.chain.then(() => this.end(this.busy() ? "agy exited without a result" : "agy exited", NEXT.review, 1));
     };
-    if (child.stdout) lines(child.stdout, (buf, over) => this.guard(() => this.onOut(buf, over)), ended);
+    if (child.stdout) lines(child.stdout, (buf, over, size) => this.guard(() => this.onOut(buf, over, size)), ended);
     if (child.stderr) {
       lines(child.stderr, (buf) =>
         this.guard(() => {
@@ -375,11 +427,12 @@ class Worker {
     }
   }
 
-  private onOut(buf: Buffer, over: boolean) {
+  private onOut(buf: Buffer, over: boolean, size: number) {
     this.lastOutput = this.d.now();
     const text = buf.toString("utf8");
     if (!over && text.trim() === "") return;
-    const ev = over ? text : (parse(text) ?? text);
+    // An excerpt of an unparsed line could hold part of a key.
+    const ev = over ? `[an unparsed line of ${size} bytes]` : (parse(text) ?? text);
     this.chain = this.chain.then(() => this.event(ev)).catch((e) => this.fail(e));
   }
 
@@ -389,14 +442,26 @@ class Worker {
 
   private async event(ev: unknown) {
     if (this.ended) return;
-    this.write("agy", { ev });
     this.conversation ??= conversationOf(ev) ?? null;
     const r = resultOf(ev);
-    if (r) return this.finish(r);
+    if (r) {
+      this.flushTexts();
+      this.write("agy", { ev });
+      this.settledStep = this.maxStep;
+      return this.finish(r);
+    }
+    const text = textStep(ev);
+    if (text) this.buffer(ev as Json, text);
+    else this.write("agy", { ev });
     if (!isStep(ev)) return;
-    // Any step after the last result, asked for or not, is a turn the watchdog bounds.
-    if (!this.busy()) this.busySince = this.d.now();
-    this.background = true;
+    const index = stepIndex(ev);
+    if (index !== undefined) this.maxStep = Math.max(this.maxStep, index);
+    // step_index rises across the conversation, so a step at or below the last result's highest is that turn's late DONE.
+    // Any later step, asked for or not, is a turn the watchdog bounds.
+    if (index === undefined || index > this.settledStep) {
+      if (!this.busy()) this.busySince = this.d.now();
+      this.background = true;
+    }
     const t = toolDone(ev);
     if (t && !this.count.steps.has(t.index)) {
       this.count.steps.add(t.index);
@@ -437,7 +502,8 @@ class Worker {
       answer: r.answer === null ? null : tail(this.scrubString(r.answer), ANSWER_MAX),
     });
     this.settling = false;
-    if (this.a.cap !== null && tokens === null) return this.end("usage unreadable", NEXT.unreadable, 1);
+    // num_turns 0 is agy's session-ending error, whose zero usage is no reading; agy exits next.
+    if (this.a.cap !== null && tokens === null && r.turns !== 0) return this.end("usage unreadable", NEXT.unreadable, 1);
     if (this.a.cap !== null && this.total >= this.a.cap) return this.end("cap", NEXT.cap, 1);
     this.dispatch();
   }
@@ -487,6 +553,7 @@ class Worker {
       let refused: string | undefined;
       try {
         const raw = readChecked(path, "", (st) => (st.uid !== this.d.uid ? `is not owned by uid ${this.d.uid}` : st.size > MESSAGE_MAX ? `is over ${MESSAGE_MAX} bytes` : undefined));
+        if (this.key && raw.includes(this.key)) throw new Error("it holds the API key");
         text = this.frame(raw);
       } catch (e) {
         refused = errText(e);
@@ -494,7 +561,8 @@ class Worker {
       this.write("in", { from, name, text, ...(refused === undefined ? {} : { refused }) });
       if (lstatSync(path, { throwIfNoEntry: false })) unlinkSync(path);
       if (text === null) continue;
-      this.inFlight = { n: ++this.dispatched, from };
+      // num_turns counts agy's turns, those no message asked for included.
+      this.inFlight = { n: this.prevTurns + 1, from };
       this.busySince = this.lastOutput = this.d.now();
       this.child.stdin.write(userEvent(text));
       return;
@@ -510,6 +578,7 @@ class Worker {
 
   private typed(line: string) {
     if (line.trim() === "") return;
+    if (this.key && line.includes(this.key)) return this.d.out("refused: that line holds the API key; nothing was sent");
     if (this.queue().length >= QUEUE_MAX) return this.d.out("queue full: wait for a turn to end, then type it again");
     const us = Math.max(this.d.now() * 1000, this.lastTyped + 1);
     this.lastTyped = us;
@@ -548,12 +617,13 @@ class Worker {
     this.end(`the pump failed: ${this.log.field(errText(e))}`, NEXT.bug, 1);
   }
 
-  // Every exit path: the gone line, then agy's teardown, then the code.
+  // The one way a worker ends once its log is open: buffered text, the gone line, agy's teardown, then the exit code.
   private end(reason: string, next: string, code: number) {
     if (this.ended) return;
     this.ended = true;
     if (this.timer !== undefined) this.d.timers.clear(this.timer);
     const dropped = attempt(() => this.queue(), []);
+    attempt(() => this.flushTexts(), undefined);
     // An unwritable log must not stop the teardown.
     attempt(() => this.write("gw", { type: "gone", reason, next, code, dropped }), undefined);
     void (async () => {
@@ -563,38 +633,31 @@ class Worker {
     })().finally(() => this.resolve(code));
   }
 
-  // TERM, then KILL after the grace, rescanning until nothing is left or the sweep time is up. agy leads its own session,
-  // but each command it runs leads another, so the marker in agy's environment finds those and their sessions.
   private async teardown() {
     attempt(() => this.child?.stdin?.end(), undefined);
-    const entry = `GEMINI_WORKER_ID=${this.marker}`;
-    const start = this.d.now();
-    let termed = false;
-    for (;;) {
-      const left = this.targets(entry);
-      const elapsed = this.d.now() - start;
-      if (!left.length || elapsed >= this.lim.sweep) return;
-      const kill = elapsed >= this.lim.grace;
-      if (kill || !termed) {
-        for (const pid of left) attempt(() => process.kill(pid, kill ? "SIGKILL" : "SIGTERM"), false);
-        termed = true;
-      }
-      await new Promise<void>((done) => this.d.timers.set(done, 50));
-    }
+    await sweep(this.d, this.lim, `GEMINI_WORKER_ID=${this.marker}`, this.id);
   }
 
-  // agy's session, unless its pid now names a process with another start time; every process of this uid holding the
-  // marker; every member of a session holding one. Never the pump or the pump's own session.
-  private targets(entry: string): number[] {
-    const all = processes(this.d.uid, entry);
-    const sids = new Set(all.filter((p) => p.marked).map((p) => p.sid));
-    if (this.id) {
-      const now = procStat(this.id.pid);
-      if (!now || now.start === this.id.start) sids.add(this.id.sid);
-    }
-    const own = procStat(process.pid)?.sid;
-    if (own !== undefined) sids.delete(own);
-    return all.filter((p) => p.pid !== process.pid && (p.marked || sids.has(p.sid))).map((p) => p.pid);
+  // Never written fragment by fragment: a key split across deltas would pass the redactor piece by piece.
+  private buffer(ev: Json, t: { index: number; text: string; done: boolean }) {
+    const b = this.texts.get(t.index) ?? { parts: [], bytes: 0, last: ev };
+    b.last = ev;
+    b.bytes += Buffer.byteLength(t.text);
+    if (b.bytes > TEXT_MAX) b.parts.length = 0;
+    else b.parts.push(t.text);
+    this.texts.set(t.index, b);
+    if (t.done) this.flushText(t.index);
+  }
+
+  private flushText(index: number) {
+    const b = this.texts.get(index);
+    if (!b) return;
+    this.texts.delete(index);
+    this.write("agy", { ev: withText(b.last, b.bytes > TEXT_MAX ? `[${b.bytes} bytes of text, not kept]` : b.parts.join("")) });
+  }
+
+  private flushTexts() {
+    for (const index of [...this.texts.keys()]) this.flushText(index);
   }
 
   private scrub(text: string): string {
@@ -623,7 +686,8 @@ class Worker {
   }
 }
 
-// The owner's own terminal: the pinned agy, checked as for a worker, with no permission flag.
+// The owner's own terminal: the pinned agy, checked as for a worker, with no permission flag. What it leaves running is
+// swept by its own marker once it exits.
 async function tui(argv: string[], d: Deps): Promise<number> {
   const sink = { line: "" };
   const log = new Log((line) => {
@@ -640,8 +704,11 @@ async function tui(argv: string[], d: Deps): Promise<number> {
     say(`NEXT: ${NEXT.usage}`);
     return 2;
   }
-  // agy owns the terminal: Ctrl-C is its to handle.
-  d.signals(() => {});
+  let child: ChildProcess | undefined;
+  // Ctrl-C is the terminal's, and agy handles it; a TERM or HUP for this process is meant for agy too.
+  d.signals((signal) => {
+    if (signal !== "SIGINT") attempt(() => child?.kill(signal as NodeJS.Signals), false);
+  });
   let c: Checked;
   try {
     c = checkAll(d, log);
@@ -650,20 +717,26 @@ async function tui(argv: string[], d: Deps): Promise<number> {
     say(`NEXT: ${e instanceof Refusal ? e.next : NEXT.bug}`);
     return 2;
   }
-  let child: ChildProcess;
+  const marker = `tui.${randomBytes(16).toString("hex")}`;
+  let proc: ChildProcess;
   try {
-    const env = agyEnv(d, c.key, `tui.${randomBytes(16).toString("hex")}`);
-    child = await d.spawn(`/proc/self/fd/${c.bin.fd}`, rest, { argv0: c.bin.path, cwd: state, env, stdio: "inherit" });
+    proc = await d.spawn(`/proc/self/fd/${c.bin.fd}`, rest, { argv0: c.bin.path, cwd: state, env: agyEnv(d, c.key, marker), stdio: "inherit" });
   } finally {
     closeSync(c.bin.fd);
   }
-  const exited = new Promise<number>((done) => child.on("close", (code) => done(code ?? 1)));
-  const exe = exeOf(child.pid);
-  if (exe && exe.dev === c.bin.dev && exe.ino === c.bin.ino) return exited;
-  attempt(() => child.kill("SIGKILL"), false);
-  say(`ERROR: ${exe ? "agy did not run from the approved file" : "agy exited before it could be checked"}`);
-  say(`NEXT: ${exe ? NEXT.pin : NEXT.early}`);
-  return exe ? 2 : 4;
+  child = proc;
+  const exited = new Promise<number>((done) => proc.on("close", (code) => done(code ?? 1)));
+  const exe = exeOf(proc.pid);
+  let code: number;
+  if (exe && exe.dev === c.bin.dev && exe.ino === c.bin.ino) code = await exited;
+  else {
+    attempt(() => proc.kill("SIGKILL"), false);
+    say(`ERROR: ${exe ? "agy did not run from the approved file" : "agy exited before it could be checked"}`);
+    say(`NEXT: ${exe ? NEXT.pin : NEXT.early}`);
+    code = exe ? 2 : 4;
+  }
+  await sweep(d, capped(d.limits), `GEMINI_WORKER_ID=${marker}`);
+  return code;
 }
 
 export async function pump(argv: string[], d: Deps): Promise<number> {

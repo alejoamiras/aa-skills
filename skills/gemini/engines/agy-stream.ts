@@ -29,6 +29,18 @@ export function resultOf(ev: unknown): Result | undefined {
   };
 }
 
+// agy streams a response as short ACTIVE text_delta steps, then a DONE, so a key it repeats can straddle events.
+export function textStep(ev: unknown): { index: number; text: string; done: boolean } | undefined {
+  const s = payload(ev, "step_update");
+  if (!s || typeof s.text_delta !== "string") return undefined;
+  return { index: safe(s.step_index) ? s.step_index : -1, text: s.text_delta, done: s.state === "DONE" };
+}
+export const withText = (ev: Json, text: string): Json => ({ ...ev, step_update: { ...(ev.step_update as Json), text_delta: text } });
+export function stepIndex(ev: unknown): number | undefined {
+  const s = payload(ev, "step_update");
+  return s && safe(s.step_index) ? s.step_index : undefined;
+}
+
 // A tool step counts once, on DONE. Names are never matched: the stream says write_file where init.tools says write_to_file.
 export function toolDone(ev: unknown): { index: number; error: boolean } | undefined {
   const s = payload(ev, "step_update");
@@ -36,7 +48,6 @@ export function toolDone(ev: unknown): { index: number; error: boolean } | undef
   return { index: s.step_index, error: isObj(s.tool_info) && s.tool_info.error != null };
 }
 
-// Type, state, step type, tool name and the first 300 characters of the most telling text.
 export function paneParts(ev: unknown): string[] {
   if (!isObj(ev) || typeof ev.event !== "string") return ["raw", (typeof ev === "string" ? ev : JSON.stringify(ev)).slice(0, 300)];
   const p = isObj(ev[ev.event]) ? (ev[ev.event] as Json) : {};
@@ -70,8 +81,8 @@ export const tail = (s: string, max: number) => {
   return b.length <= max ? s : b.subarray(b.length - max).toString("utf8");
 };
 
-// Splits a byte stream into lines; a line past RAW_MAX keeps only its start and is reported as over.
-export function lines(stream: Readable, each: (line: Buffer, over: boolean) => void, end?: () => void) {
+// Splits a byte stream into lines; a line past RAW_MAX keeps only its start and is reported as over, with its full size.
+export function lines(stream: Readable, each: (line: Buffer, over: boolean, size: number) => void, end?: () => void) {
   let parts: Buffer[] = [];
   let size = 0;
   const take = (b: Buffer) => {
@@ -80,7 +91,7 @@ export function lines(stream: Readable, each: (line: Buffer, over: boolean) => v
     size += b.length;
   };
   const flush = () => {
-    each(Buffer.concat(parts), size > RAW_MAX);
+    each(Buffer.concat(parts), size > RAW_MAX, size);
     parts = [];
     size = 0;
   };
