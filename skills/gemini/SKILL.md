@@ -96,10 +96,10 @@ Lineup as of 2026-11-23, from Google's models, pricing, thinking, background-exe
 
 - The model argument can spend on any model the key allows. Keep Carbon (the default) unless the owner names another model, and pass only an ID from the table. Only Carbon has run through this engine (the 2026-11-22 live check); the other four are documented by Google and unchecked here.
 - Effort is Gemini's thinking level. The scripts accept `low`, `medium` or `high`, and the script's default is `high`; Google's default differs per model (table). Keep `high` for reviews. `xhigh` exists only on Neon and Hydrogen, and the scripts refuse it with exit 2.
-- Pass concrete model IDs, never an alias. The engine withholds an answer when the served model is not the requested ID (or that ID with a version suffix such as `-001`); an alias fails that check, and retrying it is not worth it. On 2026-11-22 a request for `gemini-4-carbon` was served as exactly `gemini-4-carbon`, with no suffix, so the default model passed the check as of that date.
+- Pass concrete model IDs, never an alias. The engine withholds an answer when the served model is not the requested ID (or that ID with a version suffix such as `-001`); an alias Google reports under another ID fails that check, and retrying it is not worth it. On 2026-11-22 a request for `gemini-4-carbon` was served as exactly `gemini-4-carbon`, with no suffix, so the default model passed the check as of that date.
 - Never pass an ID Google serves as another model: the turn is submitted, so it may be charged, and its answer is withheld. As of 2026-11-23 those are `gemini-3.5-flash` (served as `gemini-3.6-flash`), `gemini-3.7-flash` (as `gemini-3.8-flash`), and from 2026-12-01 `gemini-2.5-pro` (as `gemini-3.8-flash`) and `gemini-2.5-flash` (as `gemini-3.5-flash-lite`).
 - Whether `gemini-3.6-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` or `gemini-3.1-pro-preview` work here is unknown: the background-execution page does not name them.
-- Google's hosted agents (`deep-research-preview-04-2026`, `deep-research-max-preview-04-2026`, `antigravity-preview-09-2026`) are selected with an `agent` field this engine never sends, so they are out of reach and the consult stays tool-free.
+- Google's hosted agents (`deep-research-preview-04-2026`, `deep-research-max-preview-04-2026`, `antigravity-preview-09-2026`) are selected with an `agent` field this engine never sends, so they are out of reach.
 
 ## Cost and data
 
