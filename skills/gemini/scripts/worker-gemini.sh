@@ -54,9 +54,9 @@ STRIP=(tr -d '\000-\010\013-\037\177')
 
 # Every unseen turn from a worker's log, as NUL-ended records: "<turns> <idle|busy> <total> <cap|none> <gone 0|1>",
 # then per turn its line, its paths and its answer (or, for an unread answer, the 20 log lines before it), then the
-# gone line if any. Busy mirrors the pump: a dispatched message, or an agy step after the last turn above every step
-# index logged before it (one at or below is that turn's late step). NULs are dropped, since they would end a record;
-# newlines in the turn and gone lines become spaces, so worker text cannot forge either.
+# gone line if any. Busy: a dispatched message after the last turn line, or an agy step after it whose index is missing
+# or above every index logged before that line. NULs are dropped, since they would end a record; newlines in the turn
+# and gone lines become spaces, so worker text cannot forge either.
 GW_WAIT_JQ='
 [inputs] as $raw
 | [$raw[] | (try fromjson catch null) | if type == "object" then . else {} end] as $e

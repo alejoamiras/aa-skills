@@ -4,7 +4,8 @@
 # Claude Code director started with --dangerously-skip-permissions; no workflow runs it. It never reads the key file or
 # the pin: the pump does, and the facts it prints come from the pump's log, which the pump has already redacted.
 set -uo pipefail
-unset CDPATH
+# An inherited GIT_DIR beats -C and would aim the scratch setup at another repository.
+unset CDPATH GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_NAMESPACE GIT_PREFIX
 export LC_ALL=C
 
 if [[ ${GEMINI_WORKER_LIVE:-} != spend ]]; then
@@ -31,10 +32,13 @@ trap 'if [[ -d $STATE ]]; then "$CLI" stop "$SLUG" > /dev/null 2>&1 || echo "liv
   printf "live: scratch %s\nlive: state %s\n" "$RUN" "$STATE"' EXIT
 
 # --- the scratch repo, its worktree and the probe ---------------------------------------------------------------------
-GIT=(git -c user.name=live -c user.email=live@example.invalid -c commit.gpgsign=false)
+# Without the owner's global and system git config, none of its hooks, templates or signing run in the scratch setup.
+# The worker CLI keeps the full environment.
+BARE=(env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1)
+GIT=("${BARE[@]}" git -c user.name=live -c user.email=live@example.invalid)
 { "${GIT[@]}" init -q "$REPO" && echo live > "$REPO/README" && "${GIT[@]}" -C "$REPO" add README &&
   "${GIT[@]}" -C "$REPO" commit -qm init &&
-  (cd "$REPO" && AGENTS_DIR="$RUN" "$ROOT/bin/agent-worktree" new live --no-start > "$RUN/worktree.out" 2>&1); } ||
+  (cd "$REPO" && "${BARE[@]}" AGENTS_DIR="$RUN" "$ROOT/bin/agent-worktree" new live --no-start > "$RUN/worktree.out" 2>&1); } ||
   { echo "live: cannot make the scratch repo and its worktree; see $RUN/worktree.out" >&2; exit 1; }
 cat > "$WT/probe.sh" << 'EOF'
 #!/bin/sh
@@ -84,23 +88,36 @@ for ((i = 0; i < 4; i++)); do
   SEEN=$(sed -n 's/^GEMINI_WORKER_SEEN=//p' "$RUN/wait.$i")
 done
 
-# --- what the director saw ----------------------------------------------------------------------------------------------
-if [[ $(tr -d '[:space:]' < "$WT/nonce.txt" 2> /dev/null) == "$A" ]]; then echo "ok    nonce.txt holds A"; else echo "FAIL  nonce.txt holds A"; FAIL=1; fi
+# --- what the worker did and the director saw ---------------------------------------------------------------------------
+# The worker wrote these files: a FIFO would block the read, and a symlink would read whatever it names.
+N="" W="not a regular file"
+[[ -f $WT/nonce.txt && ! -L $WT/nonce.txt ]] && N=$(head -c 64 "$WT/nonce.txt" | tr -d '[:space:]')
+if [[ -f $WT/probe.out && ! -L $WT/probe.out ]]; then
+  W=$(head -c 64 "$WT/probe.out" | tr -d '[:space:]')
+  [[ $W == present || $W == absent ]] || W="neither present nor absent"
+fi
+if [[ $N == "$A" ]]; then echo "ok    nonce.txt holds A"; else echo "FAIL  nonce.txt holds A"; FAIL=1; fi
+if [[ $W == present || $W == absent ]]; then
+  echo "ok    the worker ran probe.sh"
+else
+  echo "FAIL  the worker ran probe.sh (probe.out: $W)"
+  FAIL=1
+fi
 for n in 1 2; do
-  if grep -qE "^turn $n: from=director status=[^ ]+ tokens=[0-9]+ " "$RUN/wait.out"; then
-    echo "ok    turn $n is from the director, with a token count"
+  if jq -enR --argjson n "$n" --arg b "$B" 'first(inputs | fromjson? | objects | select(.src == "gw" and .type == "turn" and .n == $n))
+      | .from == "director" and .status == "SUCCESS" and (.tokens | type) == "number" and (.answer | type) == "string" and (.answer | contains($b))' "$LOG" > /dev/null; then
+    echo "ok    turn $n: from the director, SUCCESS, a token count, and an answer holding B"
   else
-    echo "FAIL  turn $n is from the director, with a token count"
-    FAIL=1
-  fi
-  # A turn's block: its turn line, then the lines the worker wrote, each starting "| ".
-  if awk -v t="$n:" '/^turn [0-9]+: / { on = ($2 == t); next } !/^\| / { on = 0 } on' "$RUN/wait.out" | grep -qF -- "$B"; then
-    echo "ok    turn $n's answer holds B"
-  else
-    echo "FAIL  turn $n's answer holds B"
+    echo "FAIL  turn $n: from the director, SUCCESS, a token count, and an answer holding B"
     FAIL=1
   fi
 done
+if grep -q '^turn 1: from=director status=SUCCESS ' "$RUN/wait.out" && grep -q '^turn 2: from=director status=SUCCESS ' "$RUN/wait.out"; then
+  echo "ok    wait showed both turn lines with status=SUCCESS"
+else
+  echo "FAIL  wait showed both turn lines with status=SUCCESS"
+  FAIL=1
+fi
 TOKENS=$(sed -n 's/^GEMINI_WORKER_TOKENS=//p' "$RUN/wait.out" | tail -n 1)
 if [[ $TOKENS =~ ^([0-9]+)/$CAP$ ]] && ((BASH_REMATCH[1] < CAP)); then
   echo "ok    the worker's total, $TOKENS, is under the cap"
@@ -136,7 +153,10 @@ if ((rc == 0)); then echo "ok    stop exits 0"; else echo "FAIL  stop exits 0 (i
 s=""
 [[ -n $SP ]] && read -r s 2> /dev/null < "/proc/$SP/stat"
 read -r -a st <<< "${s##*) }"
-if [[ -n $SP && ${st[19]:-} != "$SSTART" ]] && ! pgrep -s "$SSID" > /dev/null; then
+# pgrep exits 1 for no match only; any other failure must not pass for an empty session.
+prc=2
+[[ -n $SSID ]] && { pgrep -s "$SSID" > /dev/null; prc=$?; }
+if [[ -n $SP && ${st[19]:-} != "$SSTART" ]] && ((prc == 1)); then
   echo "ok    the sleep and its session are gone"
 else
   echo "FAIL  the sleep and its session are gone"
@@ -161,8 +181,6 @@ jq -nrR '[inputs | fromjson? | objects] as $e
 jq -rR 'fromjson? | select(.src == "agy") | .ev | objects | .result | objects | "result: num_turns=\(.num_turns) status=\(.status)"' "$LOG"
 echo "result fields: $(jq -rR 'fromjson? | select(.src == "agy") | .ev | objects | .result | objects | keys[]' "$LOG" | sort -u | paste -sd' ' -)"
 echo "usage fields: $(jq -rR 'fromjson? | select(.src == "agy") | .ev | objects | .result | objects | .usage | objects | keys[]' "$LOG" | sort -u | paste -sd' ' -)"
-W=$(head -c 64 "$WT/probe.out" 2> /dev/null | tr -d '[:space:]')
-[[ $W == present || $W == absent ]] || W="neither present nor absent"
 echo "probe.out: $W"
 jq -rR 'fromjson? | select(.src == "gw" and .type == "turn") | "turn \(.n): from=\(.from) tokens=\(.tokens) total=\(.total)"' "$LOG"
 echo "total: $TOKENS"
