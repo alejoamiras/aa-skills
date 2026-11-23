@@ -43,7 +43,7 @@ class Refusal extends Error {}
 
 // Every line passes here: literal matches of the key and of the ids this call read are redacted, and control characters
 // flattened, so no line splits the log.
-class Log {
+export class Log {
   private hidden: string[] = [];
   constructor(private readonly out: (line: string) => void) {}
   hide(secret: string) {
@@ -134,7 +134,7 @@ function chainedId(dir: string, turn: number, uid: number): string {
   throw new Refusal("no earlier turn has an answer to follow up on");
 }
 
-function readKey(path: string, uid: number): string {
+export function readKey(path: string, uid: number): string {
   const m = KEY_LINE.exec(readOwned(path, uid, true));
   if (!m) throw new Refusal(`${path} must hold one line GEMINI_API_KEY=<letters, digits and . _ - only>`);
   return m[1];
