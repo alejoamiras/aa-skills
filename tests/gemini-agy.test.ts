@@ -4,7 +4,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { conversationOf, isStep, paneParts, resultOf, toolDone, userEvent } from "../skills/gemini/engines/agy-stream.ts";
@@ -32,7 +32,18 @@ beforeAll(() => {
   if (r.status !== 0) throw new Error(`the stub did not compile: ${r.stderr}`);
   stubSha = sha(stubBin);
 }, 120_000);
-afterAll(() => rmSync(root, { recursive: true, force: true }));
+// A failed or timed-out test can leave a stub's HUP- and TERM-ignoring child looping; agy's environment, and so every
+// process it starts, carries TMPDIR=<root>.
+afterAll(() => {
+  for (const pid of readdirSync("/proc").filter((n) => /^[0-9]+$/.test(n) && Number(n) !== process.pid)) {
+    try {
+      if (statSync(`/proc/${pid}`).uid === UID && `\0${readFileSync(`/proc/${pid}/environ`, "latin1")}`.includes(`\0TMPDIR=${root}\0`)) process.kill(Number(pid), "SIGKILL");
+    } catch {
+      // gone, or another user's
+    }
+  }
+  rmSync(root, { recursive: true, force: true });
+});
 
 let seq = 0;
 type Home = { dir: string; bin: string };
