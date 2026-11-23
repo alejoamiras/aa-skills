@@ -4,7 +4,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { conversationOf, isStep, paneParts, resultOf, toolDone, userEvent } from "../skills/gemini/engines/agy-stream.ts";
@@ -65,6 +65,11 @@ function makeRepo(): Repo {
 }
 
 type Opts = { cfg?: object | ((r: Repo) => object); cap?: number; limits?: Partial<Limits>; spawn?: Spawn; director?: number; home?: Home };
+const makeDeps = (home: Home, pane: string[], o: Opts, signals: Deps["signals"] = () => {}): Deps => ({
+  home: home.dir, uid: UID, now: () => Date.now(), timers: { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
+  limits: { ...LIMITS, grace: 300, poll: 20, ...o.limits }, spawn: o.spawn ?? ((file, args, opts) => spawn(file, args, opts)), signals,
+  input: () => {}, out: (line) => pane.push(line), env: WORKER_ENV,
+});
 type Worker = Awaited<ReturnType<typeof start>>;
 async function start(o: Opts = {}) {
   const home = o.home ?? makeHome();
@@ -74,14 +79,9 @@ async function start(o: Opts = {}) {
   mkdirSync(state, { recursive: true, mode: 0o700 });
   const pane: string[] = [];
   let stop = (_signal: string) => {};
-  const deps: Deps = {
-    home: home.dir, uid: UID, now: () => Date.now(), timers: { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
-    limits: { ...LIMITS, grace: 300, poll: 20, ...o.limits }, spawn: o.spawn ?? ((file, args, opts) => spawn(file, args, opts)),
-    signals: (fn) => {
-      stop = fn;
-    },
-    input: () => {}, out: (line) => pane.push(line), env: WORKER_ENV,
-  };
+  const deps = makeDeps(home, pane, o, (fn) => {
+    stop = fn;
+  });
   const done = pump([state, repo.wt, "gemini-4-carbon", "low", String(o.cap ?? 0), String(o.director ?? process.pid)], deps);
   return { home, repo, state, pane, done, stop: () => stop("SIGINT") };
 }
@@ -197,6 +197,13 @@ describe("worker", () => {
     expect(rec.sid).toBe(rec.pid);
     expect(rec.sid).not.toBe(ownSid);
     expect(rec.tty).toBe(0);
+    // Inherited: the three pipes only. After the exec, Bun's own runtime opens at most one descriptor of each other kind.
+    const fds: { fd: number; target: string }[] = rec.fds;
+    expect(fds.filter((d) => d.fd <= 2).map((d) => /^(pipe|socket):\[[0-9]+\]$/.test(d.target))).toEqual([true, true, true]);
+    const runtime = ["anon_inode:[eventpoll]", "anon_inode:[eventfd]", "/dev/urandom", `/proc/${rec.pid}/statm`];
+    const rest = fds.filter((d) => d.fd > 2).map((d) => d.target);
+    expect(rest.filter((t) => !runtime.includes(t))).toEqual([]);
+    expect(new Set(rest).size).toBe(rest.length);
     for (const name of ["memo", "env-exec", "send-to-mac", "claude", "codex"]) expect(spawnSync(join(SHIMS, name)).status).toBe(1);
     w.stop();
     const f = await finished(w);
@@ -440,6 +447,35 @@ describe("worker", () => {
     const f = await finished(w);
     expect([f.code, f.gone.reason]).toEqual([4, "agy exited before it could be checked"]);
     expect(records(w.home)[0].child).toBeGreaterThan(0);
+  }, 30_000);
+
+  test("tui runs the pinned agy with only an accepted argument, the listed environment, and the state dir as cwd", async () => {
+    const tui = async (home: Home, args: string[]) => {
+      writeFileSync(join(home.dir, "stub.json"), "{}");
+      const state = join(root, `tui${++seq}`);
+      mkdirSync(state, { recursive: true });
+      const pane: string[] = [];
+      const code = await pump(["tui", state, ...args], makeDeps(home, pane, {}));
+      expect(leaks(pane.join("\n"))).toBe(false);
+      return { code, state, pane, ran: records(home) };
+    };
+    const home = makeHome();
+    const ok = await tui(home, ["models"]);
+    expect(ok.code).toBe(0);
+    const rec = ok.ran[0];
+    expect([rec.args, rec.argv0, rec.cwd, rec.envNames, rec.keyMatches]).toEqual([["models"], home.bin, realpathSync(ok.state), ENV_NAMES, true]);
+    expect(rec.env.GEMINI_WORKER_ID.startsWith("tui.")).toBe(true);
+    const changed = makeHome();
+    copyFileSync(stubBin, `${changed.bin}.new`);
+    writeFileSync(`${changed.bin}.new`, "x", { flag: "a" });
+    renameSync(`${changed.bin}.new`, changed.bin);
+    const refused = await tui(changed, ["models"]);
+    expect([refused.code, refused.ran.length, refused.pane.some((l) => l.includes(`the approved one is ${stubSha}`))]).toEqual([2, 0, true]);
+    for (const args of [["--dangerously-skip-permissions"], ["--conversation", "not-a-uuid"], ["models", "extra"]]) {
+      const bad = makeHome();
+      const r = await tui(bad, args);
+      expect([r.code, r.ran.length]).toEqual([2, 0]);
+    }
   }, 30_000);
 
   test("a turn line counts tool steps, tool errors and stderr, and lists only that turn's paths and config change", async () => {

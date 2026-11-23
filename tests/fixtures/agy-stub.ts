@@ -2,7 +2,7 @@
 // executable, and a script's exe is its interpreter. It speaks agy 1.5.15's stream-json shapes. $HOME/stub.json picks its
 // behaviour; it records its argv, environment names, session and every message under $HOME/stub/, never the key's value.
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, readlinkSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 // Lines recorded from real runs (cwd and the tool list cut down), plus agy's documented error result. The last two are a
@@ -50,7 +50,20 @@ function writeAll(fd: number, text: string) {
   }
 }
 
+// Each open descriptor and what it names, read before the stub opens anything; the listing's own descriptor is closed
+// by the time its link is read, so it drops out.
+function descriptors(): { fd: number; target: string }[] {
+  return readdirSync("/proc/self/fd").flatMap((n) => {
+    try {
+      return [{ fd: Number(n), target: readlinkSync(`/proc/self/fd/${n}`) }];
+    } catch {
+      return [];
+    }
+  });
+}
+
 function stub() {
+  const fds = descriptors();
   const home = process.env.HOME ?? "";
   const cfg: Config = JSON.parse(readFileSync(join(home, "stub.json"), "utf8"));
   const mode = cfg.mode ?? "answer";
@@ -66,12 +79,13 @@ function stub() {
   child?.unref();
   const keyFile = readFileSync(join(home, ".config", "gemini", ".env"), "utf8").trim().replace(/^GEMINI_API_KEY=/, "");
   writeFileSync(at(".json"), JSON.stringify({
-    pid: process.pid, sid: Number(f[3]), tty: Number(f[4]), start: f[19], child: child?.pid, args: process.argv.slice(2),
+    pid: process.pid, sid: Number(f[3]), tty: Number(f[4]), start: f[19], child: child?.pid, args: process.argv.slice(2), cwd: process.cwd(), fds,
     argv0: readFileSync("/proc/self/cmdline", "utf8").split("\0")[0], envNames: Object.keys(process.env).sort(), keyMatches: key !== "" && key === keyFile,
     env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "GEMINI_API_KEY")),
   }));
-  if (mode === "exit") process.exit(3);
   const args = process.argv.slice(2);
+  if (mode === "exit") process.exit(3);
+  if (args[0] === "models") process.exit(0);
   put({ event: "init", conversation_id: CONVERSATION, init: { model: args[args.indexOf("--model") + 1], cwd: process.cwd(), tools: ["run_command"], permission_mode: "always-proceed" } });
   let s = 0;
   let n = 0;
