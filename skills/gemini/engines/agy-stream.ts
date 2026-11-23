@@ -36,6 +36,7 @@ export function textStep(ev: unknown): { index: number; text: string; done: bool
   return { index: safe(s.step_index) ? s.step_index : -1, text: s.text_delta, done: s.state === "DONE" };
 }
 export const withText = (ev: Json, text: string): Json => ({ ...ev, step_update: { ...(ev.step_update as Json), text_delta: text } });
+export const stepDone = (ev: unknown) => payload(ev, "step_update")?.state === "DONE";
 export function stepIndex(ev: unknown): number | undefined {
   const s = payload(ev, "step_update");
   return s && safe(s.step_index) ? s.step_index : undefined;

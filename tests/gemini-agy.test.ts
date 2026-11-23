@@ -315,8 +315,12 @@ describe("worker", () => {
     await ready(w);
     send(w, "split");
     await turns(w, 1);
-    const texts = entries(w).flatMap((e) => (e.src === "agy" && typeof e.ev?.step_update?.text_delta === "string" ? [e.ev.step_update.text_delta] : []));
-    expect(texts.slice(0, 2)).toEqual(["one [redacted] two", "[redacted] three"]);
+    const steps = entries(w).flatMap((e) => (e.src === "agy" && e.ev?.step_update?.step_type === "agent_response" ? [e.ev.step_update] : []));
+    expect(steps.slice(0, 3).map((u) => [u.state, u.text_delta])).toEqual([
+      ["DONE", "one [redacted] two"],
+      ["DONE", "[redacted] three"],
+      ["DONE", "four [redacted]"],
+    ]);
     w.stop();
     await finished(w);
   }, 30_000);
@@ -419,7 +423,7 @@ describe("worker", () => {
     await finished(w);
   }, 30_000);
 
-  test("a tool step that finishes after its turn's result is logged but leaves the worker idle", async () => {
+  test("a tool step that finishes after its turn's result is logged, leaves the worker idle, and counts in no turn", async () => {
     const w = await start({ cfg: { mode: "late-done", delay: 200 }, limits: { silence: 1000 } });
     await ready(w);
     send(w, "one");
@@ -430,6 +434,9 @@ describe("worker", () => {
     const es = entries(w);
     const late = es.findIndex((e) => e.src === "agy" && e.ev?.step_update?.step_type === "tool" && e.ev.step_update.state === "DONE");
     expect(late).toBeGreaterThan(es.findIndex((e) => e.type === "turn"));
+    send(w, "two");
+    await turns(w, 2);
+    expect(gw(w, "turn").map((t) => [t.tools, t.tool_errors])).toEqual([[0, 0], [0, 0]]);
     w.stop();
     await finished(w);
   }, 30_000);

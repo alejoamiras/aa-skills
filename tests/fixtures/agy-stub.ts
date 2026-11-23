@@ -116,7 +116,8 @@ function stub() {
       put(toolStep(s, "DONE", i < (t.toolErrors ?? 0) ? "exit status 1" : undefined));
     }
     for (let i = 0; i < (t.stderr ?? 0); i++) writeAll(2, `stub notice ${i}\n`);
-    // The key split across two ACTIVE deltas of one step, then across an ACTIVE and its DONE.
+    // The key split across two ACTIVE deltas of one step, across an ACTIVE and its DONE, then across two ACTIVE deltas
+    // of a step whose DONE carries no text.
     if (cfg.split) {
       const half = key.length >> 1;
       put(step(s, { state: "ACTIVE", step_type: "agent_response", text_delta: `one ${key.slice(0, half)}` }));
@@ -124,6 +125,9 @@ function stub() {
       put(step(s++, { state: "DONE", step_type: "agent_response", text_delta: " two" }));
       put(step(s, { state: "ACTIVE", step_type: "agent_response", text_delta: key.slice(0, half) }));
       put(step(s++, { state: "DONE", step_type: "agent_response", text_delta: `${key.slice(half)} three` }));
+      put(step(s, { state: "ACTIVE", step_type: "agent_response", text_delta: `four ${key.slice(0, half)}` }));
+      put(step(s, { state: "ACTIVE", step_type: "agent_response", text_delta: key.slice(half) }));
+      put(step(s++, { state: "DONE", step_type: "agent_response" }));
     }
     const late = mode === "late-done" && n === 1 ? s++ : undefined;
     if (late !== undefined) put(toolStep(late, "ACTIVE"));
@@ -148,7 +152,7 @@ function stub() {
     if (mode === "duplicate") put(result(n, answer, bumped));
     if (mode === "late-duplicate") last = result(n, answer, bumped);
     if (mode === "background" && n === 1) setTimeout(() => put(step(s++, { state: "ACTIVE", step_type: "agent_response", text_delta: "unasked" })), cfg.delay ?? 100);
-    if (late !== undefined) setTimeout(() => put(toolStep(late, "DONE")), cfg.delay ?? 100);
+    if (late !== undefined) setTimeout(() => put(toolStep(late, "DONE", "exit status 1")), cfg.delay ?? 100);
     // A turn no message asked for: num_turns moves on without one.
     if (mode === "unasked-turn" && n === 1) {
       setTimeout(() => {

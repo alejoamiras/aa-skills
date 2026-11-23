@@ -13,7 +13,7 @@ import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { Log, readKey } from "./api.ts";
 import {
-  conversationOf, fit, isObj, isStep, type Json, lines, paneText, type Result, resultOf, stepIndex, tail, textStep, toolDone, userEvent, withText,
+  conversationOf, fit, isObj, isStep, type Json, lines, paneText, type Result, resultOf, stepDone, stepIndex, tail, textStep, toolDone, userEvent, withText,
 } from "./agy-stream.ts";
 
 const SUBAGENT = "You are a subagent. Don't run memo.";
@@ -451,10 +451,11 @@ class Worker {
       return this.finish(r);
     }
     const text = textStep(ev);
+    const index = stepIndex(ev);
     if (text) this.buffer(ev as Json, text);
+    else if (index !== undefined && stepDone(ev) && this.texts.has(index)) this.flushText(index, ev as Json);
     else this.write("agy", { ev });
     if (!isStep(ev)) return;
-    const index = stepIndex(ev);
     if (index !== undefined) this.maxStep = Math.max(this.maxStep, index);
     // step_index rises across the conversation, so a step at or below the last result's highest is that turn's late DONE.
     // Any later step, asked for or not, is a turn the watchdog bounds.
@@ -463,7 +464,7 @@ class Worker {
       this.background = true;
     }
     const t = toolDone(ev);
-    if (t && !this.count.steps.has(t.index)) {
+    if (t && t.index > this.settledStep && !this.count.steps.has(t.index)) {
       this.count.steps.add(t.index);
       this.count.tools++;
       if (t.error) this.count.toolErrors++;
@@ -617,7 +618,7 @@ class Worker {
     this.end(`the pump failed: ${this.log.field(errText(e))}`, NEXT.bug, 1);
   }
 
-  // The one way a worker ends once its log is open: buffered text, the gone line, agy's teardown, then the exit code.
+  // The gone line is written before teardown starts, so wait can report the end while agy's processes are still dying.
   private end(reason: string, next: string, code: number) {
     if (this.ended) return;
     this.ended = true;
@@ -649,11 +650,11 @@ class Worker {
     if (t.done) this.flushText(t.index);
   }
 
-  private flushText(index: number) {
+  private flushText(index: number, done?: Json) {
     const b = this.texts.get(index);
     if (!b) return;
     this.texts.delete(index);
-    this.write("agy", { ev: withText(b.last, b.bytes > TEXT_MAX ? `[${b.bytes} bytes of text, not kept]` : b.parts.join("")) });
+    this.write("agy", { ev: withText(done ?? b.last, b.bytes > TEXT_MAX ? `[${b.bytes} bytes of text, not kept]` : b.parts.join("")) });
   }
 
   private flushTexts() {

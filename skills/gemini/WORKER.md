@@ -111,7 +111,7 @@ turn <n>: from=director|owner|agy status=<s> tokens=<t> tools=<n> tool_errors=<n
 | <the answer, last 8,000 bytes>
 ```
 
-Every line the worker wrote starts with `| `: paths, answers, and the log lines a timeout or an unread answer prints. A line without it comes from the script, and a turn or `gone:` line is always one line.
+Paths, answers, and the log lines a timeout or an unread answer prints start with `| `. The turn line's `status` and the `gone:` line's reason also come from the worker's log: each is flattened to one line, but not prefixed. Every other line comes from the script.
 
 - `from=director` answers your message, and `from=owner` a line the owner typed in the pane. `from=agy` is a result no message asked for, whose usage still counts. When a `from=agy` turn follows yours, read both answers.
 - `tokens` is what the turn added to the running total; `?` means its usage was unreadable. `GEMINI_WORKER_TOKENS` is the whole worker's total: `agy` reports cumulative counts, cached reads included.

@@ -216,12 +216,19 @@ for _ in $(seq 50); do tmux -L "$SOCK" has-session -t =gemini-w1 2> /dev/null ||
 gws_t "Ctrl-C: gone: stopped by SIGINT, and the session closes" sh -c '! tmux -L "$1" has-session -t =gemini-w1 && jq -eR "fromjson? | select(.type == \"gone\") | .reason == \"stopped by SIGINT\"" "$0"' "$L1" "$SOCK"
 gws_t "Ctrl-C: nothing agy started is left, its child ignoring HUP and TERM included" sh -c "$EMPTY" "$R1"
 
-# --- a second start of the name, then its director dies ---------------------------------------------------------------
-echo '{"child":true}' > "$HOME/stub.json"
+# --- a second start of the name, a late tool step, then its director dies ----------------------------------------------
+echo '{"mode":"late-done","delay":300,"child":true}' > "$HOME/stub.json"
 python3 -c "$DIRECTOR" "$FLAG" "$S/d2" "$CLI" start "$WT1" & D2=$!
 DIRS+=("$D2")
 read -r -t 60 rc <> "$GWS_FIFO"
 gws_t "start: a second start of a name moves the leftover dir aside, log and all" sh -c '[ "$0" = 0 ] && grep -q "stopped by SIGINT" "$1"/w1.*/log.ndjson && ! grep -q "stopped by SIGINT" "$1/w1/log.ndjson"' "$rc" "$SR"
+CLAUDE_PID=$D2 "$CLI" send w1 "$S/m1" > /dev/null
+CLAUDE_PID=$D2 "$CLI" wait w1 0 --timeout 20 > /dev/null
+LATE='[inputs | fromjson? | objects] | (map(.src == "gw" and .type == "turn") | index(true)) as $t
+  | $t != null and (.[$t:] | any(.src == "agy" and (.ev | type) == "object" and .ev.step_update.step_type? == "tool" and .ev.step_update.state? == "DONE"))'
+for _ in $(seq 50); do jq -enR "$LATE" "$L1" > /dev/null && break; sleep 0.1; done
+CLAUDE_PID=$D2 "$CLI" wait w1 1 --timeout 3 > "$S/lw"; rc=$?
+gws_t "wait: a tool step that finishes after its turn's result leaves the worker idle" sh -c '[ "$0" = 3 ] && jq -enR "$3" "$2" && grep -qx GEMINI_WORKER_STATE=idle "$1" && grep -qx "idle with an empty queue: nothing to wait for" "$1"' "$rc" "$S/lw" "$L1" "$LATE"
 R2="$HOME/stub/$(jq -rR 'fromjson? | select(.type == "spawned") | .pid' "$L1").json"
 kill "$D2"
 t0=$SECONDS
@@ -304,13 +311,16 @@ sed -i '/"type":"ready"/d' "$SR/k2/log.ndjson"
 read -r DL DS < <(setsid sh -c 'sleep 300 < /dev/null > /dev/null 2>&1 & echo "$$ $!"')
 DIRS+=("$DS")
 jq -c --argjson p "$DL" 'if .src == "gw" and .type == "spawned" then .pid = $p | .sid = $p else . end' "$SR/k2/log.ndjson" > "$S/k2.log" && mv "$S/k2.log" "$SR/k2/log.ndjson"
+# kill -0 succeeds for a zombie too: the state field must not be Z.
+LIVE='{ sub(/.*\) /, ""); exit ($1 == "Z") }'
+gws_t "fixture: the decoy's sleep is live before the stops" awk "$LIVE" "/proc/$DS/stat"
 CLAUDE_PID=$D7 "$CLI" stop k1 > /dev/null & P1=$!
 CLAUDE_PID=$D8 "$CLI" stop k2 > /dev/null & P2=$!
 wait "$P1"; rc=$?
 wait "$P2"; rc2=$?
 gws_t "pump killed: stop exits 0 and leaves nothing agy started, the cleared-environment child included" sh -c '[ "$0" = 0 ] && sh -c "$2" "$1"' "$rc" "$R7" "$EMPTY"
 gws_t "pump killed, ready line gone: stop still ends everything from the spawned line" sh -c '[ "$0" = 0 ] && sh -c "$2" "$1"' "$rc2" "$R8" "$EMPTY"
-gws_t "pump killed: a dead agy's session number, now an unrelated session, is left alone" kill -0 "$DS"
+gws_t "pump killed: a dead agy's session number, now an unrelated session, is left alone" awk "$LIVE" "/proc/$DS/stat"
 kill "$DS"
 
 # --- tui ----------------------------------------------------------------------------------------------------------------
