@@ -1,0 +1,5 @@
+#!/bin/bash
+# Answers as memo, env-exec, send-to-mac, claude and codex through links: the first three reach outside the worker's box,
+# the last two spend other subscriptions. An absolute path bypasses it, so it stops accidents, not a determined worker.
+echo "${0##*/}: a Gemini worker never runs this command; report that it was refused and stop that line of work" >&2
+exit 1

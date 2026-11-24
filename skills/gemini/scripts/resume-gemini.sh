@@ -10,6 +10,13 @@ unset CDPATH
 GEMINI_DIR="$1"
 PROMPT_FILE="$2"
 [[ -f "$PROMPT_FILE" && -r "$PROMPT_FILE" ]] || { echo "ERROR: prompt file not found: $PROMPT_FILE" >&2; exit 2; }
+# By identity only, before any turn file exists: the engine would refuse to send it, but the copy would stay behind.
+for h in "$(getent passwd "$UID" 2> /dev/null | cut -d: -f6)" "${HOME:-}"; do
+  if [[ -n "$h" && "$PROMPT_FILE" -ef "$h/.config/gemini/.env" ]]; then
+    echo "ERROR: refusing the key file as a prompt: never send a secret to Gemini" >&2
+    exit 2
+  fi
+done
 
 while [[ "$GEMINI_DIR" == */ && "$GEMINI_DIR" != / ]]; do GEMINI_DIR="${GEMINI_DIR%/}"; done
 PRIVATE=""

@@ -25,8 +25,11 @@ jobs:
           filters: |
             relevant:
               - 'skills/gemini/**'
+              - 'lib/director.sh'
+              - 'bin/agent-worktree'
               - 'tests/smoke-gemini.sh'
               - 'tests/gemini-api.test.ts'
+              - 'tests/fixtures/agy-stub.ts'
               - 'tests/**'
               - 'checks/**'
               - '.github/actions/**'
@@ -46,8 +49,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
+      - name: Install tmux
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends tmux
       - run: bash tests/smoke-gemini.sh
       - run: bun test tests/gemini-api.test.ts
+      - run: bun test tests/gemini-agy.test.ts
+      - run: bash tests/smoke-gemini-worker.sh
 
   gemini-status:
     needs: [changes, smoke]

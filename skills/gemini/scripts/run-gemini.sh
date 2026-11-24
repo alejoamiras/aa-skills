@@ -14,6 +14,13 @@ EFFORT="${3:-high}"
 MODEL="${4:-}"
 
 [[ -f "$PROMPT_FILE" && -r "$PROMPT_FILE" ]] || { echo "ERROR: prompt file not found: $PROMPT_FILE" >&2; exit 2; }
+# By identity only, before any turn file exists: the engine would refuse to send it, but the copy would stay behind.
+for h in "$(getent passwd "$UID" 2> /dev/null | cut -d: -f6)" "${HOME:-}"; do
+  if [[ -n "$h" && "$PROMPT_FILE" -ef "$h/.config/gemini/.env" ]]; then
+    echo "ERROR: refusing the key file as a prompt: never send a secret to Gemini" >&2
+    exit 2
+  fi
+done
 # Checked, never entered or recorded: it catches a shifted call such as `run-gemini.sh p.md low`.
 [[ -d "$CWD" ]] || { echo "ERROR: cwd is not a directory: $CWD" >&2; exit 2; }
 case "$EFFORT" in
