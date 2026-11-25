@@ -44,7 +44,8 @@ orchy_check_public() {
     [ -z "$hits" ] || { echo "$kind:"; cut -c1-160 <<<"$hits" | head -5; rc=1; }
   done
   gl=$(gitleaks_path); command -v "$gl" >/dev/null || { echo "refused: $gl not found, so the secret check cannot run" >&2; exit 2; }
-  "$gl" stdin --no-banner --redact --exit-code 3 -l error < "$f" >/dev/null 2>&1; r=$?
+  # an inline allow comment travels with the text, so whoever wrote the text could waive its own scan
+  "$gl" stdin --no-banner --redact --ignore-gitleaks-allow --exit-code 3 -l error < "$f" >/dev/null 2>&1; r=$?
   case $r in 0) ;; 3) echo "SECRET: gitleaks found a secret"; rc=1;; *) echo "refused: gitleaks failed (exit $r)" >&2; exit 2;; esac
   exit $rc
 }

@@ -113,7 +113,7 @@ const textOf = (b: Buffer, o: O | null) => (o ? screenText(o) : b.toString());
 export function leaks(gl: string, text: string): boolean {
   if (text === "") return false;
   let code: number | null;
-  try { code = Bun.spawnSync([gl, "stdin", "--no-banner", "--redact", "--exit-code", "3", "-l", "error"], { stdin: Buffer.from(text), stdout: "ignore", stderr: "ignore" }).exitCode; }
+  try { code = Bun.spawnSync([gl, "stdin", "--no-banner", "--redact", "--ignore-gitleaks-allow", "--exit-code", "3", "-l", "error"], { stdin: Buffer.from(text), stdout: "ignore", stderr: "ignore" }).exitCode; }
   catch { return down(`${gl} not found, so the secret check cannot run`); }
   return code === 3 ? true : code === 0 ? false : down(`gitleaks failed (exit ${code})`);
 }

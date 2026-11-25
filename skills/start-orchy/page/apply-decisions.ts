@@ -84,7 +84,7 @@ function vet(outbound: [string, string][]) {
     writeFileSync(ledger, (existsSync(asks) ? readFileSync(asks, "utf8").replace(/\n?$/, "\n") : "") + raw.map(t => JSON.stringify({ id: "page", text: t })).join("\n") + "\n");
     const ov = Bun.spawnSync(["bash", join(import.meta.dir, "../scripts/overlap.sh"), ledger, ...files]);
     const copied = outbound.filter((_, i) => ov.stdout.toString().includes(`overlap: ${files[i]} `)).map(([k]) => k);
-    const secret = (t: string) => Bun.spawnSync([process.env.ORCHY_GITLEAKS ?? "gitleaks", "stdin", "--no-banner", "--redact", "--exit-code", "3", "-l", "error"], { stdin: new TextEncoder().encode(t) }).exitCode;
+    const secret = (t: string) => Bun.spawnSync([process.env.ORCHY_GITLEAKS ?? "gitleaks", "stdin", "--no-banner", "--redact", "--ignore-gitleaks-allow", "--exit-code", "3", "-l", "error"], { stdin: new TextEncoder().encode(t) }).exitCode;
     let gl = -1; try { gl = secret(outbound.map(([, t]) => t).join("\n")); } catch {}
     rmSync(dir, { recursive: true, force: true });
     if (ov.exitCode !== 0 && ov.exitCode !== 1) { console.error("refused: the copy check could not run"); process.exit(2); }

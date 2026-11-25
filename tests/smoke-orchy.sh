@@ -525,6 +525,7 @@ printf 'aws_access_key_id = %s\naws_secret_access_key = %s\n' "AKIA""QYLPMN5HHHF
 ORCHY_GITLEAKS=gitleaks "$ORCHY" check-public "$T/p0" >/dev/null || fail "check-public refused clean text"
 for n in 1 2; do if "$ORCHY" check-public "$T/p$n" >/dev/null 2>&1; then fail "check-public accepted p$n: $(cat "$T/p$n")"; fi; done
 o=$(ORCHY_GITLEAKS=gitleaks "$ORCHY" check-public "$T/p3" 2>&1 || true); grep -q 'SECRET' <<<"$o" || fail "the real gitleaks missed the planted secret: $o"
+sed "s/\$/ # gitleaks"":allow/" "$T/p3" > "$T/p4"; o=$(ORCHY_GITLEAKS=gitleaks "$ORCHY" check-public "$T/p4" 2>&1 || true); grep -q 'SECRET' <<<"$o" || fail "an inline allow comment let the planted secret through check-public: $o"
 "$ORCHY" check-public --no-sensitive "$T/p2" >/dev/null || fail "--no-sensitive still applied the sensitive pattern"
 o=$(ORCHY_GITLEAKS=no-such-gitleaks "$ORCHY" check-public "$T/p0" 2>&1; echo "rc=$?"); grep -q 'rc=2' <<<"$o" || fail "check-public without gitleaks did not refuse: $o"
 cp "$ORCHY_HOME/local.json" "$T/local.bak"; echo '{' > "$ORCHY_HOME/local.json"
