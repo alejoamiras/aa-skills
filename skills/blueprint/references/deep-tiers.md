@@ -34,7 +34,7 @@ Same shape as `/blueprint deep`, but with an upfront research phase AND a split 
 4. **Contradiction-check** (codex + fable + gemini on consolidated plan + ledger), as in `deep`.
 5. **Audit Round 1**: codex + fable subagent + gemini in parallel, each with adversarial / security / assumption-attack asks.
 6. Iterate on Round 1 findings; document adopted vs rejected.
-7. **Audit Round 2 (split)** — instead of resuming both sessions (which compounds anchoring):
+7. **Audit Round 2 (split)** — instead of resuming every session (which compounds anchoring):
    - **Resumed self-critique** (codex resume, and Gemini resumed beside it with `resume-agy.sh` on the same follow-up file): *"Look at your prior findings. What did you miss? What did you over-assert? What second-order risks did your initial review not surface? Where were you anchored on the plan's framing instead of attacking it?"*
    - **Fresh hostile audit** (NEW fable subagent, no prior context): "You're seeing this plan for the first time. Attack it. Find what the prior reviewers missed because they were already inside the plan's framing."
 8. Iterate on Round 2 findings.

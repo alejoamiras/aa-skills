@@ -8,7 +8,7 @@ Both are written into plan.md, audited, and approved with the rest of the plan; 
 
 - **Review pipelining** (multi-arc plans, per boundary). Delivery may mark an arc boundary `pipelined` and name the interfaces arc N+1 consumes from arc N as frozen. At that boundary:
   - In this order: commit arc N to a clean tree, run `gh stack add <arc-N+1-branch>` in the plan worktree (which releases arc N's branch), then check out arc N's branch in a review worktree (`git worktree add <path> <arc-N-branch>`), with its own deps and run-isolation claims.
-  - Codex reviews in that worktree, and fixes are committed there, so each resumed pass sees them. Meanwhile the plan worktree implements arc N+1, but its loop does not start yet.
+  - Codex and Gemini review in that worktree, and fixes are committed there, so each resumed pass sees them. Meanwhile the plan worktree implements arc N+1, but its loop does not start yet.
   - No `gh stack sync` or rebase while the review runs, even though arc N moves.
   - When N's loop converges: checkpoint N+1 to a clean tree, run one `gh stack sync`, rerun N+1's gates, and remove the review worktree. Only then may N+1's loop start.
   - A fix that changes a frozen interface ends pipelining at that boundary: finish N's loop, sync, then rework N+1.

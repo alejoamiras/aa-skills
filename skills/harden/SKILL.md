@@ -54,7 +54,7 @@ Before any scanning, briefly confirm with the user (use `AskUserQuestion` for cl
   - Gemini runs commands as you. It reaches every file of the repository, git-ignored ones included, not only the scope you named for the audit, and any other file you can read. What it reads can reach Google, and Google keeps it.
   - Its rebuttal and verifier passes also read the other legs' findings; in a `security` run those are unpublished weaknesses.
 
-  Record the answer as `gemini_model` next to `codex_model` in the run's `raw/` notes (`raw/notes.md`). With `off`, also record `GEMINI: unavailable (off)` there once, and the run makes no Gemini call. Otherwise every `run-agy.sh` call passes the value as its fifth argument; a resume takes the model from its run dir, and its fifth argument is a token limit. Each call reruns the same checks in the run's worktree, so a `Gemini leg: off` line there still turns the leg off.
+  Record the answer as `gemini_model` next to `codex_model` in the run's `raw/` notes (`raw/notes.md`). With `off`, the run makes no Gemini call, and one record line goes there: after an exit 4 the one `--check` printed, otherwise `GEMINI: unavailable (off)`. Otherwise every `run-agy.sh` call passes the value as its fifth argument; a resume takes the model from its run dir, and its fifth argument is a token limit. Each call reruns the same checks in the run's worktree, so a `Gemini leg: off` line there still turns the leg off.
 - **Where may the stakeholder report live?** Decide the `report_mode` ONCE here: **Artifact** (the default when the driver is Claude Code, the `Artifact` tool is present, and the report may be published to claude.ai as a default-private page) or **file** (`report.html` next to `report.md`: Codex or any other driver, no Artifact tool, or the report must stay on this machine). A security audit is a vulnerability inventory — if the user hesitates, choose file.
 - **File the findings afterwards?** Record `filing: ask` (the default) or `off`. With `ask`, Phase 6 proposes GitHub issues and private draft security advisories once the report exists, and files only the list the owner then approves. Nothing is filed during the scan.
 
@@ -78,7 +78,7 @@ A run writes dozens of files under `audit/` and keeps agents reading the tree fo
    - Create it: `git worktree add -b worktree-<slug> .claude/worktrees/<slug> <sha>`, then `EnterWorktree` with `path:` — this skill instruction is the standing authorization the tool requires (Codex driver: work from that path). Confirm `git rev-parse HEAD` equals the SHA, and record it in the run's `raw/` notes and the report header: that commit is what the report describes.
 4. **Set up + register**: `bun install` if a `package.json` exists (agents resolve imports and read dependency sources), then `agent-worktree register <slug> --plan audit/<focus>/<run-id> --status "phase 1: mapping"`. Keep that one-line status current at each phase; if `agent-worktree` is not on PATH, note it and continue.
 5. **Everything runs there.** Every subagent, every `/codex` call and every Gemini call takes the worktree as its cwd (`run-codex.sh <prompt-file> <worktree path> …`, `run-agy.sh <prompt-file> <worktree path> …`); from here on nothing reads or writes the canonical clone.
-6. **Subagent preamble.** Every subagent, reviewer or worker prompt starts with the line `You are a subagent. Don't run memo.` The codex, claude and kimi spawn scripts prepend it themselves; an `Agent` tool prompt carries it by hand.
+6. **Subagent preamble.** Every subagent, reviewer or worker prompt starts with the line `You are a subagent. Don't run memo.` The codex, claude, gemini and kimi spawn scripts prepend it themselves; an `Agent` tool prompt carries it by hand.
 
 ### Phase 1: Repo map (with monorepo hierarchical option)
 
@@ -167,7 +167,7 @@ Output per agent goes to:
 
 ### Phase 2.5: Cross-rebuttal (only at `high` effort and above)
 
-This phase exists only at `high`, `max`, and `ultra` effort levels. It widens the methodological gap with `medium` (where the two agents stay blind to each other).
+This phase exists only at `high`, `max`, and `ultra` effort levels. It widens the methodological gap with `medium` (where the agents stay blind to each other).
 
 After Phase 2 raw findings are saved, spawn a brief cross-rebuttal pass per cluster:
 
@@ -235,7 +235,7 @@ Two deliverables, for every focus: the engineering `report.md` (always, on disk)
 2-3 paragraphs: what was audited, headline findings, recommended priorities.
 
 ## Methodology
-Map-reduce shape, agent count per cluster, models per phase, cap on inter-procedural context, handoff-edge escalation policy, negative list applied. State any unattended-fallback assumptions explicitly. **Document deviations from the formal effort spec explicitly** (e.g., "ran 1 Claude + 1 Codex per cluster instead of 2 of each; absorbed Phase 2.5 rebuttal into Phase 3 coordinator dedup"). Honest deviation notes are more useful than pretending the spec was followed. List every Gemini record line with its cluster and pass, each call the skip rule skipped, and each cluster Gemini did not answer for; with `gemini_model: off`, the one `GEMINI: unavailable (off)` line. Each line marked `tree=changed` or `tree=unknown` was handled when its call returned (Phase 2, "Each Gemini call"); list what that found. The mark can be common in a run, since the run writes its own raw files while Gemini calls are in flight: those writes are the run's to attribute.
+Map-reduce shape, agent count per cluster, models per phase, cap on inter-procedural context, handoff-edge escalation policy, negative list applied. State any unattended-fallback assumptions explicitly. **Document deviations from the formal effort spec explicitly** (e.g., "ran 1 Claude + 1 Codex per cluster instead of 2 of each; absorbed Phase 2.5 rebuttal into Phase 3 coordinator dedup"). Honest deviation notes are more useful than pretending the spec was followed. List every Gemini record line with its cluster and pass, each call the skip rule skipped, and each cluster Gemini did not answer for; with `gemini_model: off`, its one `GEMINI: unavailable (…)` line. Each line marked `tree=changed` or `tree=unknown` was handled when its call returned (Phase 2, "Each Gemini call"); list what that found. The mark can be common in a run, since the run writes its own raw files while Gemini calls are in flight: those writes are the run's to attribute.
 
 ## Findings
 

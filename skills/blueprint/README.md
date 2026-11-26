@@ -101,6 +101,7 @@ implementations-plan/
 │   ├── lessons/phase-N.md# COMMITTED — per-phase debugging logs
 │   ├── audit-codex.md    # local only — codex audit transcript
 │   ├── audit-fable.md    # local only — fable audit transcript (mid+)
+│   ├── audit-gemini.md   # local only — gemini audit transcript
 │   ├── plan-<family>.md  # local only — competing drafts (deep+)
 │   └── eli5.html         # local only — ELI5 FALLBACK (primary is a shareable Artifact)
 └── archive/<closed-plan>/ # committed, but out of the search path
