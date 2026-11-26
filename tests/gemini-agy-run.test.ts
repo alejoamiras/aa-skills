@@ -112,15 +112,24 @@ function leftovers(marker: string, sids: number[]): number[] {
 }
 
 // whole: a run whose stub prints the key split inside one string, which the log keeps; no file may hold it whole.
-type Opts = { cfg?: object; prompt?: string; turn?: number; conversation?: string; clock?: () => number; whole?: boolean };
+// late: agy starts as a bun child that execs the stub that many ms after the spawn returns.
+type Opts = { cfg?: object; prompt?: string; turn?: number; conversation?: string; clock?: () => number; whole?: boolean; late?: number };
 // One engine run. After it: no run-dir file holds a piece of the canary, and nothing a stub started is left.
 async function go(x: Ctx, o: Opts = {}) {
   writeFileSync(join(x.home.dir, "stub.json"), JSON.stringify(o.cfg ?? { script: FINE }));
   const turn = o.turn ?? 1;
   const out: string[] = [];
+  // Counted here: a stub swept as it starts never writes its record.
+  let spawns = 0;
   const deps: RunDeps = {
     home: x.home.dir, uid: UID, now: () => Date.now(), timers: { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
-    limits: { ...LIMITS, grace: 300, poll: 20 }, spawn: (file, args, opts) => spawn(file, args, opts), signals: () => {}, input: () => {},
+    limits: { ...LIMITS, grace: 300, poll: 20 },
+    spawn: (file, args, opts) => {
+      spawns++;
+      if (o.late === undefined) return spawn(file, args, opts);
+      return spawn(process.execPath, [join(import.meta.dir, "fixtures", "exec-later.ts"), String(o.late), x.home.bin, ...args], { ...opts, argv0: process.execPath });
+    },
+    signals: () => {}, input: () => {},
     out: (line) => out.push(line), env: WORKER_ENV, stdin: async () => Buffer.from(o.prompt ?? "Review the repository."), clock: o.clock ?? (() => performance.now()),
   };
   const code = await run([x.dir, x.top, "gemini-4-neon", "high", "100000", String(turn), ...(turn > 1 ? [o.conversation ?? CONVERSATION] : [])], deps);
@@ -134,7 +143,7 @@ async function go(x: Ctx, o: Opts = {}) {
   const result = read("result", "json");
   // biome-ignore lint/suspicious/noExplicitAny: result.json and log entries are free-form JSON
   const log: Record<string, any>[] = (read("log", "ndjson") ?? "").split("\n").filter(Boolean).map((l) => JSON.parse(l));
-  return { code, out, result: result === undefined ? undefined : JSON.parse(result), response: read("response", "md"), log };
+  return { code, out, result: result === undefined ? undefined : JSON.parse(result), response: read("response", "md"), log, spawns };
 }
 
 // Whether the run's log comes to hold text within 5 s; polled every 5 ms, so it answers within one of the sweep's 50 ms waits.
@@ -282,12 +291,12 @@ describe("run", () => {
     const y = setup();
     const w = await go(y, { cfg: { script: [{ answer: "a", usage: [101_000, 0, 0] }, { hold: true }], resume: FINE, ...moved } });
     expect([w.code, w.result.reason, records(y).length, w.response]).toEqual([1, "error", 2, undefined]);
-    // A result naming no conversation is accepted: no failed result of agy's has been seen to show it always names one.
+    // A failed result naming no conversation keeps its own reason: no failed result of agy's has been seen to name one.
     const unnamed = { event: "init", init: { model: "gemini-4-neon", permission_mode: "always-proceed" } };
     const cases: [string, object[], string | null][] = [
       ["a later init naming none", [{ raw: JSON.stringify(unnamed) }, ...FINE], "error"],
       ["a result naming another", [{ answer: "fine" }, { result: "SUCCESS", response: "fine", conversation: other }], "error"],
-      ["a result naming none", [{ answer: "fine" }, { result: "SUCCESS", response: "fine", conversation: false }], null],
+      ["a SUCCESS result naming none", [{ answer: "fine" }, { result: "SUCCESS", response: "fine", conversation: false }], "error"],
       ["a failed result naming null", [{ answer: "" }, { result: "ERROR", error: "Error 402: prepayment credits are depleted", conversation: null }], "cap"],
     ];
     for (const [label, script, reason] of cases) {
@@ -353,6 +362,23 @@ describe("run", () => {
     }
   }, 30_000);
 
+  test("after a lost write no later line is handled and no wrap-up starts, though the step in hand keeps its reason", async () => {
+    const usage = { input_tokens: 101_000, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 101_000 };
+    const crossing = { event: "step_update", step_update: { step_index: 8, state: "DONE", step_type: "agent_response", text_delta: "a", usage } };
+    const tool = { event: "step_update", step_update: { step_index: 7, state: "DONE", step_type: "tool", tool_name: "run_command", tool_info: { name: "run_command", output: "ok" } } };
+    const rows: [string, object[], string][] = [
+      // One write, so one chunk: the tool step's log line fails and the crossing step comes in the same handler call.
+      ["a crossing after the lost write", [{ sleep: 300 }, { raw: `${JSON.stringify(tool)}\n${JSON.stringify(crossing)}` }, { hold: true }], "error"],
+      ["a crossing whose own write is lost", [{ sleep: 300 }, { raw: JSON.stringify(crossing) }, { hold: true }], "limit"],
+    ];
+    for (const [label, script, reason] of rows) {
+      const x = setup();
+      const swapped = full(x, "log.ndjson", '"user_input"');
+      const r = await go(x, { cfg: { script, resume: FINE } });
+      expect([label, await swapped, r.code, r.result.reason, r.spawns]).toEqual([label, true, 1, reason, 1]);
+    }
+  }, 30_000);
+
   test("verdicts: empty, denied, cap and error, and a step without usage; a failed first turn reports one whole usage tuple", async () => {
     const spent = "agent executor error: generating and executing: Error 402, Message: Your prepayment credits are depleted. Status: RESOURCE_EXHAUSTED";
     const steps = { answer: "", usage: [1000, 900, 0] };
@@ -371,6 +397,11 @@ describe("run", () => {
       expect([label, r.code, r.result.reason, r.response, usage ?? got, r.result.denied_actions]).toEqual([label, 1, reason, undefined, got, denied]);
     }
   }, 60_000);
+
+  test("agy's file is checked once its exec has happened, though the spawn returned before it", async () => {
+    const r = await go(setup(), { late: 300 });
+    expect([r.code, r.out, r.response]).toEqual([0, [], "fine"]);
+  }, 30_000);
 
   test("a run dir not directly under the engine's home's own .cache/gemini-leg/ is refused before the key file is opened", async () => {
     const x = setup();

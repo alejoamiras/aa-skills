@@ -157,8 +157,17 @@ async function sweep(d: Deps, lim: Limits, entry: string, agy?: Identity) {
   }
 }
 
-// When spawn returns, the exec has happened, so /proc/<pid>/exe names the executed inode; an agy already gone has none.
-const exeOf = (pid: number | undefined): Stats | undefined => (pid === undefined ? undefined : attempt(() => statSync(`/proc/${pid}/exe`), undefined));
+const EXEC_WAIT = 2000;
+// Bun's spawn can return, and emit 'spawn', while the child still runs this process's own image, for tens of ms under
+// load, so the executed inode is read once that image is gone or EXEC_WAIT has passed; an agy already gone has none.
+async function exeOf(d: Deps, pid: number | undefined): Promise<Stats | undefined> {
+  if (pid === undefined) return undefined;
+  const own = statSync("/proc/self/exe");
+  for (const end = d.now() + EXEC_WAIT; ; await new Promise<void>((done) => d.timers.set(done, 5))) {
+    const exe = attempt(() => statSync(`/proc/${pid}/exe`), undefined);
+    if (!exe || exe.dev !== own.dev || exe.ino !== own.ino || d.now() >= end) return exe;
+  }
+}
 
 // ---- Files ----------------------------------------------------------------------------------------------------------
 
@@ -400,7 +409,7 @@ class Worker {
     if (!p || p.state === "Z") throw new Refusal("agy exited before it could be checked", NEXT.early, 4);
     this.id = { pid: p.pid, sid: p.sid, start: p.start };
     this.write("gw", { type: "spawned", ...this.id, marker: this.marker });
-    const exe = exeOf(p.pid);
+    const exe = await exeOf(this.d, p.pid);
     if (!exe) throw new Refusal("agy exited before it could be checked", NEXT.early, 4);
     if (exe.dev !== c.bin.dev || exe.ino !== c.bin.ino) throw new Refusal("agy did not run from the approved file", NEXT.pin);
     this.wire(child);
@@ -732,7 +741,7 @@ async function tui(argv: string[], d: Deps): Promise<number> {
   }
   child = proc;
   const exited = new Promise<number>((done) => proc.on("close", (code) => done(code ?? 1)));
-  const exe = exeOf(proc.pid);
+  const exe = await exeOf(d, proc.pid);
   let code: number;
   if (exe && exe.dev === c.bin.dev && exe.ino === c.bin.ino) code = await exited;
   else {
@@ -864,7 +873,7 @@ export async function run(argv: string[], d: RunDeps): Promise<number> {
       child.on("error", () => {});
       const p = child.pid === undefined ? undefined : procStat(child.pid);
       if (p) id = { pid: p.pid, sid: p.sid, start: p.start };
-      const exe = p && p.state !== "Z" ? exeOf(p.pid) : undefined;
+      const exe = p && p.state !== "Z" ? await exeOf(d, p.pid) : undefined;
       if (!exe) throw new Refusal("agy exited before it could be checked", NEXT.unsent, 4);
       if (exe.dev !== c.bin.dev || exe.ino !== c.bin.ino) throw new Refusal("agy did not run from the approved file", NEXT.pin, 4);
       return child;

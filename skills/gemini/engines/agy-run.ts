@@ -96,7 +96,7 @@ class Run {
       const first = await this.shot(child, c.prompt, false, c.conversation);
       const id = c.conversation ?? first.conversation;
       let wrap: Shot | undefined;
-      if (first.end === "limit" && !this.stopped && id && this.used * 100 < c.limit * 115 && c.clock() - this.start < DEADLINE) {
+      if (first.end === "limit" && !this.stopped && !this.broken && id && this.used * 100 < c.limit * 115 && c.clock() - this.start < DEADLINE) {
         // A wrap-up that cannot start leaves the call ended limit.
         const next = await c.spawn(flags(c, WRAP_DENY, id)).catch(() => undefined);
         wrap = next && (await this.shot(next, WRAP_TEXT, true, id));
@@ -167,8 +167,9 @@ class Run {
       if (r) {
         this.agy(ev);
         s.result = r;
-        // Every result seen names its init's conversation; one naming none passes, since no failed result has been seen.
-        if (r.conversation !== undefined && r.conversation !== s.conversation) return "error";
+        // Every SUCCESS result seen names its init's conversation; a failed one naming none keeps its own reason, since
+        // none has been seen.
+        if ((r.status === "SUCCESS" || r.conversation !== undefined) && r.conversation !== s.conversation) return "error";
         return s.init ? undefined : "error";
       }
       const t = textStep(ev);
@@ -211,9 +212,10 @@ class Run {
         this.note({ unparsed: size });
         void settle("error");
       };
-      // An overlong line has already settled the shot when it crossed the bound.
+      // An overlong line has already settled the shot when it crossed the bound. After a lost write, lines() still hands
+      // over the rest of its chunk before the deferred stop runs.
       const line = (buf: Buffer, _over: boolean, size: number) => {
-        if (settled) return;
+        if (settled || this.broken) return;
         const raw = buf.toString("utf8");
         if (raw.trim() === "") return;
         last = c.clock();
@@ -241,7 +243,7 @@ class Run {
       if (this.stopped || this.broken) return void settle("error");
       child.once("close", drained);
       const crossed = (size: number) => {
-        if (!settled) unparsed(size);
+        if (!settled && !this.broken) unparsed(size);
       };
       if (child.stdout) lines(child.stdout, line, drained, { max: LINE_MAX, crossed });
       else drained();

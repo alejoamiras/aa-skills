@@ -112,6 +112,22 @@ for _ in $(seq 100); do [ "$(find "$GL" -path '*/stub/*[0-9].json' | wc -l)" -gt
 chmod 755 "$S/hooks/post-commit"
 wait "$H1"
 gls_t "fingerprint: a dormant hook in core.hooksPath's dir made executable during the call marks tree=changed" sh -c '[ "$0" = 0 ] && [ -n "$2" ] && head -n 1 "$1" | grep -qE "^GEMINI: answered \(neon high rev=$3 .* tree=changed\)$"' "$(gls_rc h1)" "$S/h1.out" "$(gls_rec "$(gls_key h1 GEMINI_DIR)")" "$SHA7"
+# A hook linked to the stub key file. A FIFO in the key's place cannot show this: the old code stat()ed and skipped
+# one. So the key's access time is set years back, which any read moves under relatime; a decoy shows reads register.
+# The fingerprint runs alone first, since the engine's own read of the key during a call would move it too.
+KEYF="$HOME/.config/gemini/.env" OLD=978307200
+{ ln -s "$KEYF" "$S/hooks/pre-push" && printf 'x\n' > "$S/decoy" && touch -c -a -d "@$OLD" "$KEYF" "$S/decoy" &&
+  cat "$S/decoy" > /dev/null; } || echo "FAIL  fixture: a hook linked to the key file"
+if [ "$(stat -c %X "$S/decoy")" = "$OLD" ]; then
+  echo "skip  fingerprint: a hook linked to the key file (this filesystem does not record reads)"
+else
+  gls_call fp bash "$(dirname "$RUN")/leg-lib.sh" fingerprint "$WT" "$S/fp.index"
+  AT=$(stat -c %X "$KEYF")
+  gls_stub "$ANSWER"
+  gls_call hl "$RUN" "$S/p.md" "$WT" high open neon
+  gls_t "fingerprint: a hook linked to the key file is never opened (its access time stays), and a call with it answers" sh -c '[ "$0" = 0 ] && [ "$(wc -l < "$1")" = 3 ] && [ "$2" = "$3" ] && [ "$4" = 0 ] && head -n 1 "$5" | grep -qE "^GEMINI: answered \(neon high rev=$6 .*[0-9]s\)$"' "$(gls_rc fp)" "$S/fp.out" "$AT" "$OLD" "$(gls_rc hl)" "$S/hl.out" "$SHA7"
+fi
+rm -f "$S/hooks/pre-push" "$S/fp.index"
 git -C "$REPO" config --unset core.hooksPath
 # git diff runs a clean filter twice on a touched file, the second time holding the index lock: this one sleeps only
 # then, so a fingerprint killed at its deadline is killed while the lock it took is held.
