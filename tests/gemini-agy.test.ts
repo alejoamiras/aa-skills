@@ -567,6 +567,33 @@ describe("worker", () => {
     expect(records(w.home)[0].child).toBeGreaterThan(0);
   }, 30_000);
 
+  test("agy still in the pump's image after the wait is killed by its handle, which alone reaches it", async () => {
+    // A bun child that execs the stub only after 4 s, without the marker and in the pump's own session: a child caught
+    // before its setsid and exec looks so to the sweep.
+    let pid = 0;
+    const home = makeHome();
+    const w = await start({
+      home,
+      spawn: (_file, args, opts) => {
+        const { GEMINI_WORKER_ID: _, ...env } = opts.env ?? {};
+        const child = spawn(process.execPath, [join(import.meta.dir, "fixtures", "exec-later.ts"), "4000", home.bin, ...args], {
+          ...opts, argv0: process.execPath, env, detached: false,
+        });
+        pid = child.pid ?? 0;
+        return child;
+      },
+    });
+    const f = await finished(w);
+    let alive = false;
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      alive = stat.slice(stat.lastIndexOf(")") + 2)[0] !== "Z";
+    } catch {
+      // gone
+    }
+    expect([f.code, f.gone.reason, pid > 0, alive]).toEqual([4, "agy could not be checked: it exited, or had not started after 2 seconds", true, false]);
+  }, 30_000);
+
   test("tui runs the pinned agy with only an accepted argument, the listed environment, and the state dir as cwd", async () => {
     const tui = async (home: Home, args: string[], cfg: object = {}) => {
       writeFileSync(join(home.dir, "stub.json"), JSON.stringify(cfg));

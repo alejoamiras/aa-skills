@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  closeSync, existsSync, linkSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync,
+  chmodSync, closeSync, existsSync, linkSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,7 +17,7 @@ import { LIMITS, type RunDeps, run } from "../skills/gemini/engines/agy.ts";
 const CANARY = "AIzaQz1Rx2Sw3Tv4Uu5Vt6Ws7Xr8Yq9Zp0Ao1Bn2Cm3";
 // A key the key file no longer holds: only the key-line check catches it.
 const OLD = "fake-old-key-dddd-eeee-ffff";
-// The stub's conversation id.
+// Must equal the stub's CONVERSATION.
 const CONVERSATION = "8766c9db-47ac-4645-97cc-bd1cbe524c30";
 const UID = process.getuid?.() ?? 0;
 const SHIMS = join(import.meta.dir, "..", "skills", "gemini", "shims");
@@ -125,8 +125,11 @@ function started(x: Ctx): number[] {
 }
 
 // whole: a run whose stub prints the key split inside one string, which the log keeps; no file may hold it whole.
-// late: by spawn, from 1, the ms after the spawn returns at which agy, started as a bun child, execs the stub.
-type Opts = { cfg?: object; prompt?: string; turn?: number; conversation?: string; clock?: () => number; whole?: boolean; late?: Record<number, number> };
+// late: by spawn, from 1, the ms after the spawn returns at which agy, started as a bun child, execs the stub; hidden:
+// that child lacks the marker and stays in the engine's session, as one caught before its setsid and exec looks.
+type Opts = {
+  cfg?: object; prompt?: string; turn?: number; conversation?: string; clock?: () => number; whole?: boolean; late?: Record<number, number>; hidden?: boolean;
+};
 // One engine run. After it: no run-dir file holds a piece of the canary, and nothing a stub started is left.
 async function go(x: Ctx, o: Opts = {}) {
   writeFileSync(join(x.home.dir, "stub.json"), JSON.stringify(o.cfg ?? { script: FINE }));
@@ -141,7 +144,9 @@ async function go(x: Ctx, o: Opts = {}) {
       spawns++;
       const late = o.late?.[spawns];
       if (late === undefined) return spawn(file, args, opts);
-      return spawn(process.execPath, [join(import.meta.dir, "fixtures", "exec-later.ts"), String(late), x.home.bin, ...args], { ...opts, argv0: process.execPath });
+      const { GEMINI_WORKER_ID: _, ...unmarked } = opts.env ?? {};
+      const as = o.hidden ? { env: unmarked, detached: false } : {};
+      return spawn(process.execPath, [join(import.meta.dir, "fixtures", "exec-later.ts"), String(late), x.home.bin, ...args], { ...opts, argv0: process.execPath, ...as });
     },
     signals: () => {}, input: () => {},
     out: (line) => out.push(line), env: WORKER_ENV, stdin: async () => Buffer.from(o.prompt ?? "Review the repository."), clock: o.clock ?? (() => performance.now()),
@@ -417,7 +422,8 @@ describe("run", () => {
     const r = await go(setup(), { late: { 1: 300 } });
     expect([r.code, r.out, r.response]).toEqual([0, [], "fine"]);
     // Still in bun's image when the 2-second wait ends: the first launch, then the wrap-up, which leaves the call ended limit.
-    const never = await go(setup(), { late: { 1: 4000 } });
+    // Hidden, so the sweep cannot find it: only its handle reaches it.
+    const never = await go(setup(), { late: { 1: 4000 }, hidden: true });
     expect([never.code, never.out[0], never.spawns]).toEqual([4, "ERROR: agy could not be checked: it exited, or had not started after 2 seconds", 1]);
     const wrap = await go(setup(), { late: { 2: 4000 }, cfg: { script: [{ answer: "a", usage: [101_000, 0, 0] }, { hold: true }], resume: FINE } });
     expect([wrap.code, wrap.result.reason, wrap.spawns]).toEqual([1, "limit", 2]);
@@ -432,11 +438,21 @@ describe("run", () => {
     const linked = makeHome();
     mkdirSync(join(linked.dir, ".cache"));
     symlinkSync(leg(x.home), leg(linked));
+    // Each names a mode-700 dir of this user and has the root as its dirname: a trailing slash makes lstat follow a link
+    // to a dir outside, and . or .. names the root or its parent, both mode 700 as gl_root and a umask of 077 leave them.
+    const outside = join(x.home.dir, ".cache", "outside");
+    mkdirSync(outside, { mode: 0o700 });
+    symlinkSync(outside, join(leg(x.home), "link"));
+    chmodSync(leg(x.home), 0o700);
+    chmodSync(join(x.home.dir, ".cache"), 0o700);
+    const plain = (dir: string) => `${dir} must be in normal form, with no trailing slash and no . or ..`;
     const cases: [Ctx, string][] = [
       [{ ...x, dir: elsewhere }, `${elsewhere} is not directly under ${leg(x.home)}`],
       [{ ...x, home: linked }, `${leg(linked)} must be a real directory, not a link`],
+      ...[`${leg(x.home)}/link/`, `${leg(x.home)}/.`, `${leg(x.home)}/..`].map((dir): [Ctx, string] => [{ ...x, dir }, plain(dir)]),
     ];
     for (const [ctx, error] of cases) {
+      const before = readdirSync(ctx.dir);
       // A FIFO in the key file's place: its writer finishes opening, and leaves the marker, only once a reader opens it.
       const key = join(ctx.home.dir, ".config/gemini/.env");
       unlinkSync(key);
@@ -446,7 +462,7 @@ describe("run", () => {
       const r = await go(ctx);
       await Bun.sleep(300);
       writer.kill("SIGKILL");
-      expect([r.code, r.out[0], readdirSync(ctx.dir), existsSync(opened)]).toEqual([2, `ERROR: ${error}`, [], false]);
+      expect([r.code, r.out[0], readdirSync(ctx.dir), existsSync(opened)]).toEqual([2, `ERROR: ${error}`, before, false]);
     }
   }, 30_000);
 

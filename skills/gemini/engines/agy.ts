@@ -11,7 +11,7 @@ import {
   unlinkSync, writeFileSync, writeSync,
 } from "node:fs";
 import { userInfo } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { Log, readKey } from "./api.ts";
 import { call, turnFile } from "./agy-run.ts";
@@ -169,6 +169,27 @@ async function exeOf(d: Deps, pid: number | undefined, clock: () => number = d.n
     if (!exe || exe.dev !== own.dev || exe.ino !== own.ino) return exe;
     if (clock() >= end) return undefined;
   }
+}
+
+// Killed by its handle, and awaited up to ms: a child caught before its setsid and exec has neither the marker nor a
+// session of its own, so no sweep can find it.
+async function drop(child: ChildProcess, timers: Timers, ms: number, why: Refusal): Promise<Refusal> {
+  if (child.exitCode !== null || child.signalCode !== null) return why;
+  let timer: unknown;
+  await new Promise<void>((done) => {
+    child.once("exit", () => done());
+    timer = timers.set(done, ms);
+    if (!attempt(() => child.kill("SIGKILL"), false)) done();
+  });
+  timers.clear(timer);
+  return why;
+}
+
+// p read again once its exec is seen: the exec follows the child's setsid, so a read before it can show the spawner's session.
+function identity(p: Proc): Identity {
+  const q = procStat(p.pid);
+  const r = q?.start === p.start ? q : p;
+  return { pid: r.pid, sid: r.sid, start: r.start };
 }
 
 // ---- Files ----------------------------------------------------------------------------------------------------------
@@ -412,8 +433,9 @@ class Worker {
     this.id = { pid: p.pid, sid: p.sid, start: p.start };
     this.write("gw", { type: "spawned", ...this.id, marker: this.marker });
     const exe = await exeOf(this.d, p.pid);
-    if (!exe) throw new Refusal(UNCHECKED, NEXT.early, 4);
-    if (exe.dev !== c.bin.dev || exe.ino !== c.bin.ino) throw new Refusal("agy did not run from the approved file", NEXT.pin);
+    if (!exe) throw await drop(child, this.d.timers, this.lim.sweep, new Refusal(UNCHECKED, NEXT.early, 4));
+    this.id = identity(p);
+    if (exe.dev !== c.bin.dev || exe.ino !== c.bin.ino) throw await drop(child, this.d.timers, this.lim.sweep, new Refusal("agy did not run from the approved file", NEXT.pin));
     this.wire(child);
     this.lastOutput = this.directorChecked = this.d.now();
     this.snap = (await this.snapshot()) ?? undefined;
@@ -758,7 +780,7 @@ async function tui(argv: string[], d: Deps): Promise<number> {
 
 // ---- The review leg's one-shot run --------------------------------------------------------------------------------
 
-// The prompt arrives on stdin; clock is monotonic and bounds the call.
+// clock must be monotonic: the call's deadline and silence run on it.
 export type RunDeps = Deps & { stdin: (max: number) => Promise<Buffer>; clock: () => number };
 const RUN_MODELS = ["gemini-4-neon", "gemini-4-carbon"];
 const PROMPT_MAX = 2 * 1024 * 1024;
@@ -773,6 +795,9 @@ function parseRun(argv: string[], uid: number): RunArgs | string {
   if (extra.length || !dir.startsWith("/") || !top.startsWith("/")) {
     return "usage: agy run <run dir> <top level> <model> <effort> <limit> <turn> [<conversation id>], both paths absolute";
   }
+  // lstat follows a link behind a trailing slash, and dirname drops a slash, a . or a .., so only a normal form keeps
+  // the checks below on the dir they name.
+  if (resolve(dir) !== dir) return `${dir} must be in normal form, with no trailing slash and no . or ..`;
   const st = lstatSync(dir, { throwIfNoEntry: false });
   if (!st?.isDirectory() || st.uid !== uid || st.mode & 0o077) return `${dir} must be a directory of uid ${uid} with mode 700`;
   if (!statSync(top, { throwIfNoEntry: false })?.isDirectory()) return `${top} is not a directory`;
@@ -785,8 +810,7 @@ function parseRun(argv: string[], uid: number): RunArgs | string {
   return { dir, top: realpathSync(top), model, effort, limit: Number(limit), turn: Number(turn), conversation };
 }
 
-// A turn runs once. A later one needs the private home free of hooks and MCP servers, and an earlier result that did
-// not end on mode or model, which say agy itself ran otherwise than the engine expects.
+// The mode and model tripwires bar a resume: they say agy itself ran otherwise than the engine expects.
 function turnRefusal(a: RunArgs, priv: string): string | undefined {
   if (lstatSync(join(a.dir, turnFile(a.turn, "prompt", "md")), { throwIfNoEntry: false })) return `turn ${a.turn} has already run in ${a.dir}`;
   const home = lstatSync(priv, { throwIfNoEntry: false });
@@ -871,13 +895,15 @@ export async function run(argv: string[], d: RunDeps): Promise<number> {
     };
     let id: Identity | undefined;
     const start = async (args: string[]) => {
+      id = undefined;
       const child = await d.spawn(`/proc/self/fd/${c.bin.fd}`, args, { argv0: c.bin.path, cwd: a.top, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
       child.on("error", () => {});
       const p = child.pid === undefined ? undefined : procStat(child.pid);
       if (p) id = { pid: p.pid, sid: p.sid, start: p.start };
       const exe = p && p.state !== "Z" ? await exeOf(d, p.pid, d.clock) : undefined;
-      if (!exe) throw new Refusal(UNCHECKED, NEXT.unsent, 4);
-      if (exe.dev !== c.bin.dev || exe.ino !== c.bin.ino) throw new Refusal("agy did not run from the approved file", NEXT.pin, 4);
+      if (!p || !exe) throw await drop(child, d.timers, lim.sweep, new Refusal(UNCHECKED, NEXT.unsent, 4));
+      id = identity(p);
+      if (exe.dev !== c.bin.dev || exe.ino !== c.bin.ino) throw await drop(child, d.timers, lim.sweep, new Refusal("agy did not run from the approved file", NEXT.pin, 4));
       return child;
     };
     // Passed JSON-escaped, so the redactor's flattening spares newlines; a key never needs escaping, so it still matches.

@@ -20,7 +20,7 @@ gl_die() {
   exit "$1"
 }
 
-# Nothing was sent: the record line on stdout, the cause on stderr, exit 4.
+# Only before anything is sent.
 gl_unavailable() {
   printf '%s: %s\n' "${GL_NAME}" "$2" >&2
   printf 'GEMINI: unavailable (%s)\n' "$1"
@@ -186,7 +186,9 @@ gl_fp_child() {
   staged=$(gl_git diff --binary --cached --no-ext-diff --no-textconv | gl_sha) || return 1
   unstaged=$(gl_git diff --binary --no-ext-diff --no-textconv | gl_sha) || return 1
   untracked=$(gl_git ls-files -z --others --exclude-standard | xargs -0 -r stat --printf '%s %.9Y %n\0' -- | gl_sha) || return 1
-  conf=$({ gl_fp_entry config "${common}/config" && gl_fp_entry config.worktree "${gitdir}/config.worktree"; } | gl_sha) || return 1
+  # info/exclude too: the untracked listing reads it, so a line added there hides a new file.
+  conf=$({ gl_fp_entry config "${common}/config" && gl_fp_entry config.worktree "${gitdir}/config.worktree" &&
+    gl_fp_entry info/exclude "${common}/info/exclude"; } | gl_sha) || return 1
   # Modes too: chmod +x alone switches a dormant hook on.
   hk=$({
     gl_fp_entry . "${hooks}" || exit 1
@@ -234,8 +236,7 @@ gl_engine() {
   GL_ERR=$(grep -m 1 '^ERROR: ' <<< "${out}")
 }
 
-# The engine's refusals: 2 relays its ERROR: line on stderr alone, 4 is off-setup; a fresh run ($1) removes run dir $2,
-# a resume leaves it as it was.
+# $1 fresh or resume, $2 the run dir: a refused resume keeps it, since it holds the earlier turns.
 gl_refusal() {
   case "${GL_RC}" in
     2 | 4) [[ $1 == fresh ]] && rm -rf -- "$2" ;;

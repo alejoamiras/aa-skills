@@ -112,9 +112,8 @@ for _ in $(seq 100); do [ "$(find "$GL" -path '*/stub/*[0-9].json' | wc -l)" -gt
 chmod 755 "$S/hooks/post-commit"
 wait "$H1"
 gls_t "fingerprint: a dormant hook in core.hooksPath's dir made executable during the call marks tree=changed" sh -c '[ "$0" = 0 ] && [ -n "$2" ] && head -n 1 "$1" | grep -qE "^GEMINI: answered \(neon high rev=$3 .* tree=changed\)$"' "$(gls_rc h1)" "$S/h1.out" "$(gls_rec "$(gls_key h1 GEMINI_DIR)")" "$SHA7"
-# A hook linked to the stub key file. A FIFO in the key's place cannot show this: the old code stat()ed and skipped
-# one. So the key's access time is set years back, which any read moves under relatime; a decoy shows reads register.
-# The fingerprint runs alone first, since the engine's own read of the key during a call would move it too.
+# The fingerprint never opens a hook linked to the stub key file: the key's access time, set years back, stays, where
+# any read would move it under relatime, as a decoy's read shows. It runs alone first, since a call's engine reads the key.
 KEYF="$HOME/.config/gemini/.env" OLD=978307200 READS=""
 { ln -s "$KEYF" "$S/hooks/pre-push" && printf 'x\n' > "$S/decoy" && touch -c -a -d "@$OLD" "$KEYF" "$S/decoy" &&
   cat "$S/decoy" > /dev/null; } || echo "FAIL  fixture: a hook linked to the key file"
@@ -130,6 +129,12 @@ else
 fi
 rm -f "$S/hooks/pre-push" "$S/fp.index"
 git -C "$REPO" config --unset core.hooksPath
+# The stub appends "stub edit" to each path it writes, so a new file of that name and the line that ignores it.
+cp "$REPO/.git/info/exclude" "$S/exclude"
+gls_stub '{"script":[{"tool":"run_command","write":"stub edit"},{"tool":"run_command","write":".git/info/exclude"},{"answer":"done"},{"result":"SUCCESS","response":"done"}]}'
+gls_call ex "$RUN" "$S/p.md" "$REPO" high open neon
+gls_t "fingerprint: a new file hidden by a line added to info/exclude during the call marks tree=changed" sh -c '[ "$0" = 0 ] && [ -f "$2/stub edit" ] && [ -z "$(git -C "$2" status --porcelain)" ] && head -n 1 "$1" | grep -qE "^GEMINI: answered \(neon high rev=$3 .* tree=changed\)$"' "$(gls_rc ex)" "$S/ex.out" "$REPO" "$SHA7"
+rm -f "$REPO/stub edit" && mv "$S/exclude" "$REPO/.git/info/exclude"
 # git diff runs a clean filter twice on a touched file, the second time holding the index lock: this one sleeps only
 # then, so a fingerprint killed at its deadline is killed while the lock it took is held.
 SLOW="$S/slow"
@@ -170,6 +175,25 @@ wait "$HOLDER"
 HOLDER=""
 wait "$LK"
 gls_t "lock: ...then runs; a resume after a tool end is allowed and answers" sh -c '[ "$(cat "$0")" = 0 ] && head -n 1 "$1" | grep -q "^GEMINI: answered " && [ -f "$2/result.2.json" ] && [ "$(find "$2/home" -path "*/stub/*[0-9].json" | wc -l)" = 2 ]' "$S/lk.rc" "$S/lk.out" "$D3"
+# Resumes $D3 as <name> with session id $2 the way a first turn still running would meet it: a holder keeps the lock
+# with session_id gone, and puts it back before letting go, once the resume has the lock file open.
+gls_held() {
+  rm -f "$S/held" && mv "$D3/session_id" "$S/sid" || return 1
+  setsid flock "$D3/lock" sh -c ': > "$0"; read -r _ < "$1"; mv "$2" "$3"' "$S/held" "$S/release" "$S/sid" "$D3/session_id" & HOLDER=$!
+  for _ in $(seq 100); do [ -e "$S/held" ] && break; sleep 0.1; done
+  "$RESUME" "$2" "$S/p2.md" "$D3" < /dev/null > "$S/$1.out" 2> "$S/$1.err" & local p=$!
+  for _ in $(seq 300); do { [ "$(readlink "/proc/$p/fd/9" 2> /dev/null)" = "$D3/lock" ] || [ ! -e "/proc/$p/fd/0" ]; } && break; sleep 0.1; done
+  if [ -e "$S/held" ]; then echo go > "$S/release"; else kill -- "-$HOLDER" 2> /dev/null; fi
+  wait "$HOLDER"
+  HOLDER=""
+  wait "$p"
+  echo "$?" > "$S/$1.rc"
+}
+before=$(gls_snap "$D3")
+gls_held w1 00000000-0000-4000-8000-000000000000
+gls_t "lock: a wrong session id given while the first turn holds the lock waits, then exits 2 against the id written meanwhile, the dir unchanged" sh -c '[ "$0" = 2 ] && grep -q "is not the one" "$1" && [ "$2" = "$3" ]' "$(gls_rc w1)" "$S/w1.err" "$before" "$(gls_snap "$D3")"
+gls_held w2 ""
+gls_t "lock: \"\" given then waits too, and resumes the id written meanwhile" sh -c '[ "$0" = 0 ] && head -n 1 "$1" | grep -q "^GEMINI: answered " && jq -e "(.args | index(\"--conversation\")) as \$i | .args[\$i + 1] == \"$3\"" "$2"' "$(gls_rc w2)" "$S/w2.out" "$(gls_rec "$D3")" "$(cat "$D3/session_id")"
 
 # --- refusals -------------------------------------------------------------------------------------------------------------
 n=$(gls_runs)

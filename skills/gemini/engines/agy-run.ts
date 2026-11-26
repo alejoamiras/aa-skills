@@ -272,6 +272,7 @@ class Run {
     const usage = wrap ? plus(own, wrap.steps) : own;
     const response = reason ? null : turnFile(c.turn, "response", "md");
     const answer = (wrap ?? first).result?.response ?? "";
+    // Redacted again after the path cut: a key split by a top-level or home path joins up once the path is cut out.
     if (response) this.write(response, c.redact(this.relative(c.redact(answer))));
     if (c.turn === 1 && id) this.write("session_id", `${id}\n`);
     const last = wrap?.result ?? first.result;

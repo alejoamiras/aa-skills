@@ -26,14 +26,6 @@ DIR=$(cd -P -- "${DIR}" && pwd -P) || gl_die 2 "${NOT_RUN}"
 gl_root
 [[ -O ${DIR} && $(stat -c %a -- "${DIR}") == 700 && ${DIR%/*} == "${GL_ROOT}" ]] || gl_die 2 "${NOT_RUN}"
 
-SID="$1"
-if [[ -f ${DIR}/session_id && ! -L ${DIR}/session_id ]]; then
-  read -r RECORDED < "${DIR}/session_id"
-  [[ -z ${SID} || ${SID} == "${RECORDED}" ]] || gl_die 2 "the session id ${SID} is not the one ${DIR}/session_id records"
-  SID="${RECORDED}"
-fi
-[[ -n ${SID} ]] || gl_die 2 "${DIR} records no session id and none was given"
-
 [[ -f ${DIR}/meta && ! -L ${DIR}/meta ]] || gl_die 2 "${DIR}/meta is missing"
 declare -A META=()
 while IFS='=' read -r k v; do [[ -n ${k} ]] && META[${k}]="${v}"; done < "${DIR}/meta"
@@ -49,6 +41,14 @@ gl_off_checks
 
 [[ -f ${DIR}/lock && ! -L ${DIR}/lock ]] && exec 9< "${DIR}/lock" || gl_die 2 "${DIR}/lock is missing"
 flock 9 || gl_die 2 "cannot lock ${DIR}/lock"
+# Under the lock: the first turn writes session_id at its end, while it still holds it.
+SID="$1"
+if [[ -f ${DIR}/session_id && ! -L ${DIR}/session_id ]]; then
+  read -r RECORDED < "${DIR}/session_id"
+  [[ -z ${SID} || ${SID} == "${RECORDED}" ]] || gl_die 2 "the session id ${SID} is not the one ${DIR}/session_id records"
+  SID="${RECORDED}"
+fi
+[[ -n ${SID} ]] || gl_die 2 "${DIR} records no session id and none was given"
 TURN=2
 while [[ -e ${DIR}/prompt.${TURN}.md || -L ${DIR}/prompt.${TURN}.md ]]; do TURN=$((TURN + 1)); done
 LAST="${DIR}/result.json"
