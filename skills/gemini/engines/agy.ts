@@ -1,19 +1,23 @@
-// The gemini skill's worker pump, one per worker and the process in its tmux pane. It alone reads the key, owns agy's
-// stdin and stdout, writes the log, and enforces the optional token cap and the watchdog. Start it only through engines/agy.
+// The gemini skill's agy engine, which alone reads the key for agy: a worker's pump (one per worker, the process in its
+// tmux pane, which owns agy's stdin and stdout, writes the log, and enforces the optional token cap and the watchdog),
+// the owner's tui, and the review leg's one-shot run, whose call agy-run.ts makes. Start it only through engines/agy.
 // Usage: agy <state dir> <worktree> <model> <effort> <cap, 0 for none> <director pid>
 //        agy tui <state dir> [models | --conversation <uuid>]
+//        agy run <run dir> <top level> <model> <effort> <limit> <turn> [<conversation id>], the prompt on stdin
 import { type ChildProcess, execFile, type SpawnOptions, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
-  closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, type Stats, statSync, unlinkSync,
-  writeFileSync, writeSync,
+  closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, type Stats, statSync,
+  unlinkSync, writeFileSync, writeSync,
 } from "node:fs";
 import { userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { Log, readKey } from "./api.ts";
+import { call, turnFile } from "./agy-run.ts";
 import {
-  conversationOf, fit, isObj, isStep, type Json, lines, paneText, type Result, resultOf, stepDone, stepIndex, tail, textStep, toolDone, userEvent, withText,
+  conversationOf, fit, isObj, isStep, type Json, lines, paneText, type Result, resultOf, stepDone, stepIndex, tail, textStep, toolDone, UUID, userEvent,
+  withText,
 } from "./agy-stream.ts";
 
 const SUBAGENT = "You are a subagent. Don't run memo.";
@@ -28,7 +32,6 @@ const PREAMBLE = [
 ].join("\n");
 const MODEL = /^[a-z0-9][a-z0-9.-]*$/;
 const EFFORTS = ["low", "medium", "high"];
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PIN = /^path=(\/[^\n]*)\nsha256=([0-9a-f]{64})\nversion=([^\n]+)\n?$/;
 // send names a message $EPOCHREALTIME-$$, which sorts in send order, and a typed line takes the suffix -owner; any other
 // name, a sender's temp file included, is not a message.
@@ -55,6 +58,8 @@ const NEXT = {
   unreadable: "a capped worker cannot count this turn's tokens: read the log's last result and review the worktree before a new start",
   watchdog: "agy hung or stalled: review the worktree and the log's last lines, then start a new worker",
   bug: "read the log's last lines, run stop, and review the worktree",
+  run: "call the engine only through run-agy.sh or resume-agy.sh; nothing was sent",
+  unsent: "nothing was sent: fix the cause, then call again",
 };
 
 export const LIMITS = { silence: 15 * 60_000, turn: 30 * 60_000, director: 30_000, grace: 5_000, sweep: 10_000, git: 10_000, poll: 500 };
@@ -234,7 +239,7 @@ function checkHomeConfig(home: string) {
   if (!isObj(v) || Object.hasOwn(v, "mcpServers")) throw new Refusal(`${mcp} has an mcpServers entry or is not a JSON object`, NEXT.config);
 }
 
-type Checked = { bin: Bin; key: string };
+type Checked = { bin: Bin; key: string; settings: string };
 // The key is read only after the pin, the binary and the settings have passed.
 function checkAll(d: Deps, log: Log): Checked {
   const bin = openPinned(d.home, d.uid);
@@ -249,7 +254,7 @@ function checkAll(d: Deps, log: Log): Checked {
     }
     log.hide(key);
     if (settings.includes(key)) throw new Refusal(`${settingsPath(d.home)} holds the API key`, NEXT.settings);
-    return { bin, key };
+    return { bin, key, settings };
   } catch (e) {
     closeSync(bin.fd);
     throw e;
@@ -740,6 +745,155 @@ async function tui(argv: string[], d: Deps): Promise<number> {
   return code;
 }
 
+// ---- The review leg's one-shot run --------------------------------------------------------------------------------
+
+// The prompt arrives on stdin; clock is monotonic and bounds the call.
+export type RunDeps = Deps & { stdin: (max: number) => Promise<Buffer>; clock: () => number };
+const RUN_MODELS = ["gemini-4-neon", "gemini-4-carbon"];
+const PROMPT_MAX = 2 * 1024 * 1024;
+// The key file's line anywhere in the prompt: the file may hold another key than the one just read.
+const KEY_LINE = /^GEMINI_API_KEY=[A-Za-z0-9._-]+\r?$/m;
+// Each grants access the skip flag does not, or runs code; setup writes none of them.
+const REFUSED = ["allowNonWorkspaceAccess", "toolPermission", "hooks", "mcpServers"];
+
+type RunArgs = { dir: string; top: string; model: string; effort: string; limit: number; turn: number; conversation?: string };
+function parseRun(argv: string[], uid: number): RunArgs | string {
+  const [dir = "", top = "", model = "", effort = "", limit = "", turn = "", conversation, ...extra] = argv;
+  if (extra.length || !dir.startsWith("/") || !top.startsWith("/")) {
+    return "usage: agy run <run dir> <top level> <model> <effort> <limit> <turn> [<conversation id>], both paths absolute";
+  }
+  const st = lstatSync(dir, { throwIfNoEntry: false });
+  if (!st?.isDirectory() || st.uid !== uid || st.mode & 0o077) return `${dir} must be a directory of uid ${uid} with mode 700`;
+  if (!statSync(top, { throwIfNoEntry: false })?.isDirectory()) return `${top} is not a directory`;
+  if (!RUN_MODELS.includes(model)) return `the model must be ${RUN_MODELS.join(" or ")}`;
+  if (!EFFORTS.includes(effort)) return "the effort must be low, medium or high";
+  if (!/^[1-9][0-9]{5,6}$/.test(limit) || Number(limit) > 4_000_000) return "the limit must be 100000 to 4000000 tokens";
+  if (!/^[1-9][0-9]{0,3}$/.test(turn)) return "the turn must be a whole number from 1";
+  if ((turn === "1") !== (conversation === undefined)) return "a conversation id goes with every turn after the first, and only with those";
+  if (conversation !== undefined && !UUID.test(conversation)) return "the conversation id must be a UUID";
+  return { dir, top: realpathSync(top), model, effort, limit: Number(limit), turn: Number(turn), conversation };
+}
+
+// A turn runs once. A later one needs the private home free of hooks and MCP servers, and an earlier result that did
+// not end on mode or model, which say agy itself ran otherwise than the engine expects.
+function turnRefusal(a: RunArgs, priv: string): string | undefined {
+  if (lstatSync(join(a.dir, turnFile(a.turn, "prompt", "md")), { throwIfNoEntry: false })) return `turn ${a.turn} has already run in ${a.dir}`;
+  const home = lstatSync(priv, { throwIfNoEntry: false });
+  if (a.turn === 1) return home ? `${priv} exists before the first turn` : undefined;
+  if (!home?.isDirectory()) return `${priv} is not a directory`;
+  checkHomeConfig(priv);
+  const last = join(a.dir, turnFile(a.turn - 1, "result", "json"));
+  const r = attempt(() => parse(readChecked(last, NEXT.run)), undefined);
+  if (!isObj(r)) return `${last} is missing or not a JSON object`;
+  if (r.tripwire === "mode" || r.tripwire === "model") return `turn ${a.turn - 1} ended on the ${r.tripwire} tripwire, which bars a resume`;
+  return undefined;
+}
+
+function refusedSetting(text: string): string | undefined {
+  const s = parse(text);
+  if (!isObj(s)) return "a value that is not an object";
+  const p = s.permissions;
+  if (p !== undefined && (!isObj(p) || Object.hasOwn(p, "allow") || Object.hasOwn(p, "ask"))) return "permissions allow or ask rules";
+  return REFUSED.find((k) => Object.hasOwn(s, k));
+}
+
+// modelProvider alone: the data-use choice made at setup reached no local file, so there is nothing else to carry.
+function makeHome(priv: string) {
+  mkdirSync(priv, { mode: 0o700 });
+  for (const sub of ["tmp", join(".gemini", "antigravity-cli")]) mkdirSync(join(priv, sub), { recursive: true, mode: 0o700 });
+  writeFileSync(settingsPath(priv), '{"modelProvider":"gemini"}\n', { flag: "wx", mode: 0o600 });
+}
+
+export async function run(argv: string[], d: RunDeps): Promise<number> {
+  const sink = { line: "" };
+  const log = new Log((line) => {
+    sink.line = line;
+  });
+  const say = (text: string) => {
+    log.line(text);
+    d.out(sink.line);
+  };
+  const refuse = (message: string, next: string, code: number) => {
+    say(`ERROR: ${message}`);
+    say(`NEXT: ${next}`);
+    return code;
+  };
+  const why = (e: unknown) => (e instanceof Refusal ? e.message : log.field(errText(e)));
+  const a = parseRun(argv, d.uid);
+  if (typeof a === "string") return refuse(a, NEXT.run, 2);
+  const raw = await d.stdin(PROMPT_MAX);
+  if (raw.length > PROMPT_MAX) return refuse(`the prompt is over ${PROMPT_MAX} bytes`, NEXT.run, 2);
+  const prompt = raw.toString("utf8");
+  const priv = join(a.dir, "home");
+  try {
+    const refused = turnRefusal(a, priv);
+    if (refused) return refuse(refused, NEXT.run, 2);
+  } catch (e) {
+    return refuse(why(e), e instanceof Refusal ? e.next : NEXT.run, 2);
+  }
+  let checked: Checked;
+  try {
+    checked = checkAll(d, log);
+  } catch (e) {
+    return refuse(why(e), e instanceof Refusal ? e.next : NEXT.unsent, 4);
+  }
+  const c = checked;
+  try {
+    const setting = refusedSetting(c.settings);
+    if (setting) return refuse(`${settingsPath(d.home)} holds ${setting}, which grants access or runs code`, NEXT.settings, 4);
+    if (prompt.includes(c.key) || KEY_LINE.test(prompt)) {
+      say("ERROR: the prompt holds the Gemini key: stop and tell the owner");
+      return 2;
+    }
+    if (a.turn === 1) makeHome(priv);
+    const lim = capped(d.limits);
+    const marker = `run.${randomBytes(16).toString("hex")}`;
+    // agy's own state stays in the run dir and never reaches ~/.gemini, which a worker starts from.
+    const env = {
+      ...agyEnv(d, c.key, marker), HOME: priv, TMPDIR: join(priv, "tmp"), XDG_CONFIG_HOME: join(priv, ".config"),
+      XDG_DATA_HOME: join(priv, ".local", "share"), XDG_STATE_HOME: join(priv, ".local", "state"), XDG_CACHE_HOME: join(priv, ".cache"),
+    };
+    let id: Identity | undefined;
+    const start = async (args: string[]) => {
+      const child = await d.spawn(`/proc/self/fd/${c.bin.fd}`, args, { argv0: c.bin.path, cwd: a.top, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+      // A spawn failure leaves no process, which the checks below report.
+      child.on("error", () => {});
+      const p = child.pid === undefined ? undefined : procStat(child.pid);
+      if (p) id = { pid: p.pid, sid: p.sid, start: p.start };
+      const exe = p && p.state !== "Z" ? exeOf(p.pid) : undefined;
+      if (!exe) throw new Refusal("agy exited before it could be checked", NEXT.unsent, 4);
+      if (exe.dev !== c.bin.dev || exe.ino !== c.bin.ino) throw new Refusal("agy did not run from the approved file", NEXT.pin, 4);
+      return child;
+    };
+    // Passed JSON-escaped, so the redactor's flattening spares newlines; a key never needs escaping, so it still matches.
+    const redact = (text: string) => {
+      log.line(JSON.stringify(text));
+      const v = parse(sink.line);
+      return typeof v === "string" ? v : "[redacted]";
+    };
+    return await call({
+      ...a, home: d.home, prompt, spawn: start, sweep: () => sweep(d, lim, `GEMINI_WORKER_ID=${marker}`, id), redact, clock: d.clock, now: d.now,
+      poll: lim.poll, timers: d.timers, signals: d.signals,
+    });
+  } catch (e) {
+    return refuse(why(e), e instanceof Refusal ? e.next : NEXT.unsent, 4);
+  } finally {
+    closeSync(c.bin.fd);
+  }
+}
+
+// Stops past max, so an oversize prompt is refused without being read whole.
+async function readStdin(max: number): Promise<Buffer> {
+  const parts: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of process.stdin) {
+    parts.push(chunk);
+    size += chunk.length;
+    if (size > max) break;
+  }
+  return Buffer.concat(parts);
+}
+
 export async function pump(argv: string[], d: Deps): Promise<number> {
   if (argv[0] === "tui") return tui(argv.slice(1), d);
   const a = parseArgs(argv);
@@ -752,7 +906,7 @@ export async function pump(argv: string[], d: Deps): Promise<number> {
 }
 
 if (import.meta.main) {
-  const code = await pump(process.argv.slice(2), {
+  const deps: Deps = {
     home: userInfo().homedir,
     uid: process.getuid?.() ?? -1,
     now: () => Date.now(),
@@ -768,6 +922,8 @@ if (import.meta.main) {
     // A closed pane loses only the view: the log records everything.
     out: (line) => attempt(() => writeSync(1, `${line}\n`), 0),
     env: process.env,
-  });
+  };
+  const argv = process.argv.slice(2);
+  const code = argv[0] === "run" ? await run(argv.slice(1), { ...deps, stdin: readStdin, clock: () => performance.now() }) : await pump(argv, deps);
   process.exit(code);
 }

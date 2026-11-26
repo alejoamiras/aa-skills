@@ -54,6 +54,7 @@ jobs:
       - run: bash tests/smoke-gemini.sh
       - run: bun test tests/gemini-api.test.ts
       - run: bun test tests/gemini-agy.test.ts
+      - run: bun test tests/gemini-agy-run.test.ts
       - run: bash tests/smoke-gemini-worker.sh
 
   gemini-status:

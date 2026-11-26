@@ -1,15 +1,15 @@
 #!/bin/bash
 # Runs agy.ts with only the WORKER_* values the CLI passes: an inherited BUN_OPTIONS preloads code, and a .env or
-# bunfig.toml in Bun's cwd or XDG_CONFIG_HOME would load. Both are a worker's new state dir, or for tui this engine's own
-# dir, since .tui is reused and is the interactive agy's cwd. HOME stays unset, so agy.ts finds the pin and the key under
-# the passwd home.
+# bunfig.toml in Bun's cwd or XDG_CONFIG_HOME would load. Both are a worker's new state dir, or for tui and run this
+# engine's own dir: .tui is reused and is the interactive agy's cwd, and a run dir is where agy's commands write. HOME
+# stays unset, so agy.ts finds the pin and the key under the passwd home. run reads its prompt on stdin.
 ulimit -c 0
 unset CDPATH
 case "${BASH_SOURCE[0]}" in */*) here="${BASH_SOURCE[0]%/*}" ;; *) here=. ;; esac
 here="$(cd -P -- "$here" && pwd -P)" || { echo "ERROR: cannot resolve the engine's dir"; exit 2; }
-if [[ ${1:-} == tui ]]; then state="${2:-}"; else state="${1:-}"; fi
+case ${1:-} in tui | run) state="${2:-}" ;; *) state="${1:-}" ;; esac
 [[ $state == /* ]] && cd -P -- "$state" || { echo "ERROR: the state dir must be an existing absolute path"; exit 2; }
-if [[ ${1:-} == tui ]]; then cd -P -- "$here" || exit 2; bunhome="$here"; else bunhome="$state"; fi
+case ${1:-} in tui | run) cd -P -- "$here" || exit 2; bunhome="$here" ;; *) bunhome="$state" ;; esac
 # Looked up from Bun's cwd, so a relative PATH entry cannot find a bun planted in the worktree.
 bun="$(PATH="${WORKER_PATH:-}" command -v bun)"
 [[ $bun == /* ]] || { echo "ERROR: no bun on WORKER_PATH"; exit 2; }
