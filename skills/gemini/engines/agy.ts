@@ -173,8 +173,8 @@ async function exeOf(d: Deps, pid: number | undefined, clock: () => number = d.n
 
 // Killed by its handle, and awaited up to ms: a child caught before its setsid and exec has neither the marker nor a
 // session of its own, so no sweep can find it.
-async function drop(child: ChildProcess, timers: Timers, ms: number, why: Refusal): Promise<Refusal> {
-  if (child.exitCode !== null || child.signalCode !== null) return why;
+async function drop(child: ChildProcess, timers: Timers, ms: number) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
   let timer: unknown;
   await new Promise<void>((done) => {
     child.once("exit", () => done());
@@ -182,7 +182,6 @@ async function drop(child: ChildProcess, timers: Timers, ms: number, why: Refusa
     if (!attempt(() => child.kill("SIGKILL"), false)) done();
   });
   timers.clear(timer);
-  return why;
 }
 
 // p read again once its exec is seen: the exec follows the child's setsid, so a read before it can show the spawner's session.
@@ -328,6 +327,8 @@ class Worker {
   private readonly marker: string;
   private logFd = -1;
   private child?: ChildProcess;
+  // Set once agy's exec is seen to be the pinned file.
+  private confirmed = false;
   private id?: Identity;
   private key = "";
   private director = { pid: 0, start: "" };
@@ -433,9 +434,10 @@ class Worker {
     this.id = { pid: p.pid, sid: p.sid, start: p.start };
     this.write("gw", { type: "spawned", ...this.id, marker: this.marker });
     const exe = await exeOf(this.d, p.pid);
-    if (!exe) throw await drop(child, this.d.timers, this.lim.sweep, new Refusal(UNCHECKED, NEXT.early, 4));
+    if (!exe) throw new Refusal(UNCHECKED, NEXT.early, 4);
     this.id = identity(p);
-    if (exe.dev !== c.bin.dev || exe.ino !== c.bin.ino) throw await drop(child, this.d.timers, this.lim.sweep, new Refusal("agy did not run from the approved file", NEXT.pin));
+    if (exe.dev !== c.bin.dev || exe.ino !== c.bin.ino) throw new Refusal("agy did not run from the approved file", NEXT.pin);
+    this.confirmed = true;
     this.wire(child);
     this.lastOutput = this.directorChecked = this.d.now();
     this.snap = (await this.snapshot()) ?? undefined;
@@ -672,8 +674,10 @@ class Worker {
     })().finally(() => this.resolve(code));
   }
 
+  // Every way out of start after the spawn ends here, so a child never confirmed is dropped here, before the sweep.
   private async teardown() {
     attempt(() => this.child?.stdin?.end(), undefined);
+    if (this.child && !this.confirmed) await drop(this.child, this.d.timers, this.lim.sweep);
     await sweep(this.d, this.lim, `GEMINI_WORKER_ID=${this.marker}`, this.id);
   }
 
@@ -901,9 +905,13 @@ export async function run(argv: string[], d: RunDeps): Promise<number> {
       const p = child.pid === undefined ? undefined : procStat(child.pid);
       if (p) id = { pid: p.pid, sid: p.sid, start: p.start };
       const exe = p && p.state !== "Z" ? await exeOf(d, p.pid, d.clock) : undefined;
-      if (!p || !exe) throw await drop(child, d.timers, lim.sweep, new Refusal(UNCHECKED, NEXT.unsent, 4));
+      const dropped = async (message: string, next: string) => {
+        await drop(child, d.timers, lim.sweep);
+        return new Refusal(message, next, 4);
+      };
+      if (!p || !exe) throw await dropped(UNCHECKED, NEXT.unsent);
       id = identity(p);
-      if (exe.dev !== c.bin.dev || exe.ino !== c.bin.ino) throw await drop(child, d.timers, lim.sweep, new Refusal("agy did not run from the approved file", NEXT.pin, 4));
+      if (exe.dev !== c.bin.dev || exe.ino !== c.bin.ino) throw await dropped("agy did not run from the approved file", NEXT.pin);
       return child;
     };
     // Passed JSON-escaped, so the redactor's flattening spares newlines; a key never needs escaping, so it still matches.

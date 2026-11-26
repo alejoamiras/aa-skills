@@ -2,7 +2,7 @@
 // git worktree with a temp home holding a pin, settings and a canary key: no real agy, no real key, no network. Key
 // values are compared only as booleans, so a failing assertion never prints one.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { type ChildProcess, type SpawnOptions, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -567,31 +567,54 @@ describe("worker", () => {
     expect(records(w.home)[0].child).toBeGreaterThan(0);
   }, 30_000);
 
+  // A bun child that execs the stub only after 4 s, without the marker and in the pump's own session: a child caught
+  // before its setsid and exec looks so to the sweep.
+  const unmarked = (home: Home, args: string[], opts: SpawnOptions) => {
+    const { GEMINI_WORKER_ID: _, ...env } = opts.env ?? {};
+    return spawn(process.execPath, [join(import.meta.dir, "fixtures", "exec-later.ts"), "4000", home.bin, ...args], { ...opts, argv0: process.execPath, env, detached: false });
+  };
+  const alive = (pid: number) => {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      return stat.slice(stat.lastIndexOf(")") + 2)[0] !== "Z";
+    } catch {
+      return false;
+    }
+  };
+
   test("agy still in the pump's image after the wait is killed by its handle, which alone reaches it", async () => {
-    // A bun child that execs the stub only after 4 s, without the marker and in the pump's own session: a child caught
-    // before its setsid and exec looks so to the sweep.
     let pid = 0;
     const home = makeHome();
     const w = await start({
       home,
       spawn: (_file, args, opts) => {
-        const { GEMINI_WORKER_ID: _, ...env } = opts.env ?? {};
-        const child = spawn(process.execPath, [join(import.meta.dir, "fixtures", "exec-later.ts"), "4000", home.bin, ...args], {
-          ...opts, argv0: process.execPath, env, detached: false,
-        });
+        const child = unmarked(home, args, opts);
         pid = child.pid ?? 0;
         return child;
       },
     });
     const f = await finished(w);
-    let alive = false;
-    try {
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-      alive = stat.slice(stat.lastIndexOf(")") + 2)[0] !== "Z";
-    } catch {
-      // gone
-    }
-    expect([f.code, f.gone.reason, pid > 0, alive]).toEqual([4, "agy could not be checked: it exited, or had not started after 2 seconds", true, false]);
+    expect([f.code, f.gone.reason, pid > 0, alive(pid)]).toEqual([4, "agy could not be checked: it exited, or had not started after 2 seconds", true, false]);
+  }, 30_000);
+
+  test("a stop that lands while agy's spawn is pending still kills the unconfirmed child by its handle", async () => {
+    let pid = 0;
+    let w: Worker | undefined;
+    const home = makeHome();
+    w = await start({
+      home,
+      spawn: (_file, args, opts) =>
+        new Promise<ChildProcess>((done) => {
+          const child = unmarked(home, args, opts);
+          pid = child.pid ?? 0;
+          setTimeout(() => {
+            w?.stop();
+            done(child);
+          }, 200);
+        }),
+    });
+    const f = await finished(w);
+    expect([f.gone.reason, pid > 0, alive(pid)]).toEqual(["stopped by SIGINT", true, false]);
   }, 30_000);
 
   test("tui runs the pinned agy with only an accepted argument, the listed environment, and the state dir as cwd", async () => {
