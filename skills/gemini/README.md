@@ -1,6 +1,6 @@
 # gemini
 
-Second-opinion consults from Google's Gemini (`gemini-4-carbon`) through the paid Gemini API, usable standalone ("ask gemini", "have gemini review X"). Unlike `codex`, `claude` and `kimi`, a consult is not an agent: it reads only the prompt, never the repo, so the caller pastes the material under review. The [live worker](#live-worker-linux) is an agent, on Google's Antigravity CLI.
+Second-opinion consults from Google's Gemini (`gemini-4-carbon`) through the paid Gemini API, usable standalone ("ask gemini", "have gemini review X"). Unlike `codex`, `claude` and `kimi`, a consult is not an agent: it reads only the prompt, never the repo, so the caller pastes the material under review. The [live worker](#live-worker-linux) is an agent, on Google's Antigravity CLI. So is the [review leg](#review-leg-linux), which is not the worker: one headless call per turn that reads the caller's repository in place and runs commands, the Gemini leg that `blueprint`, `harden` and `start-orchy` call for beside Codex.
 
 Three scripts, the same shape as the other consult skills:
 
@@ -12,7 +12,7 @@ Each turn is a stored background interaction (`POST /v1beta/interactions`), so G
 
 ## Key file
 
-The key lives in `~/.config/gemini/.env`, mode 600, outside every repo: one line, `GEMINI_API_KEY=<value>`, the value only letters, digits and `. _ -` (JSON, percent and form encoding leave such a key as it is, so an echo stays a literal match for the log redactor). It is the second named key-file exception in AGENTS.md. Only `engines/api.ts` and, for a worker, `engines/agy.ts` read it. A consult's reader is started by `engines/api`, a launcher that runs Bun from an empty dir with only `PATH` and `XDG_CONFIG_HOME`, so no inherited `BUN_OPTIONS`, debug variable, `.env` or `bunfig.toml` reaches the process that holds the key. A consult's key leaves only in the `x-goog-api-key` header, to a fixed Google origin, with redirects refused; a worker's path is under [Where the key goes](#where-the-key-goes). Agents never read the file; their preflight is `ls -l`.
+The key lives in `~/.config/gemini/.env`, mode 600, outside every repo: one line, `GEMINI_API_KEY=<value>`, the value only letters, digits and `. _ -` (JSON, percent and form encoding leave such a key as it is, so an echo stays a literal match for the log redactor). It is the second named key-file exception in AGENTS.md. Only `engines/api.ts` and, for a worker or the review leg, `engines/agy.ts` read it; `engines/agy-run.ts`, which runs the leg's call, never does. A consult's reader is started by `engines/api`, a launcher that runs Bun from an empty dir with only `PATH` and `XDG_CONFIG_HOME`, so no inherited `BUN_OPTIONS`, debug variable, `.env` or `bunfig.toml` reaches the process that holds the key. A consult's key leaves only in the `x-goog-api-key` header, to a fixed Google origin, with redirects refused; a worker's path is under [Where the key goes](#where-the-key-goes). Agents never read the file; their preflight is `ls -l`.
 
 ## Owner setup
 
@@ -51,7 +51,7 @@ The worker uses the consult's key file; it does not need `~/.agents/gemini-engin
    (umask 077; p=$(realpath ~/.local/bin/agy); printf 'path=%s\nsha256=%s\nversion=%s\n' "$p" "$(sha256sum "$p" | cut -d' ' -f1)" "$("$p" --version | head -1)" > ~/.agents/gemini-agy)
    ```
 
-   Its three lines are `path=` (the binary's real path), `sha256=` (its hash) and `version=` (its `--version`). The worker hashes the binary at every start, runs exactly the file it hashed, and refuses any other. After every `agy` update, check the new binary, then rewrite the pin.
+   Its three lines are `path=` (the binary's real path), `sha256=` (its hash) and `version=` (its `--version`). The worker hashes the binary at every start, runs exactly the file it hashed, and refuses any other. After every `agy` update, check the new binary, then rewrite the pin. After a re-pin, check by hand that the review leg's edit tools are still refused; nothing enforces it.
 6. In your own terminal, never inside Claude Code, run `~/.claude/skills/gemini/scripts/worker-gemini.sh tui`. It starts the pinned `agy` interactively with the key and without the permission flag, and refuses to run under an agent. When `agy` exits, `tui` ends whatever it left running.
    - Pick a colour scheme.
    - On "Terms of Service & Data Use", untick the data-collection box before Done: pressing Done accepts the terms.
@@ -64,7 +64,7 @@ A worker can plant files that run code with the key at every later start, your o
 
 ### Where the key goes
 
-The key is in the environment of `agy`, so every command a worker runs can read it, and so can any process of your user through `/proc`. The worker keeps it out of argv, tmux's environment, its log and its pane. A sender can still put it in a message; the pump refuses and deletes such a message, unsent. What `agy` writes on its own is outside that promise: scan for the literal key yourself now and then, never through an agent (`grep -rlFf <(sed -n 's/^GEMINI_API_KEY=//p' ~/.config/gemini/.env) ~/.gemini ~/.cache/gemini-worker`; no output means clean). The bounds are the key's "Gemini API only" restriction, the project spend cap and revoking the key. Where `/proc/sys/kernel/core_pattern` pipes crashes to a collector, the launcher's `ulimit -c 0` does not stop the kernel handing that collector a crash image, which can hold the key; on the host this was built on, the collector stored nothing in a test with a canary key.
+The key is in the environment of `agy`, so every command a worker runs can read it, and so can any process of your user through `/proc`. The worker keeps it out of argv, tmux's environment, its log and its pane. A sender can still put it in a message; the pump refuses and deletes such a message, unsent. What `agy` writes on its own is outside that promise: scan for the literal key yourself now and then, never through an agent (`grep -rlFf <(sed -n 's/^GEMINI_API_KEY=//p' ~/.config/gemini/.env) ~/.gemini ~/.cache/gemini-worker ~/.cache/gemini-leg`; no output means clean). The bounds are the key's "Gemini API only" restriction, the project spend cap and revoking the key. Where `/proc/sys/kernel/core_pattern` pipes crashes to a collector, the launcher's `ulimit -c 0` does not stop the kernel handing that collector a crash image, which can hold the key; on the host this was built on, the collector stored nothing in a test with a canary key.
 
 ### Spend
 
@@ -77,10 +77,24 @@ That project cap is the only bound on money, and it lags about ten minutes, so s
 
 ### Out of scope
 
-- Codex directors and headless leads.
+- Codex directors and headless leads: they call the [review leg](#review-leg-linux).
 - Steering or cancelling a turn in flight.
 - Resuming an ended worker, except by hand in your own terminal: `worker-gemini.sh tui --conversation <id>`, with the id from the `init` event in the worker's log.
 - A worker outliving its director.
 - Listing or tailing beyond `tmux -L gemini-worker ls` and `wait`.
 - macOS, and pruning old state dirs under `~/.cache/gemini-worker/`.
 - `agy acp`, a key-injecting proxy, a guardian process, an installer or an updater.
+
+## Review leg (Linux)
+
+`scripts/run-agy.sh` starts one headless call of the pinned `agy` in the caller's own worktree, in place, and `scripts/resume-agy.sh` sends a follow-up turn. Gemini sees uncommitted and git-ignored files there and runs commands to read and search them. It is not the worker: no tmux, no worktree of its own, no director, one prompt and one answer per turn. Any session can start it, through its own permission gate; the runner checks nothing about its caller. SKILL.md's "The review leg" is the caller's guide: arguments, exits, the `GEMINI:` record line, limits.
+
+It runs commands with the key in its environment, as the worker does, and with everything else your user can do: read any file you can, write anywhere, use the network. Its edit tools are refused, but a command still writes, so that is hardening, not a boundary. `agy`'s state for each call stays in a private home inside its run dir under `~/.cache/gemini-leg/`, never in `~/.gemini`. Run dirs accumulate, and a transcript there can hold the key if a command printed it: the scan under [Where the key goes](#where-the-key-goes) covers them.
+
+### Owner setup
+
+The key file and the worker's setup steps 1 to 5 above (self-update off, `agy` installed by hand, `"modelProvider": "gemini"`, no Google sign-in, the pin) are all the leg needs; it does not read `~/.agents/gemini-engine`. It also needs `jq`, `flock`, `timeout`, `sha256sum` and a real `bun` on `PATH` outside the repository under review. `agy`'s settings file may hold `trustedWorkspaces` beside `modelProvider`; one that holds `permissions` allow or ask rules, `allowNonWorkspaceAccess`, `toolPermission`, `hooks` or `mcpServers` turns the leg off, as do the home hooks and MCP servers the worker refuses. The leg reads only `modelProvider` from it.
+
+### Turning it off and spend
+
+A line exactly `Gemini leg: off` in a repository's `AGENTS.md` or `CLAUDE.md` turns the leg off there; a marker in the main checkout also covers its worktrees. That line is the only thing that keeps a repository's files from Google, and it does not affect a consult you ask for. Each call has a token limit, by default 4,000,000 counted tokens with cached reads, but it is a trigger on observed tokens, not a bound on dollars: the AI Studio project spend cap stays the only bound on money.
