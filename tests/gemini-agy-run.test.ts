@@ -69,11 +69,13 @@ function makeHome(settings: object = { modelProvider: "gemini" }): Home {
 
 type Ctx = { home: Home; top: string; dir: string };
 function setup(o: { home?: Home; top?: string } = {}): Ctx {
+  const home = o.home ?? makeHome();
   const top = o.top ?? join(root, `top${++seq}`);
   mkdirSync(top, { recursive: true });
-  const dir = join(root, `run${++seq}`);
+  mkdirSync(join(home.dir, ".cache", "gemini-leg"), { recursive: true });
+  const dir = join(home.dir, ".cache", "gemini-leg", `run${++seq}`);
   mkdirSync(dir, { mode: 0o700 });
-  return { home: o.home ?? makeHome(), top, dir };
+  return { home, top, dir };
 }
 
 const walk = (dir: string): string[] =>
@@ -276,6 +278,22 @@ describe("run", () => {
       expect([label, r.code, r.result.reason, r.response, usage ?? got, r.result.denied_actions]).toEqual([label, 1, reason, undefined, got, denied]);
     }
   }, 60_000);
+
+  test("a run dir not directly under the engine's home's .cache/gemini-leg/ is refused before the key file is opened", async () => {
+    const x = setup();
+    const elsewhere = join(x.home.dir, ".cache", "elsewhere", "run");
+    mkdirSync(elsewhere, { recursive: true, mode: 0o700 });
+    // A FIFO in the key file's place: its writer finishes opening, and leaves the marker, only once a reader opens it.
+    const key = join(x.home.dir, ".config/gemini/.env");
+    unlinkSync(key);
+    expect(spawnSync("mkfifo", ["-m", "600", key]).status).toBe(0);
+    const opened = join(root, `opened${++seq}`);
+    const writer = spawn("/bin/sh", ["-c", ': > "$0" && : > "$1"', key, opened], { stdio: "ignore" });
+    const r = await go({ ...x, dir: elsewhere });
+    await Bun.sleep(300);
+    writer.kill("SIGKILL");
+    expect([r.code, r.out[0], readdirSync(elsewhere), existsSync(opened)]).toEqual([2, `ERROR: ${elsewhere} is not directly under ${join(x.home.dir, ".cache", "gemini-leg")}`, [], false]);
+  }, 30_000);
 
   test("a source settings file that grants access is refused before agy runs; trustedWorkspaces is accepted and not carried", async () => {
     const granted = [{ permissions: { allow: ["command(*)"] } }, { permissions: { ask: [] } }, { allowNonWorkspaceAccess: true }, { toolPermission: {} }, { hooks: {} }, { mcpServers: {} }];

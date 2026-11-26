@@ -11,7 +11,7 @@ import {
   unlinkSync, writeFileSync, writeSync,
 } from "node:fs";
 import { userInfo } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { Log, readKey } from "./api.ts";
 import { call, turnFile } from "./agy-run.ts";
@@ -821,6 +821,9 @@ export async function run(argv: string[], d: RunDeps): Promise<number> {
   const why = (e: unknown) => (e instanceof Refusal ? e.message : log.field(errText(e)));
   const a = parseRun(argv, d.uid);
   if (typeof a === "string") return refuse(a, NEXT.run, 2);
+  // The scripts take the home from HOME and this engine from the passwd entry, so the two can disagree.
+  const leg = join(d.home, ".cache", "gemini-leg");
+  if (!attempt(() => realpathSync(dirname(a.dir)) === realpathSync(leg), false)) return refuse(`${a.dir} is not directly under ${leg}`, NEXT.run, 2);
   const raw = await d.stdin(PROMPT_MAX);
   if (raw.length > PROMPT_MAX) return refuse(`the prompt is over ${PROMPT_MAX} bytes`, NEXT.run, 2);
   const prompt = raw.toString("utf8");
