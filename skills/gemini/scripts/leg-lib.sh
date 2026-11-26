@@ -27,15 +27,29 @@ gl_unavailable() {
 }
 
 # --- usage checks (exit 2) ------------------------------------------------------------------------------------------
-# By identity, so a link or a hard link to the key file is refused too; the key file itself is never opened.
-gl_prompt() {
+# By identity, so a link or a hard link to the key file is refused too.
+gl_key_file() {
   local h
   for h in "$(getent passwd "${UID}" 2> /dev/null | cut -d: -f6)" "${HOME}"; do
     [[ -n ${h} && $1 -ef ${h}/.config/gemini/.env ]] && gl_die 2 "refusing the key file as a prompt: never send a secret to Gemini"
   done
-  [[ -f $1 && -r $1 ]] || gl_die 2 "not a readable regular file: $1"
-  (($(wc -c < "$1") <= 1048576)) || gl_die 2 "the prompt is over 1 MiB: $1"
-  GL_PROMPT="$1"
+}
+
+# GL_BODY: the prompt, read whole from one open, before anything is launched; the checks after the open apply to the
+# opened file, so a path swapped or removed afterwards changes nothing. The path is checked first as well, so the key
+# file is never opened unless it was swapped in.
+gl_prompt() {
+  local fd size
+  gl_key_file "$1"
+  # Checked by path first: opening a FIFO would block.
+  [[ -f $1 ]] && { exec {fd}< "$1"; } 2> /dev/null || gl_die 2 "not a readable regular file: $1"
+  gl_key_file "/dev/fd/${fd}"
+  [[ -f /dev/fd/${fd} ]] || gl_die 2 "not a readable regular file: $1"
+  size=$(wc -c < "/dev/fd/${fd}") && ((size <= 1048576)) || gl_die 2 "the prompt is over 1 MiB: $1"
+  IFS= read -r -N "$((size + 1))" -u "${fd}" GL_BODY
+  # A NUL byte is dropped by read, so it shows here too.
+  ((${#GL_BODY} == size)) || gl_die 2 "the prompt was not read whole (a NUL byte, or it changed while read): $1"
+  exec {fd}<&-
 }
 
 gl_effort() {
@@ -153,8 +167,10 @@ gl_fp_child() {
   for f in "${common}/config" "${wtconf}"; do
     if [[ -f ${f} ]]; then conf+=" $(gl_sha < "${f}")" || return 1; else conf+=" absent"; fi
   done
+  # Modes too, a link's target's included: chmod +x alone switches a dormant hook on.
   if [[ -d ${hooks} ]]; then
     hk=$({ find "${hooks}" -mindepth 1 -maxdepth 1 -printf '%f %y %l\n' | sort &&
+      find -L "${hooks}" -mindepth 1 -maxdepth 1 -printf '%f %m\n' | sort &&
       find -L "${hooks}" -mindepth 1 -maxdepth 1 -type f -print0 | sort -z | xargs -0 -r sha256sum; } | gl_sha) || return 1
   fi
   [[ ${staged} == "${GL_EMPTY}" && ${unstaged} == "${GL_EMPTY}" && ${untracked} == "${GL_EMPTY}" ]] || dirty=1
@@ -185,10 +201,7 @@ gl_begin() {
 }
 
 # --- the call -------------------------------------------------------------------------------------------------------
-gl_frame() {
-  printf '%s\n%s\n\n' "${GL_MEMO}" "${GL_FRAME}"
-  cat -- "${GL_PROMPT}"
-}
+gl_frame() { printf '%s\n%s\n\n%s' "${GL_MEMO}" "${GL_FRAME}" "${GL_BODY}"; }
 
 # Turn $2 in run dir $1, with conversation $3 after the first. The lock on fd 9 stays here: a command Gemini leaves
 # running would otherwise hold it past the call. GL_RC: the engine's exit; GL_ERR: its ERROR: line, if any.

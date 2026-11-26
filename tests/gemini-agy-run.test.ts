@@ -4,7 +4,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  closeSync, existsSync, linkSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { turnFile } from "../skills/gemini/engines/agy-run.ts";
@@ -134,6 +137,13 @@ async function go(x: Ctx, o: Opts = {}) {
   return { code, out, result: result === undefined ? undefined : JSON.parse(result), response: read("response", "md"), log };
 }
 
+// Whether the run's log comes to hold text within 5 s; polled every 5 ms, so it answers within one of the sweep's 50 ms waits.
+async function logged(x: Ctx, text: string): Promise<boolean> {
+  const log = join(x.dir, "log.ndjson");
+  for (const end = Date.now() + 5000; Date.now() < end; await Bun.sleep(5)) if (existsSync(log) && readFileSync(log, "utf8").includes(text)) return true;
+  return false;
+}
+
 describe("run", () => {
   test("agy runs with the open flags in the top level, the private home's environment and nothing of the caller's; every file is private", async () => {
     const x = setup();
@@ -241,7 +251,18 @@ describe("run", () => {
     expect([s.code, s.result.reason, s.result.in, records(y).length]).toEqual([1, "limit", 120_000, 1]);
   }, 30_000);
 
-  test("one 40-minute deadline covers the call and its wrap-up, and 12 minutes without an event end the call", async () => {
+  test("a resume or a wrap-up whose init names another conversation is withheld", async () => {
+    const moved = { resumeAs: "0b7c2f5e-3d1a-4e8b-9c6f-2a4d8e1b7c3f" };
+    const x = setup();
+    expect((await go(x)).code).toBe(0);
+    const r = await go(x, { turn: 2, cfg: { script: FINE, ...moved } });
+    expect([r.code, r.result.reason, r.response]).toEqual([1, "error", undefined]);
+    const y = setup();
+    const w = await go(y, { cfg: { script: [{ answer: "a", usage: [101_000, 0, 0] }, { hold: true }], resume: FINE, ...moved } });
+    expect([w.code, w.result.reason, records(y).length, w.response]).toEqual([1, "error", 2, undefined]);
+  }, 30_000);
+
+  test("one 40-minute deadline covers the call and its wrap-up, which never starts past it; 12 minutes with no event but blank lines end the call", async () => {
     // 400 times real time: the deadline is 6 s, the silence 1.8 s.
     const fast = () => {
       const t0 = performance.now();
@@ -255,9 +276,53 @@ describe("run", () => {
     // A deadline per turn would have ended the wrap-up near 3,400 s.
     expect([r.code, r.result.reason, records(x).length, took >= 2400 && took < 2700, r.result.seconds <= took]).toEqual([1, "timeout", 2, true, true]);
     const quiet = fast();
-    const s = await go(setup(), { clock: quiet, cfg: { script: [{ hold: true }] } });
+    const s = await go(setup(), { clock: quiet, cfg: { script: [{ tick: 100, blank: true }] } });
     const waited = quiet() / 1000;
     expect([s.result.reason, waited >= 720 && waited < 900]).toEqual(["timeout", true]);
+    // The clock reaches the deadline once the limit is logged, while the sweep waits on the held stub.
+    let t = 0;
+    const y = setup();
+    const jump = logged(y, '"ended":"limit"').then((seen) => {
+      if (seen) t = 40 * 60_000;
+    });
+    const late = await go(y, { clock: () => t, cfg: { script: [{ answer: "a", usage: [101_000, 0, 0] }, { hold: true }], resume: FINE } });
+    await jump;
+    expect([late.code, late.result.reason, records(y).length]).toEqual([1, "limit", 1]);
+  }, 30_000);
+
+  test("a log or stderr write that fails, as on a full disk, ends the call error and leaves nothing running", async () => {
+    // The engine runs in this process. Its descriptor for name, once closed, is the lowest free number, so opening
+    // /dev/full until one lands there swaps it in place, once the log holds after.
+    const full = async (x: Ctx, name: string, after: string) => {
+      if (!(await logged(x, after))) return false;
+      const target = join(x.dir, name);
+      const fd = readdirSync("/proc/self/fd").map(Number).find((n) => {
+        try {
+          return readlinkSync(`/proc/self/fd/${n}`) === target;
+        } catch {
+          return false;
+        }
+      });
+      if (fd === undefined) return false;
+      closeSync(fd);
+      const spare: number[] = [];
+      for (let got = openSync("/dev/full", "w"); got !== fd; got = openSync("/dev/full", "w")) spare.push(got);
+      for (const n of spare) closeSync(n);
+      return true;
+    };
+    const rows: [string, string, string, object[]][] = [
+      ["an event's log line", "log.ndjson", '"user_input"', [{ sleep: 300 }, { answer: "a" }, { hold: true }]],
+      ["an unparsed line's log line", "log.ndjson", '"user_input"', [{ sleep: 300 }, { raw: "MALFORMED {" }, { hold: true }]],
+      ["a stderr line", "stderr.txt", '"user_input"', [{ sleep: 300 }, { err: "notice" }, ...FINE]],
+      ["a text flushed as agy's exit settles the call", "log.ndjson", '"SUCCESS"', [{ delta: "partial" }, { result: "SUCCESS", response: "x" }, { sleep: 300 }]],
+    ];
+    for (const [label, name, after, script] of rows) {
+      const x = setup();
+      const swapped = full(x, name, after);
+      // A call left open by a lost write would otherwise hold the test until its timeout.
+      const r = await Promise.race([go(x, { cfg: { script } }), Bun.sleep(5000).then(() => undefined)]);
+      expect([label, await swapped, r?.code, r?.result.reason, r?.response]).toEqual([label, true, 1, "error", undefined]);
+    }
   }, 30_000);
 
   test("verdicts: empty, denied, cap and error, and a step without usage; a failed first turn reports one whole usage tuple", async () => {
@@ -279,20 +344,31 @@ describe("run", () => {
     }
   }, 60_000);
 
-  test("a run dir not directly under the engine's home's .cache/gemini-leg/ is refused before the key file is opened", async () => {
+  test("a run dir not directly under the engine's home's own .cache/gemini-leg/ is refused before the key file is opened", async () => {
     const x = setup();
+    const leg = (h: Home) => join(h.dir, ".cache", "gemini-leg");
     const elsewhere = join(x.home.dir, ".cache", "elsewhere", "run");
     mkdirSync(elsewhere, { recursive: true, mode: 0o700 });
-    // A FIFO in the key file's place: its writer finishes opening, and leaves the marker, only once a reader opens it.
-    const key = join(x.home.dir, ".config/gemini/.env");
-    unlinkSync(key);
-    expect(spawnSync("mkfifo", ["-m", "600", key]).status).toBe(0);
-    const opened = join(root, `opened${++seq}`);
-    const writer = spawn("/bin/sh", ["-c", ': > "$0" && : > "$1"', key, opened], { stdio: "ignore" });
-    const r = await go({ ...x, dir: elsewhere });
-    await Bun.sleep(300);
-    writer.kill("SIGKILL");
-    expect([r.code, r.out[0], readdirSync(elsewhere), existsSync(opened)]).toEqual([2, `ERROR: ${elsewhere} is not directly under ${join(x.home.dir, ".cache", "gemini-leg")}`, [], false]);
+    // A home whose run root links to x's, under which x.dir resolves.
+    const linked = makeHome();
+    mkdirSync(join(linked.dir, ".cache"));
+    symlinkSync(leg(x.home), leg(linked));
+    const cases: [Ctx, string][] = [
+      [{ ...x, dir: elsewhere }, `${elsewhere} is not directly under ${leg(x.home)}`],
+      [{ ...x, home: linked }, `${leg(linked)} must be a real directory, not a link`],
+    ];
+    for (const [ctx, error] of cases) {
+      // A FIFO in the key file's place: its writer finishes opening, and leaves the marker, only once a reader opens it.
+      const key = join(ctx.home.dir, ".config/gemini/.env");
+      unlinkSync(key);
+      expect(spawnSync("mkfifo", ["-m", "600", key]).status).toBe(0);
+      const opened = join(root, `opened${++seq}`);
+      const writer = spawn("/bin/sh", ["-c", ': > "$0" && : > "$1"', key, opened], { stdio: "ignore" });
+      const r = await go(ctx);
+      await Bun.sleep(300);
+      writer.kill("SIGKILL");
+      expect([r.code, r.out[0], readdirSync(ctx.dir), existsSync(opened)]).toEqual([2, `ERROR: ${error}`, [], false]);
+    }
   }, 30_000);
 
   test("a source settings file that grants access is refused before agy runs; trustedWorkspaces is accepted and not carried", async () => {

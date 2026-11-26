@@ -40,18 +40,18 @@ type Turn = { answer?: string; tools?: number; toolErrors?: number; stderr?: num
 // One line of a one-shot script. answer: a finished model step, with usage [input, output, cached] (default
 // [1000, 10, 500]; null for none); delta: a text delta of the next model step; tool: a tool step, which first appends a
 // line to write in the cwd; result: the result, its usage by default this run's steps' sum; raw: a line as written;
-// err: a line on stderr; bytes: that many bytes, with no newline when newline is false; tick: a delta every tick ms,
-// for that long or forever; hold: stdout stays open and nothing more is written.
+// err: a line on stderr; bytes: that many bytes, with no newline when newline is false; tick: a delta (a blank line
+// when blank) every tick ms, for that long or forever; hold: stdout stays open and nothing more is written.
 type Item = {
   answer?: string; usage?: [number, number, number] | null; delta?: string; tool?: string; output?: string; state?: "ACTIVE" | "DONE"; write?: string;
   result?: string; response?: string; error?: string; denied?: string[]; raw?: string; err?: string; bytes?: number; newline?: boolean; sleep?: number;
-  tick?: number; for?: number; hold?: boolean;
+  tick?: number; for?: number; blank?: boolean; hold?: boolean;
 };
 // script is the one-shot stream after the user_input step, resume replaces it when argv carries --conversation; init
-// false sends no init event.
+// false sends no init event; resumeAs is the conversation id the init names when argv carries --conversation.
 type Config = {
   mode?: string; child?: boolean | "cleared"; split?: boolean; delay?: number; tick?: number; turns?: Turn[]; script?: Item[]; resume?: Item[];
-  init?: false | { model?: string; mode?: string };
+  init?: false | { model?: string; mode?: string }; resumeAs?: string;
 };
 
 function writeAll(fd: number, text: string) {
@@ -89,7 +89,7 @@ async function oneShot(script: Item[], cfg: Config, put: (v: unknown) => void, a
   const i = cfg.init;
   if (i !== false) {
     const init = { model: i?.model ?? args[args.indexOf("--model") + 1], cwd: process.cwd(), tools: ["run_command"], permission_mode: i?.mode ?? "always-proceed" };
-    put({ event: "init", conversation_id: CONVERSATION, init });
+    put({ event: "init", conversation_id: (args.includes("--conversation") && cfg.resumeAs) || CONVERSATION, init });
   }
   const line = await new Promise<string>((done) => {
     let buf = "";
@@ -124,7 +124,10 @@ async function oneShot(script: Item[], cfg: Config, put: (v: unknown) => void, a
       if (it.newline !== false) writeAll(1, "\n");
     } else if (it.sleep !== undefined) await sleep(it.sleep);
     else if (it.tick !== undefined) {
-      for (const end = Date.now() + (it.for ?? Infinity); Date.now() < end; await sleep(it.tick)) put(step(s, { state: "ACTIVE", step_type: "agent_response", text_delta: "." }));
+      for (const end = Date.now() + (it.for ?? Infinity); Date.now() < end; await sleep(it.tick)) {
+        if (it.blank) writeAll(1, "\n");
+        else put(step(s, { state: "ACTIVE", step_type: "agent_response", text_delta: "." }));
+      }
     } else if (it.hold) await new Promise(() => setInterval(() => {}, 1 << 30));
   }
   process.exit(0);

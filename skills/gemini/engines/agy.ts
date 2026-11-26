@@ -821,8 +821,10 @@ export async function run(argv: string[], d: RunDeps): Promise<number> {
   const why = (e: unknown) => (e instanceof Refusal ? e.message : log.field(errText(e)));
   const a = parseRun(argv, d.uid);
   if (typeof a === "string") return refuse(a, NEXT.run, 2);
-  // The scripts take the home from HOME and this engine from the passwd entry, so the two can disagree.
+  // The scripts take the home from HOME and this engine from the passwd entry, so the two can disagree. A link at the
+  // root, unlike one in the home's path, could lead to another home's runs.
   const leg = join(d.home, ".cache", "gemini-leg");
+  if (!attempt(() => lstatSync(leg).isDirectory(), false)) return refuse(`${leg} must be a real directory, not a link`, NEXT.run, 2);
   if (!attempt(() => realpathSync(dirname(a.dir)) === realpathSync(leg), false)) return refuse(`${a.dir} is not directly under ${leg}`, NEXT.run, 2);
   const raw = await d.stdin(PROMPT_MAX);
   if (raw.length > PROMPT_MAX) return refuse(`the prompt is over ${PROMPT_MAX} bytes`, NEXT.run, 2);
@@ -859,7 +861,6 @@ export async function run(argv: string[], d: RunDeps): Promise<number> {
     let id: Identity | undefined;
     const start = async (args: string[]) => {
       const child = await d.spawn(`/proc/self/fd/${c.bin.fd}`, args, { argv0: c.bin.path, cwd: a.top, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
-      // A spawn failure leaves no process, which the checks below report.
       child.on("error", () => {});
       const p = child.pid === undefined ? undefined : procStat(child.pid);
       if (p) id = { pid: p.pid, sid: p.sid, start: p.start };

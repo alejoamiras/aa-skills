@@ -180,7 +180,7 @@ A failure reads `GEMINI: unavailable (<reason>[ in=<n> out=<n> cached=<n>][ tree
 
 ### Key and run dirs
 
-- The key is in `agy`'s environment, so every command Gemini runs can read and print it, and what a command prints goes to Google as tool output. The engine removes the literal key and its JSON-escaped form from every file it writes; a key printed encoded, reversed or split, and `agy`'s own files in the private home, are not caught.
+- The key is in `agy`'s environment, so every command Gemini runs can read and print it, and what a command prints goes to Google as tool output. The engine removes the literal key from every file it writes, also when `agy`'s stream carries it JSON-escaped. A key a command prints in any encoding (escape sequences, base64, reversed, split) is not caught, and neither are `agy`'s own files in the private home.
 - Each call's run dir is `~/.cache/gemini-leg/<UTC stamp>-<random>/`, mode 700, its files mode 600: `meta`, `home/` (`agy`'s private home, transcripts included), `session_id`, `lock`, and per turn `prompt.md`, `response.md`, `log.ndjson`, `stderr.txt` and `result.json`, numbered from turn 2. Run dirs accumulate; nothing prunes them.
 - In the answer, the top level's prefix (also as a `file://` link) becomes repo-relative and then the home's becomes `~`. Other absolute paths pass unchanged: check an answer before copying it into a committed file.
 

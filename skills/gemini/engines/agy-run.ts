@@ -50,7 +50,6 @@ const flags = (c: Call, deny: string[], conversation?: string) => [
 // One agy process: the call's turn, or its wrap-up. end is set when the engine ended it before agy did.
 type Shot = { steps: Usage; init: boolean; conversation?: string; result?: Outcome; end?: Reason };
 
-// The failure, or undefined for an answer.
 function verdict(s: Shot): Reason | undefined {
   if (s.end) return s.end;
   const r = s.result;
@@ -69,6 +68,7 @@ class Run {
   private tools = 0;
   private unparsed = 0;
   private capped = 0;
+  private broken = false;
   private stopped = false;
   private stop?: () => void;
 
@@ -93,13 +93,13 @@ class Run {
       this.write(turnFile(c.turn, "prompt", "md"), c.prompt);
       this.log = openSync(join(c.dir, turnFile(c.turn, "log", "ndjson")), "wx", 0o600);
       this.err = openSync(join(c.dir, turnFile(c.turn, "stderr", "txt")), "wx", 0o600);
-      const first = await this.shot(child, c.prompt, false);
+      const first = await this.shot(child, c.prompt, false, c.conversation);
       const id = c.conversation ?? first.conversation;
       let wrap: Shot | undefined;
-      if (first.end === "limit" && !this.stopped && id && this.used * 100 < c.limit * 115) {
+      if (first.end === "limit" && !this.stopped && id && this.used * 100 < c.limit * 115 && c.clock() - this.start < DEADLINE) {
         // A wrap-up that cannot start leaves the call ended limit.
         const next = await c.spawn(flags(c, WRAP_DENY, id)).catch(() => undefined);
-        wrap = next && (await this.shot(next, WRAP_TEXT, true));
+        wrap = next && (await this.shot(next, WRAP_TEXT, true, id));
       }
       return this.finish(first, wrap, id);
     } catch (e) {
@@ -112,7 +112,8 @@ class Run {
   }
 
   // Ends at agy's exit with its stdout drained, or at the first event that decides the call; either way after sweep.
-  private shot(child: ChildProcess, text: string, wrapup: boolean): Promise<Shot> {
+  // asked is the conversation the shot resumes, which its init must name.
+  private shot(child: ChildProcess, text: string, wrapup: boolean, asked: string | undefined): Promise<Shot> {
     const c = this.c;
     const s: Shot = { steps: ZERO, init: false };
     const models = new Set<number>();
@@ -150,7 +151,8 @@ class Run {
         if (init.conversation && UUID.test(init.conversation)) s.conversation = init.conversation;
         if (init.mode !== MODE) return "mode";
         if (init.model !== c.model && init.model !== `${c.model}-${c.effort}`) return "model";
-        if (!s.conversation) return "error";
+        // A resume answered in another conversation has none of the earlier turns.
+        if (!s.conversation || (asked !== undefined && s.conversation !== asked)) return "error";
         s.init = true;
         return undefined;
       }
@@ -196,6 +198,7 @@ class Run {
         await c.sweep().catch(() => {});
         child.stdout?.destroy();
         child.stderr?.destroy();
+        if (this.broken) s.end = "error";
         resolve(s);
       };
       const unparsed = (size: number) => {
@@ -206,9 +209,9 @@ class Run {
       // An overlong line has already settled the shot when it crossed the bound.
       const line = (buf: Buffer, _over: boolean, size: number) => {
         if (settled) return;
-        last = c.clock();
         const raw = buf.toString("utf8");
         if (raw.trim() === "") return;
+        last = c.clock();
         let ev: unknown;
         try {
           ev = JSON.parse(raw);
@@ -223,12 +226,14 @@ class Run {
           void settle("error");
         }
       };
+      // Both, in either order: stdout's end hands over a last line without a newline, and agy can end stdout and run on,
+      // writing stderr, until its close.
       let open = 2;
       const drained = () => {
         if (--open === 0) void settle();
       };
       this.stop = () => void settle("error");
-      if (this.stopped) return void settle("error");
+      if (this.stopped || this.broken) return void settle("error");
       child.once("close", drained);
       const crossed = (size: number) => {
         if (!settled) unparsed(size);
@@ -236,7 +241,7 @@ class Run {
       if (child.stdout) lines(child.stdout, line, drained, { max: LINE_MAX, crossed });
       else drained();
       // An overlong stderr line is kept by its length only: a cut could leave a fragment of a key the redactor misses.
-      if (child.stderr) lines(child.stderr, (buf, over, size) => writeSync(this.err, `${over ? `[a line of ${size} bytes]` : c.redact(buf.toString("utf8"))}\n`));
+      if (child.stderr) lines(child.stderr, (buf, over, size) => this.put(this.err, `${over ? `[a line of ${size} bytes]` : c.redact(buf.toString("utf8"))}\n`));
       child.stdin?.on("error", () => {});
       child.stdin?.end(userEvent(text));
       const tick = () => {
@@ -292,7 +297,20 @@ class Run {
 
   private note(body: Json) {
     const entry = { t: new Date(this.c.now()).toISOString(), src: "run", ...body };
-    if (this.log >= 0) writeSync(this.log, `${JSON.stringify(this.clean(entry))}\n`);
+    this.put(this.log, `${JSON.stringify(this.clean(entry))}\n`);
+  }
+
+  // Never throws, since a throw from a stream handler or from settle would skip the sweep. A write that fails or falls
+  // short, as on a full disk, ends the call error, and the writes after it are dropped so the files keep no gap.
+  private put(fd: number, text: string) {
+    if (fd < 0 || this.broken) return;
+    try {
+      if (writeSync(fd, text) === Buffer.byteLength(text)) return;
+    } catch {
+      // as a short write
+    }
+    this.broken = true;
+    this.stop?.();
   }
 
   private clean(v: unknown): unknown {

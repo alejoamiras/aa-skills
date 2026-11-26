@@ -98,15 +98,20 @@ R2=$(gls_rec "$(gls_key r2 GEMINI_DIR)")
 gls_t "run: a dirty tree gives rev=-dirty, and a second edit to its dirty file tree=changed" sh -c '[ "$0" = 0 ] && head -n 1 "$1" | grep -qE "^GEMINI: answered \(neon high rev=$2-dirty .* tree=changed\)$"' "$(gls_rc r2)" "$S/r2.out" "$SHA7"
 gls_t "run: the untracked and the git-ignored file are in the stub's cwd" sh -c 'c=$(jq -r .cwd "$0") && [ "$c" = "$1" ] && [ -f "$c/untracked.txt" ] && [ -f "$c/ignored.log" ]' "$R2" "$REPO"
 git -C "$REPO" checkout -q -- README && rm -f "$REPO/untracked.txt"
-HOOKS=("$REPO/.git/hooks" "$S/hooks")
-mkdir -p "$S/hooks"
-for i in 0 1; do
-  ((i)) && git -C "$REPO" config core.hooksPath "$S/hooks"
-  gls_stub "{\"script\":[{\"tool\":\"run_command\",\"write\":\"$(realpath --relative-to="$WT" "${HOOKS[i]}")/post-commit\"},{\"answer\":\"done\"},{\"result\":\"SUCCESS\",\"response\":\"done\"}]}"
-  gls_call h$i "$RUN" "$S/p.md" "$WT" high open neon
-  gls_t "fingerprint: from a linked worktree, a file the stub writes into ${HOOKS[i]#"$S"/} marks tree=changed" sh -c '[ "$0" = 0 ] && [ -f "$2/post-commit" ] && [ -n "$3" ] && head -n 1 "$1" | grep -qE "^GEMINI: answered \(neon high rev=$4 .* tree=changed\)$"' "$(gls_rc h$i)" "$S/h$i.out" "${HOOKS[i]}" "$(gls_rec "$(gls_key h$i GEMINI_DIR)")" "$SHA7"
-  rm -f "${HOOKS[i]}/post-commit"
-done
+gls_stub "{\"script\":[{\"tool\":\"run_command\",\"write\":\"$(realpath --relative-to="$WT" "$REPO/.git/hooks")/post-commit\"},{\"answer\":\"done\"},{\"result\":\"SUCCESS\",\"response\":\"done\"}]}"
+gls_call h0 "$RUN" "$S/p.md" "$WT" high open neon
+gls_t "fingerprint: from a linked worktree, a file the stub writes into the common dir's hooks/ marks tree=changed" sh -c '[ "$0" = 0 ] && [ -f "$2/post-commit" ] && [ -n "$3" ] && head -n 1 "$1" | grep -qE "^GEMINI: answered \(neon high rev=$4 .* tree=changed\)$"' "$(gls_rc h0)" "$S/h0.out" "$REPO/.git/hooks" "$(gls_rec "$(gls_key h0 GEMINI_DIR)")" "$SHA7"
+rm -f "$REPO/.git/hooks/post-commit"
+# A dormant hook in the dir core.hooksPath names, switched on by its mode alone while the stub runs.
+{ mkdir -p "$S/hooks" && printf '#!/bin/sh\n' > "$S/hooks/post-commit" && chmod 644 "$S/hooks/post-commit" &&
+  git -C "$REPO" config core.hooksPath "$S/hooks"; } || echo "FAIL  fixture: a dormant hook"
+gls_stub '{"script":[{"sleep":2000},{"answer":"done"},{"result":"SUCCESS","response":"done"}]}'
+spawns=$(find "$GL" -path '*/stub/*[0-9].json' | wc -l)
+gls_call h1 "$RUN" "$S/p.md" "$WT" high open neon & H1=$!
+for _ in $(seq 100); do [ "$(find "$GL" -path '*/stub/*[0-9].json' | wc -l)" -gt "$spawns" ] && break; sleep 0.1; done
+chmod 755 "$S/hooks/post-commit"
+wait "$H1"
+gls_t "fingerprint: a dormant hook in core.hooksPath's dir made executable during the call marks tree=changed" sh -c '[ "$0" = 0 ] && [ -n "$2" ] && head -n 1 "$1" | grep -qE "^GEMINI: answered \(neon high rev=$3 .* tree=changed\)$"' "$(gls_rc h1)" "$S/h1.out" "$(gls_rec "$(gls_key h1 GEMINI_DIR)")" "$SHA7"
 git -C "$REPO" config --unset core.hooksPath
 # git diff runs a clean filter twice on a touched file, the second time holding the index lock: this one sleeps only
 # then, so a fingerprint killed at its deadline is killed while the lock it took is held.
@@ -119,6 +124,14 @@ gls_call sl "$RUN" "$S/p.md" "$SLOW" high open neon
 SLOW_S=$((SECONDS - t0))
 gls_t "fingerprint: a clean filter past both deadlines gives tree=unknown and rev=-dirty, the answer kept (${SLOW_S} s)" sh -c '[ "$0" = 0 ] && [ -n "$3" ] && head -n 1 "$1" | grep -qE "^GEMINI: answered \(neon high rev=$2-dirty .* tree=unknown\)$"' "$(gls_rc sl)" "$S/sl.out" "$(git -C "$SLOW" rev-parse HEAD | cut -c1-7)" "$(gls_rec "$(gls_key sl GEMINI_DIR)")"
 gls_t "fingerprint: no index.lock in the repo, no index copy or lock under ~/.cache/gemini-leg/" sh -c '[ ! -e "$0" ] && [ -z "$(find "$1" -mindepth 1 -maxdepth 1 ! -type d)" ]' "$(git -C "$SLOW" rev-parse --path-format=absolute --git-path index.lock)" "$GL"
+# A clean filter that removes the prompt file: it runs in the starting fingerprint, after the prompt's checks and
+# before the engine starts.
+VANISH="$S/vanish"
+{ git init -q -b main "$VANISH" && printf 'a\n' > "$VANISH/a.txt" && echo 'a.txt filter=gone' > "$VANISH/.gitattributes" && git -C "$VANISH" add . &&
+  gls_commit "$VANISH" init && git -C "$VANISH" config filter.gone.clean "rm -f '$S/vp.md'; cat" && touch -d '+1 minute' "$VANISH/a.txt" &&
+  printf 'The vanishing prompt.\n' > "$S/vp.md"; } || echo "FAIL  fixture: the vanish repo"
+gls_call vp "$RUN" "$S/vp.md" "$VANISH" high open neon
+gls_t "prompt: removed after its checks, before the engine starts: the whole prompt still reaches agy" sh -c '[ "$0" = 0 ] && [ ! -e "$2" ] && jq -e ".message.content | endswith(\"\n\nThe vanishing prompt.\n\")" "${1%.json}.in.ndjson"' "$(gls_rc vp)" "$(gls_rec "$(gls_key vp GEMINI_DIR)")" "$S/vp.md"
 
 # --- resumes -------------------------------------------------------------------------------------------------------------
 gls_call r1b "$RESUME" "" "$S/p2.md" "$D1"
@@ -147,6 +160,9 @@ gls_call k1 "$RUN" "$S/kp.md" "$REPO" high open neon
 gls_t "refuse: a prompt holding the stub key: exit 2, the stop line alone on stderr, nothing on stdout, no run dir" sh -c '[ "$0" = 2 ] && [ ! -s "$1" ] && [ "$(wc -l < "$2")" = 1 ] && grep -q "^ERROR: the prompt holds the Gemini key" "$2" && [ "$3" = "$4" ]' "$(gls_rc k1)" "$S/k1.out" "$S/k1.err" "$n" "$(gls_runs)"
 gls_call k2 "$RUN" "$HOME/.config/gemini/.env" "$REPO" high open neon
 gls_t "refuse: the key file as the prompt: exit 2, one stderr line, no run dir" sh -c '[ "$0" = 2 ] && [ ! -s "$1" ] && [ "$(wc -l < "$2")" = 1 ] && [ "$3" = "$4" ]' "$(gls_rc k2)" "$S/k2.out" "$S/k2.err" "$n" "$(gls_runs)"
+printf 'a\0b\n' > "$S/np.md"
+gls_call k3 "$RUN" "$S/np.md" "$REPO" high open neon
+gls_t "refuse: a prompt not read whole (a NUL byte): exit 2, one stderr line, no run dir" sh -c '[ "$0" = 2 ] && [ ! -s "$1" ] && [ "$(wc -l < "$2")" = 1 ] && [ "$3" = "$4" ]' "$(gls_rc k3)" "$S/k3.out" "$S/k3.err" "$n" "$(gls_runs)"
 printf 'path=%s\nsha256=%064d\nversion=1.5.15-stub\n' "$HOME/bin/agy" 0 > "$HOME/.agents/gemini-agy"
 gls_call e4 "$RUN" "$S/p.md" "$REPO" high open neon
 gls_t "refuse: an engine setup refusal on a fresh run: exit 4 off-setup, no trailer, no run dir" sh -c '[ "$0" = 4 ] && [ "$(cat "$1")" = "GEMINI: unavailable (off-setup)" ] && [ "$2" = "$3" ]' "$(gls_rc e4)" "$S/e4.out" "$n" "$(gls_runs)"
