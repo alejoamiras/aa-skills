@@ -97,8 +97,9 @@ class Run {
       const id = c.conversation ?? first.conversation;
       let wrap: Shot | undefined;
       if (first.end === "limit" && !this.stopped && !this.broken && id && this.used * 100 < c.limit * 115 && c.clock() - this.start < DEADLINE) {
-        // A wrap-up that cannot start leaves the call ended limit.
-        const next = await c.spawn(flags(c, WRAP_DENY, id)).catch(() => undefined);
+        // A wrap-up that cannot start leaves the call ended limit; one refused after its spawn left a child, swept as the
+        // first launch's is.
+        const next = await c.spawn(flags(c, WRAP_DENY, id)).catch(() => c.sweep().then(() => undefined));
         wrap = next && (await this.shot(next, WRAP_TEXT, true, id));
       }
       return this.finish(first, wrap, id);

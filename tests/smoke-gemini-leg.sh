@@ -115,12 +115,13 @@ gls_t "fingerprint: a dormant hook in core.hooksPath's dir made executable durin
 # A hook linked to the stub key file. A FIFO in the key's place cannot show this: the old code stat()ed and skipped
 # one. So the key's access time is set years back, which any read moves under relatime; a decoy shows reads register.
 # The fingerprint runs alone first, since the engine's own read of the key during a call would move it too.
-KEYF="$HOME/.config/gemini/.env" OLD=978307200
+KEYF="$HOME/.config/gemini/.env" OLD=978307200 READS=""
 { ln -s "$KEYF" "$S/hooks/pre-push" && printf 'x\n' > "$S/decoy" && touch -c -a -d "@$OLD" "$KEYF" "$S/decoy" &&
   cat "$S/decoy" > /dev/null; } || echo "FAIL  fixture: a hook linked to the key file"
 if [ "$(stat -c %X "$S/decoy")" = "$OLD" ]; then
   echo "skip  fingerprint: a hook linked to the key file (this filesystem does not record reads)"
 else
+  READS=1
   gls_call fp bash "$(dirname "$RUN")/leg-lib.sh" fingerprint "$WT" "$S/fp.index"
   AT=$(stat -c %X "$KEYF")
   gls_stub "$ANSWER"
@@ -205,9 +206,17 @@ a linked dir|$D1|$S/link|2|||:|:
 a dir of mode 750|$D1|$D1|2|||chmod 750 "\$0"|chmod 700 "\$0"
 a dir outside ~/.cache/gemini-leg/|$HOME/.cache/elsewhere|$HOME/.cache/elsewhere|2|||:|:
 a last turn that ended on the mode tripwire|$DM|$DM|2|||:|:
+a last result that is a link|$D1|$D1|2|||mv "\$0/result.2.json" "\$2/r2.json" && touch -c -a -d @$OLD "\$2/r2.json" && ln -s "\$2/r2.json" "\$0/result.2.json"|stat -c %X "\$2/r2.json" > "\$2/r2.atime"; rm "\$0/result.2.json" && mv "\$2/r2.json" "\$0/result.2.json"
 a marker that appeared since the run|$D1|$D1|4|GEMINI: unavailable (off-marker)||printf '%s\n' '$OFF' >> "\$3/AGENTS.md"|git -C "\$3" checkout -q -- AGENTS.md
 an engine refusal (hooks.json in the private home)|$D1|$D1|2|||echo '{}' > "\$0/home/.gemini/config/hooks.json"|rm "\$0/home/.gemini/config/hooks.json"
 an engine setup refusal (the pin's hash)|$D1|$D1|4|GEMINI: unavailable (off-setup)||sed -i 's/^sha256=.*/sha256=$(printf '%064d' 0)/' "\$2/.agents/gemini-agy"|cp "\$1" "\$2/.agents/gemini-agy"
 EOF
+# The engine refuses that link too, without following it, so only the target's access time shows the resume's own
+# check: a read of the target, a result with no tripwire, would have moved it.
+if [ -n "$READS" ]; then
+  gls_t "refuse resume: the linked result's target was never opened (its access time stays)" test "$(cat "$HOME/r2.atime")" = "$OLD"
+else
+  echo "skip  refuse resume: the linked result's target was never opened (this filesystem does not record reads)"
+fi
 
 exit "$FAIL"

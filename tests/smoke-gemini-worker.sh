@@ -279,7 +279,7 @@ echo '{"mode":"exit","child":true}' > "$HOME/stub.json"
 python3 -c "$DIRECTOR" "$FLAG" "$S/d5" "$CLI" start "$WT3" --name ex & DIRS+=("$!")
 read -r -t 60 rc <> "$GWS_FIFO"
 R5=$(ls -t "$HOME"/stub/*.json | head -n 1)
-gws_t "start: a stub that exits at once gives exit 4 with its last log lines, and no session" sh -c '[ "$0" = 4 ] && grep -q "agy exited before it could be checked" "$1" && ! tmux -L "$2" has-session -t =gemini-ex' "$rc" "$S/d5.err" "$SOCK"
+gws_t "start: a stub that exits at once gives exit 4 with its last log lines, and no session" sh -c '[ "$0" = 4 ] && grep -q "agy could not be checked: it exited, or had not started after 2 seconds" "$1" && ! tmux -L "$2" has-session -t =gemini-ex' "$rc" "$S/d5.err" "$SOCK"
 gws_t "start: ...and nothing it started is left" sh -c "$EMPTY" "$R5"
 echo '{"child":true}' > "$HOME/stub.json"
 { cp "$S/agy-stub" "$HOME/bin/agy.new" && printf x >> "$HOME/bin/agy.new" && mv "$HOME/bin/agy.new" "$HOME/bin/agy"; } || echo "FAIL  fixture: change the stub"

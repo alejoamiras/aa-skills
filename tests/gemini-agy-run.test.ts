@@ -111,9 +111,22 @@ function leftovers(marker: string, sids: number[]): number[] {
   return out;
 }
 
+// Every live process started for the run, stub or not: agy's TMPDIR, which each process it starts inherits, is in the run dir.
+function started(x: Ctx): number[] {
+  const tmp = `\0TMPDIR=${join(x.dir, "home", "tmp")}\0`;
+  return readdirSync("/proc").filter((n) => /^[0-9]+$/.test(n)).map(Number).filter((pid) => {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      return stat.slice(stat.lastIndexOf(")") + 2)[0] !== "Z" && `\0${readFileSync(`/proc/${pid}/environ`, "latin1")}`.includes(tmp);
+    } catch {
+      return false;
+    }
+  });
+}
+
 // whole: a run whose stub prints the key split inside one string, which the log keeps; no file may hold it whole.
-// late: agy starts as a bun child that execs the stub that many ms after the spawn returns.
-type Opts = { cfg?: object; prompt?: string; turn?: number; conversation?: string; clock?: () => number; whole?: boolean; late?: number };
+// late: by spawn, from 1, the ms after the spawn returns at which agy, started as a bun child, execs the stub.
+type Opts = { cfg?: object; prompt?: string; turn?: number; conversation?: string; clock?: () => number; whole?: boolean; late?: Record<number, number> };
 // One engine run. After it: no run-dir file holds a piece of the canary, and nothing a stub started is left.
 async function go(x: Ctx, o: Opts = {}) {
   writeFileSync(join(x.home.dir, "stub.json"), JSON.stringify(o.cfg ?? { script: FINE }));
@@ -126,8 +139,9 @@ async function go(x: Ctx, o: Opts = {}) {
     limits: { ...LIMITS, grace: 300, poll: 20 },
     spawn: (file, args, opts) => {
       spawns++;
-      if (o.late === undefined) return spawn(file, args, opts);
-      return spawn(process.execPath, [join(import.meta.dir, "fixtures", "exec-later.ts"), String(o.late), x.home.bin, ...args], { ...opts, argv0: process.execPath });
+      const late = o.late?.[spawns];
+      if (late === undefined) return spawn(file, args, opts);
+      return spawn(process.execPath, [join(import.meta.dir, "fixtures", "exec-later.ts"), String(late), x.home.bin, ...args], { ...opts, argv0: process.execPath });
     },
     signals: () => {}, input: () => {},
     out: (line) => out.push(line), env: WORKER_ENV, stdin: async () => Buffer.from(o.prompt ?? "Review the repository."), clock: o.clock ?? (() => performance.now()),
@@ -136,6 +150,7 @@ async function go(x: Ctx, o: Opts = {}) {
   const holds = o.whole ? (text: string) => text.includes(CANARY) : leaks;
   for (const f of walk(x.dir)) expect([relative(x.dir, f), holds(readFileSync(f, "latin1"))]).toEqual([relative(x.dir, f), false]);
   for (const r of records(x)) expect(leftovers(r.env.GEMINI_WORKER_ID, [r.sid, r.child].filter(Boolean))).toEqual([]);
+  expect(started(x)).toEqual([]);
   const read = (name: string, ext: string) => {
     const p = join(x.dir, turnFile(turn, name, ext));
     return existsSync(p) ? readFileSync(p, "utf8") : undefined;
@@ -398,9 +413,14 @@ describe("run", () => {
     }
   }, 60_000);
 
-  test("agy's file is checked once its exec has happened, though the spawn returned before it", async () => {
-    const r = await go(setup(), { late: 300 });
+  test("agy's file is checked once its exec has happened, though the spawn returned before it; one never seen is refused and swept", async () => {
+    const r = await go(setup(), { late: { 1: 300 } });
     expect([r.code, r.out, r.response]).toEqual([0, [], "fine"]);
+    // Still in bun's image when the 2-second wait ends: the first launch, then the wrap-up, which leaves the call ended limit.
+    const never = await go(setup(), { late: { 1: 4000 } });
+    expect([never.code, never.out[0], never.spawns]).toEqual([4, "ERROR: agy could not be checked: it exited, or had not started after 2 seconds", 1]);
+    const wrap = await go(setup(), { late: { 2: 4000 }, cfg: { script: [{ answer: "a", usage: [101_000, 0, 0] }, { hold: true }], resume: FINE } });
+    expect([wrap.code, wrap.result.reason, wrap.spawns]).toEqual([1, "limit", 2]);
   }, 30_000);
 
   test("a run dir not directly under the engine's home's own .cache/gemini-leg/ is refused before the key file is opened", async () => {

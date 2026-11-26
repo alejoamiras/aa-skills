@@ -53,7 +53,9 @@ TURN=2
 while [[ -e ${DIR}/prompt.${TURN}.md || -L ${DIR}/prompt.${TURN}.md ]]; do TURN=$((TURN + 1)); done
 LAST="${DIR}/result.json"
 ((TURN > 2)) && LAST="${DIR}/result.$((TURN - 1)).json"
-TRIP=$(jq -er '.tripwire // ""' "${LAST}" 2> /dev/null) || gl_die 2 "turn $((TURN - 1)) has no readable result in ${DIR}"
+# A command from an earlier turn can plant a link here before the engine's exclusive create, so it is never followed.
+[[ -f ${LAST} && ! -L ${LAST} ]] && TRIP=$(jq -er '.tripwire // ""' "${LAST}" 2> /dev/null) ||
+  gl_die 2 "turn $((TURN - 1)) has no readable result in ${DIR}"
 [[ ${TRIP} == mode || ${TRIP} == model ]] && gl_die 2 "turn $((TURN - 1)) ended on the ${TRIP} tripwire, which bars a resume"
 
 gl_begin

@@ -277,7 +277,7 @@ gl_report() {
   fi
   [[ -f ${dir}/session_id && ! -L ${dir}/session_id ]] && read -r sid < "${dir}/session_id"
   [[ ${sid} =~ ${GL_UUID} ]] || sid=""
-  [[ -f ${dir}/log${sfx}.ndjson ]] && log="${dir}/log${sfx}.ndjson"
+  [[ -f ${dir}/log${sfx}.ndjson && ! -L ${dir}/log${sfx}.ndjson ]] && log="${dir}/log${sfx}.ndjson"
   printf 'GEMINI_DIR=%s\nSESSION_ID=%s\nRESPONSE_FILE=%s\nLOG_FILE=%s\n' "${dir}" "${sid}" "${resp}" "${log}"
   exit "${rc}"
 }

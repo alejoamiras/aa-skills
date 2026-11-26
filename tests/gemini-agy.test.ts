@@ -563,7 +563,7 @@ describe("worker", () => {
         }),
     });
     const f = await finished(w);
-    expect([f.code, f.gone.reason]).toEqual([4, "agy exited before it could be checked"]);
+    expect([f.code, f.gone.reason]).toEqual([4, "agy could not be checked: it exited, or had not started after 2 seconds"]);
     expect(records(w.home)[0].child).toBeGreaterThan(0);
   }, 30_000);
 
