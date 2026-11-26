@@ -6,7 +6,7 @@ You run quick lane `<LANE>`: one small change, no plan, in the worktree <WORKTRE
 
 Owner decisions this change builds, quoted by id and text: <DECISIONS>
 
-Within the bounds: make the change with its tests, run the gates at retry 0 for the touched surfaces, then the Codex fix loop on the diff (`run-codex.sh` on <CODEX_MODEL> at <CODEX_EFFORT>, read-only; until clean, hard stop at three rounds). Push only `worktree-<LANE>` or a `<LANE>-*` branch, never <TRUNK>, a release branch or a tag, and open one ready PR against <BASE>, <CLOSES>. Leads never merge. Append the final block from the common brief (`LEAD_DONE`, the `PR #` line, `HEAD <full sha>`, `CODEX:`, `OWNER_ASKS: none`, `ASKS:`, `PLAN: none`) to <ORCHY_HOME>/reports/<KEY>.md and overwrite <ORCHY_HOME>/reports/<KEY>.progress at every gate.
+Within the bounds: make the change with its tests, run the gates at retry 0 for the touched surfaces, then the Codex and Gemini loop on the diff (`run-codex.sh` on <CODEX_MODEL> at <CODEX_EFFORT>, read-only, and Gemini as the common brief's panel says, on one prompt file; until clean, hard stop at three rounds). Push only `worktree-<LANE>` or a `<LANE>-*` branch, never <TRUNK>, a release branch or a tag, and open one ready PR against <BASE>, <CLOSES>. Leads never merge. Append the final block from the common brief (`LEAD_DONE`, the `PR #` line, `HEAD <full sha>`, `CODEX:`, `GEMINI:`, `OWNER_ASKS: none`, `ASKS:`, `PLAN: none`) to <ORCHY_HOME>/reports/<KEY>.md and overwrite <ORCHY_HOME>/reports/<KEY>.progress at every gate.
 
 State today (<DATE>): <STATE>. Never yield while a run is in flight: run gates in the foreground with a bounded timeout; never wait on a log file a background job may never write.
 <NEVER_OPEN>

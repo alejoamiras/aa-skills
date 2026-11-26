@@ -29,7 +29,8 @@ for _ in 1 2; do "$T/sess/claude" -c 'import time; time.sleep(3600)' & ps+=($!);
 git init -q --bare "$T/origin.git"; git init -q -b dev "$T/repo"; git -C "$T/repo" remote add origin "$T/origin.git"
 git -C "$T/repo" -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -q --allow-empty -m init; git -C "$T/repo" push -q origin dev
 cd "$T/repo"
-jq '.install = "true"' "$K/examples/orchy.example.json" > "$C"; cp "$K/examples/local.example.json" "$H/local.json"
+# no leads.gemini_model, as in a home bootstrapped before it existed: every run renders it off
+jq '.install = "true" | del(.leads.gemini_model)' "$K/examples/orchy.example.json" > "$C"; cp "$K/examples/local.example.json" "$H/local.json"
 "$ORCHY" lock >/dev/null
 SCH() { "$ORCHY" schedule "$@"; }
 ss_sum() { md5sum < "$C"; }
@@ -95,6 +96,7 @@ ls=${due:0:10}; ls=harden-security-${ls//-/}   # a run's lane names its slot's U
 o=$(PATH="$T/aw:$PATH" SCH start sec); [[ $o =~ ^started\ sec:\ ($ls-[0-9]{12})\ on\ atlas$ ]] || ss_fail "start: $o"; k=${BASH_REMATCH[1]}
 grep -qxF "$k" "$MOCK_DIR/begun.log" || ss_fail "no started record when its worktree was asked for: $(cat "$MOCK_DIR/begun.log" 2>&1)"
 grep -qF "the harden skill's \`security\` focus at effort \`high\`" "$H/prompts/$k.md" && grep -qxF 'FINDINGS: critical=<n> high=<n> medium=<n> low=<n>' "$H/prompts/$k.md" \
+  && grep -qF '`gemini_model` `off`' "$H/prompts/$k.md" && grep -qxF 'GEMINI: <answered N of M calls | unavailable (<reason>)>' "$H/prompts/$k.md" \
   || ss_fail "the rendered prompt: $(cat "$H/prompts/$k.md")"
 # the fan-out's exclusions travel beside the prompt, which names only their path
 [ "$(cat "$H/prompts/$k.never.json")" = '{"never":["cedar"]}' ] && grep -qF -- "--exclude-from $H/prompts/$k.never.json" "$H/prompts/$k.md" || ss_fail "the never file: $(cat "$H/prompts/$k.never.json" 2>&1)"
@@ -160,11 +162,12 @@ SCH add f bugs low Sun 15:00 UTC >/dev/null; ss_back f; m=$(date +%s); lf=$(ss_l
 o=$(timeout 20 "$ORCHY" schedule start f) && [[ $o =~ ^skipped\ f:\ reports/$lf-[0-9]{12}\.md\ is\ not\ a\ regular\ file$ ]] || ss_fail "a FIFO report: $o"
 rm -f "$H"/reports/harden-bugs-*.md
 
-# --- the only heavy account has no 5-hour window: judged on its week; skip_filed reaches the prompt
+# --- the only heavy account has no 5-hour window: judged on its week; skip_filed and a set gemini_model reach the prompt
 { ss_row atlas 85 none; ss_row beacon 10; ss_row cedar 90; } | jq -s . > "$MOCK_DIR/cu/rows.json"
-SCH add b3 bugs max Sat 14:00 Asia/Tokyo --skip-filed >/dev/null; ss_back b3
+SCH add b3 bugs max Sat 14:00 Asia/Tokyo --skip-filed >/dev/null; ss_back b3; jq '.leads.gemini_model = "neon"' "$C" > "$T/c.json" && mv "$T/c.json" "$C"
 o=$(SCH start b3); [[ $o =~ ^started\ b3:\ (harden-bugs-[0-9]{8}-[0-9]{12})\ on\ atlas$ ]] || ss_fail "the account with no 5-hour window: $o"; kb=${BASH_REMATCH[1]}
-grep -qF '## Already tracked' "$H/prompts/$kb.md" && grep -qxF 'FINDINGS: blocker=<n> critical=<n> major=<n> minor=<n>' "$H/prompts/$kb.md" || ss_fail "the skip_filed prompt"
+grep -qF '## Already tracked' "$H/prompts/$kb.md" && grep -qxF 'FINDINGS: blocker=<n> critical=<n> major=<n> minor=<n>' "$H/prompts/$kb.md" \
+  && grep -qF '`gemini_model` `neon`' "$H/prompts/$kb.md" || ss_fail "the skip_filed prompt, or gemini_model neon: $(cat "$H/prompts/$kb.md")"
 jq -e '.window.start.session_window == "none"' <<<"$(ss_rec b3)" >/dev/null || ss_fail "the start reading: $(ss_rec b3)"
 
 # --- a resume landing while a settle reads the run's files waits for it, so the resumed run never keeps what that settle read
