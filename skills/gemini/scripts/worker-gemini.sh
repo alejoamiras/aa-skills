@@ -36,6 +36,8 @@ gw_die() {
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || exit 2
 # shellcheck source=SCRIPTDIR/../../../lib/director.sh
 . "${HERE}/../../../lib/director.sh" || exit 2
+# shellcheck source=SCRIPTDIR/../../../lib/agy-repo.sh
+. "${HERE}/../../../lib/agy-repo.sh" || exit 2
 SKILL="$(cd "${HERE}/.." && pwd -P)" || exit 2
 ENGINE="${SKILL}/engines/agy"
 SOCK="${GEMINI_WORKER_TMUX_SOCKET:-gemini-worker}"
@@ -241,7 +243,7 @@ gw_wenv() {
 # A linked worktree in agent-worktree's layout, not the caller's own, holding no hooks or MCP file that agy would run
 # before any message. Sets GW_WT to its physical path.
 gw_check_worktree() {
-  local p top f own
+  local p top own why
   [[ -d $1 ]] || gw_die 2 "not a directory: $1"
   p=$(cd -- "$1" && pwd -P) || gw_die 2 "cannot enter $1"
   top=$(git -C "${p}" rev-parse --show-toplevel 2> /dev/null)
@@ -253,11 +255,7 @@ gw_check_worktree() {
     [[ -n ${own} && $(git -C "${own}" rev-parse --show-toplevel 2> /dev/null) == "${p}" ]] &&
       gw_die 2 "${p} is this session's own worktree: give the worker another one"
   done
-  [[ -L ${p}/.agents ]] && gw_die 2 "${p}/.agents is a symlink: review and remove it, or use another worktree"
-  for f in hooks.json mcp_config.json; do
-    [[ -e ${p}/.agents/${f} || -L ${p}/.agents/${f} ]] &&
-      gw_die 2 "${p}/.agents/${f} would run code before any message: review and remove it, or use another worktree"
-  done
+  why=$(agy_repo_runs_code "${p}") && gw_die 2 "${why}: review and remove it, or use another worktree"
   GW_WT="${p}"
 }
 

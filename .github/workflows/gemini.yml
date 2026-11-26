@@ -26,6 +26,7 @@ jobs:
             relevant:
               - 'skills/gemini/**'
               - 'lib/director.sh'
+              - 'lib/agy-repo.sh'
               - 'bin/agent-worktree'
               - 'tests/smoke-gemini.sh'
               - 'tests/gemini-api.test.ts'
@@ -55,6 +56,7 @@ jobs:
       - run: bun test tests/gemini-api.test.ts
       - run: bun test tests/gemini-agy.test.ts
       - run: bun test tests/gemini-agy-run.test.ts
+      - run: bash tests/smoke-gemini-leg.sh
       - run: bash tests/smoke-gemini-worker.sh
 
   gemini-status:

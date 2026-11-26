@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Smoke test for skills/gemini/scripts/worker-gemini.sh: real tmux on private sockets, real Bun, a temp HOME and a stand-in
 # agy compiled from tests/fixtures/agy-stub.ts. Only what a worker needs is staged in a temp tree (the launcher, the CLI,
-# the shims and lib/director.sh), with an engines/agy.ts that is a harness running the real pump core with that home,
-# short limits and real signals. No consult entry point, real agy, key or network.
+# the shims, lib/director.sh and lib/agy-repo.sh), with an engines/agy.ts that is a harness running the real pump core
+# with that home, short limits and real signals. No consult entry point, real agy, key or network.
 # shellcheck disable=SC2016 # literal $… in sh -c bodies
 set -uo pipefail
 export LC_ALL=C
@@ -51,7 +51,7 @@ REPO="$S/repo" WT1="$S/repo/.claude/worktrees/w1" WT2="$S/repo/.claude/worktrees
   echo "GEMINI_API_KEY=$CANARY" > "$HOME/.config/gemini/.env" && mkfifo "$GWS_FIFO" &&
   mkdir -p "$S/tree/skills/gemini/engines" "$S/tree/skills/gemini/scripts" "$S/tree/lib" &&
   cp "$ROOT/skills/gemini/engines/agy" "$S/tree/skills/gemini/engines/agy" && cp -R "$ROOT/skills/gemini/shims" "$S/tree/skills/gemini/shims" &&
-  cp "$ROOT/skills/gemini/scripts/worker-gemini.sh" "$S/tree/skills/gemini/scripts/worker-gemini.sh" && cp "$ROOT/lib/director.sh" "$S/tree/lib/director.sh"; } ||
+  cp "$ROOT/skills/gemini/scripts/worker-gemini.sh" "$S/tree/skills/gemini/scripts/worker-gemini.sh" && cp "$ROOT/lib/director.sh" "$ROOT/lib/agy-repo.sh" "$S/tree/lib/"; } ||
   { echo "FAIL  fixture setup: the stub, the home and the tree"; exit 1; }
 cat > "$S/tree/skills/gemini/engines/agy.ts" << EOF || { echo "FAIL  fixture setup: the harness"; exit 1; }
 // The real pump core with the smoke's home, short limits and real signals. The stub records itself first thing, so a
