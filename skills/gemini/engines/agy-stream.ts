@@ -76,14 +76,18 @@ export function modelDone(ev: unknown): { index?: number; usage?: Usage } | unde
   if (!s || s.step_type !== "agent_response" || s.state !== "DONE") return undefined;
   return { index: safe(s.step_index) ? s.step_index : undefined, usage: usageOf(s.usage) };
 }
-export type Outcome = { status: string; response: string; error: string; usage?: Usage; raw: unknown; denied: string[] };
+// conversation is conversation_id when it is a string: a failed result may name null, having made none.
+export type Outcome = { status: string; response: string; error: string; usage?: Usage; raw: unknown; denied: string[]; conversation?: string };
 // denied_actions is null or absent under the skip flag; any other non-list still counts as a denial.
 export function outcomeOf(ev: unknown): Outcome | undefined {
   const r = payload(ev, "result");
   if (!r) return undefined;
   const d = r.denied_actions;
   const denied = Array.isArray(d) ? d.map((a) => (isObj(a) && typeof a.action === "string" ? a.action : "?")) : d == null ? [] : ["?"];
-  return { status: str(r.status) ?? "", response: str(r.response) ?? "", error: str(r.error) ?? "", usage: usageOf(r.usage), raw: r.usage ?? null, denied };
+  return {
+    status: str(r.status) ?? "", response: str(r.response) ?? "", error: str(r.error) ?? "", usage: usageOf(r.usage), raw: r.usage ?? null, denied,
+    conversation: str(r.conversation_id),
+  };
 }
 export function toolOutput(ev: unknown): string | undefined {
   const s = payload(ev, "step_update");

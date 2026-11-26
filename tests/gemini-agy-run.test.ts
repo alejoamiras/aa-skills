@@ -144,6 +144,27 @@ async function logged(x: Ctx, text: string): Promise<boolean> {
   return false;
 }
 
+// Makes the engine's next write to the run's file name fail as on a full disk, once the log holds after. The engine
+// runs in this process: its descriptor, once closed, is the lowest free number, so opening /dev/full until one lands
+// there swaps it in place.
+async function full(x: Ctx, name: string, after: string): Promise<boolean> {
+  if (!(await logged(x, after))) return false;
+  const target = join(x.dir, name);
+  const fd = readdirSync("/proc/self/fd").map(Number).find((n) => {
+    try {
+      return readlinkSync(`/proc/self/fd/${n}`) === target;
+    } catch {
+      return false;
+    }
+  });
+  if (fd === undefined) return false;
+  closeSync(fd);
+  const spare: number[] = [];
+  for (let got = openSync("/dev/full", "w"); got !== fd; got = openSync("/dev/full", "w")) spare.push(got);
+  for (const n of spare) closeSync(n);
+  return true;
+}
+
 describe("run", () => {
   test("agy runs with the open flags in the top level, the private home's environment and nothing of the caller's; every file is private", async () => {
     const x = setup();
@@ -251,8 +272,9 @@ describe("run", () => {
     expect([s.code, s.result.reason, s.result.in, records(y).length]).toEqual([1, "limit", 120_000, 1]);
   }, 30_000);
 
-  test("a resume or a wrap-up whose init names another conversation is withheld", async () => {
-    const moved = { resumeAs: "0b7c2f5e-3d1a-4e8b-9c6f-2a4d8e1b7c3f" };
+  test("a turn bound to another conversation is withheld: by a resume's or a wrap-up's init, a later init, or the result", async () => {
+    const other = "0b7c2f5e-3d1a-4e8b-9c6f-2a4d8e1b7c3f";
+    const moved = { resumeAs: other };
     const x = setup();
     expect((await go(x)).code).toBe(0);
     const r = await go(x, { turn: 2, cfg: { script: FINE, ...moved } });
@@ -260,6 +282,18 @@ describe("run", () => {
     const y = setup();
     const w = await go(y, { cfg: { script: [{ answer: "a", usage: [101_000, 0, 0] }, { hold: true }], resume: FINE, ...moved } });
     expect([w.code, w.result.reason, records(y).length, w.response]).toEqual([1, "error", 2, undefined]);
+    // A result naming no conversation is accepted: no failed result of agy's has been seen to show it always names one.
+    const unnamed = { event: "init", init: { model: "gemini-4-neon", permission_mode: "always-proceed" } };
+    const cases: [string, object[], string | null][] = [
+      ["a later init naming none", [{ raw: JSON.stringify(unnamed) }, ...FINE], "error"],
+      ["a result naming another", [{ answer: "fine" }, { result: "SUCCESS", response: "fine", conversation: other }], "error"],
+      ["a result naming none", [{ answer: "fine" }, { result: "SUCCESS", response: "fine", conversation: false }], null],
+      ["a failed result naming null", [{ answer: "" }, { result: "ERROR", error: "Error 402: prepayment credits are depleted", conversation: null }], "cap"],
+    ];
+    for (const [label, script, reason] of cases) {
+      const z = await go(setup(), { cfg: { script } });
+      expect([label, z.code, z.result.reason, z.response]).toEqual([label, reason ? 1 : 0, reason, reason ? undefined : "fine"]);
+    }
   }, 30_000);
 
   test("one 40-minute deadline covers the call and its wrap-up, which never starts past it; 12 minutes with no event but blank lines end the call", async () => {
@@ -291,25 +325,6 @@ describe("run", () => {
   }, 30_000);
 
   test("a log or stderr write that fails, as on a full disk, ends the call error and leaves nothing running", async () => {
-    // The engine runs in this process. Its descriptor for name, once closed, is the lowest free number, so opening
-    // /dev/full until one lands there swaps it in place, once the log holds after.
-    const full = async (x: Ctx, name: string, after: string) => {
-      if (!(await logged(x, after))) return false;
-      const target = join(x.dir, name);
-      const fd = readdirSync("/proc/self/fd").map(Number).find((n) => {
-        try {
-          return readlinkSync(`/proc/self/fd/${n}`) === target;
-        } catch {
-          return false;
-        }
-      });
-      if (fd === undefined) return false;
-      closeSync(fd);
-      const spare: number[] = [];
-      for (let got = openSync("/dev/full", "w"); got !== fd; got = openSync("/dev/full", "w")) spare.push(got);
-      for (const n of spare) closeSync(n);
-      return true;
-    };
     const rows: [string, string, string, object[]][] = [
       ["an event's log line", "log.ndjson", '"user_input"', [{ sleep: 300 }, { answer: "a" }, { hold: true }]],
       ["an unparsed line's log line", "log.ndjson", '"user_input"', [{ sleep: 300 }, { raw: "MALFORMED {" }, { hold: true }]],
@@ -322,6 +337,19 @@ describe("run", () => {
       // A call left open by a lost write would otherwise hold the test until its timeout.
       const r = await Promise.race([go(x, { cfg: { script } }), Bun.sleep(5000).then(() => undefined)]);
       expect([label, await swapped, r?.code, r?.result.reason, r?.response]).toEqual([label, true, 1, "error", undefined]);
+    }
+  }, 30_000);
+
+  test("a lost write keeps the mode tripwire, so the resume it bars stays barred", async () => {
+    // The init comes after the swap; the stderr line only once the sweep's TERM arrives.
+    const tripped = { event: "init", conversation_id: CONVERSATION, init: { model: "gemini-4-neon", permission_mode: "request-review" } };
+    const cfg = { init: false, onTerm: "stopping", script: [{ sleep: 300 }, { raw: JSON.stringify(tripped) }, { hold: true }] };
+    for (const [label, name] of [["the init's own log line", "log.ndjson"], ["a stderr line during the sweep", "stderr.txt"]]) {
+      const x = setup();
+      const swapped = full(x, name, '"user_input"');
+      const r = await go(x, { cfg });
+      const resumed = await go(x, { cfg: { script: FINE }, turn: 2 });
+      expect([label, await swapped, r.code, r.result.reason, r.result.tripwire, resumed.code]).toEqual([label, true, 1, "mode", "mode", 2]);
     }
   }, 30_000);
 

@@ -148,11 +148,13 @@ class Run {
       const init = initOf(ev);
       if (init) {
         this.agy(ev);
-        if (init.conversation && UUID.test(init.conversation)) s.conversation = init.conversation;
+        // Each init is judged on its own id against the shot's: the asked one, or else the first init's.
+        const id = init.conversation && UUID.test(init.conversation) ? init.conversation : undefined;
+        s.conversation ??= id;
         if (init.mode !== MODE) return "mode";
         if (init.model !== c.model && init.model !== `${c.model}-${c.effort}`) return "model";
         // A resume answered in another conversation has none of the earlier turns.
-        if (!s.conversation || (asked !== undefined && s.conversation !== asked)) return "error";
+        if (!id || id !== (asked ?? s.conversation)) return "error";
         s.init = true;
         return undefined;
       }
@@ -165,6 +167,8 @@ class Run {
       if (r) {
         this.agy(ev);
         s.result = r;
+        // Every result seen names its init's conversation; one naming none passes, since no failed result has been seen.
+        if (r.conversation !== undefined && r.conversation !== s.conversation) return "error";
         return s.init ? undefined : "error";
       }
       const t = textStep(ev);
@@ -198,7 +202,8 @@ class Run {
         await c.sweep().catch(() => {});
         child.stdout?.destroy();
         child.stderr?.destroy();
-        if (this.broken) s.end = "error";
+        // A lost write fails only a shot nothing else failed, so a tripwire still bars a resume.
+        if (this.broken) s.end ??= "error";
         resolve(s);
       };
       const unparsed = (size: number) => {
@@ -301,7 +306,7 @@ class Run {
   }
 
   // Never throws, since a throw from a stream handler or from settle would skip the sweep. A write that fails or falls
-  // short, as on a full disk, ends the call error, and the writes after it are dropped so the files keep no gap.
+  // short, as on a full disk, fails the call, and the writes after it are dropped so the files keep no gap.
   private put(fd: number, text: string) {
     if (fd < 0 || this.broken) return;
     try {
@@ -310,7 +315,8 @@ class Run {
       // as a short write
     }
     this.broken = true;
-    this.stop?.();
+    // After the event being handled, so a tripwire it trips settles the shot first.
+    queueMicrotask(() => this.stop?.());
   }
 
   private clean(v: unknown): unknown {

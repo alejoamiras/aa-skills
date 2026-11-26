@@ -39,19 +39,21 @@ const result = (turns: number, response: string, usage: unknown) => ({
 type Turn = { answer?: string; tools?: number; toolErrors?: number; stderr?: number; write?: string[]; editConfig?: string; usage?: unknown };
 // One line of a one-shot script. answer: a finished model step, with usage [input, output, cached] (default
 // [1000, 10, 500]; null for none); delta: a text delta of the next model step; tool: a tool step, which first appends a
-// line to write in the cwd; result: the result, its usage by default this run's steps' sum; raw: a line as written;
+// line to write in the cwd; result: the result, its usage by default this run's steps' sum, naming conversation (none
+// when false) instead of the init's; raw: a line as written;
 // err: a line on stderr; bytes: that many bytes, with no newline when newline is false; tick: a delta (a blank line
 // when blank) every tick ms, for that long or forever; hold: stdout stays open and nothing more is written.
 type Item = {
   answer?: string; usage?: [number, number, number] | null; delta?: string; tool?: string; output?: string; state?: "ACTIVE" | "DONE"; write?: string;
-  result?: string; response?: string; error?: string; denied?: string[]; raw?: string; err?: string; bytes?: number; newline?: boolean; sleep?: number;
-  tick?: number; for?: number; blank?: boolean; hold?: boolean;
+  result?: string; response?: string; error?: string; denied?: string[]; conversation?: string | null | false; raw?: string; err?: string; bytes?: number;
+  newline?: boolean; sleep?: number; tick?: number; for?: number; blank?: boolean; hold?: boolean;
 };
 // script is the one-shot stream after the user_input step, resume replaces it when argv carries --conversation; init
-// false sends no init event; resumeAs is the conversation id the init names when argv carries --conversation.
+// false sends no init event; resumeAs is the conversation id the init names when argv carries --conversation; onTerm is
+// a line written on stderr when TERM arrives, before exiting.
 type Config = {
   mode?: string; child?: boolean | "cleared"; split?: boolean; delay?: number; tick?: number; turns?: Turn[]; script?: Item[]; resume?: Item[];
-  init?: false | { model?: string; mode?: string }; resumeAs?: string;
+  init?: false | { model?: string; mode?: string }; resumeAs?: string; onTerm?: string;
 };
 
 function writeAll(fd: number, text: string) {
@@ -87,9 +89,10 @@ const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
 async function oneShot(script: Item[], cfg: Config, put: (v: unknown) => void, at: (ext: string) => string) {
   const args = process.argv.slice(2);
   const i = cfg.init;
+  const conversation = (args.includes("--conversation") && cfg.resumeAs) || CONVERSATION;
   if (i !== false) {
     const init = { model: i?.model ?? args[args.indexOf("--model") + 1], cwd: process.cwd(), tools: ["run_command"], permission_mode: i?.mode ?? "always-proceed" };
-    put({ event: "init", conversation_id: (args.includes("--conversation") && cfg.resumeAs) || CONVERSATION, init });
+    put({ event: "init", conversation_id: conversation, init });
   }
   const line = await new Promise<string>((done) => {
     let buf = "";
@@ -115,7 +118,8 @@ async function oneShot(script: Item[], cfg: Config, put: (v: unknown) => void, a
     } else if (it.result !== undefined) {
       const u = it.usage === undefined ? sum : it.usage;
       const denied = it.denied ? { denied_actions: it.denied.map((action) => ({ action })) } : {};
-      const body = { conversation_id: CONVERSATION, status: it.result, response: it.response ?? "", ...(it.error ? { error: it.error } : {}), num_turns: 1, ...denied };
+      const id = it.conversation === false ? {} : { conversation_id: it.conversation === undefined ? conversation : it.conversation };
+      const body = { ...id, status: it.result, response: it.response ?? "", ...(it.error ? { error: it.error } : {}), num_turns: 1, ...denied };
       put({ event: "result", result: { ...body, ...(u ? { usage: usage3(u) } : {}) } });
     } else if (it.raw !== undefined) writeAll(1, `${it.raw}\n`);
     else if (it.err !== undefined) writeAll(2, `${it.err}\n`);
@@ -163,6 +167,13 @@ function stub() {
   const args = process.argv.slice(2);
   if (mode === "exit") process.exit(3);
   if (args[0] === "models") process.exit(0);
+  if (cfg.onTerm) {
+    const line = cfg.onTerm;
+    process.on("SIGTERM", () => {
+      writeAll(2, `${line}\n`);
+      process.exit(143);
+    });
+  }
   const shot = args.includes("--conversation") && cfg.resume ? cfg.resume : cfg.script;
   if (shot) return void oneShot(shot, cfg, put, at);
   put({ event: "init", conversation_id: CONVERSATION, init: { model: args[args.indexOf("--model") + 1], cwd: process.cwd(), tools: ["run_command"], permission_mode: "always-proceed" } });
