@@ -3,7 +3,7 @@
 // pinned binary sits in (<home>/bin/agy) picks its behaviour; it records its argv, environment names, session and every
 // message under $HOME/stub/, never the key's value.
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, readlinkSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 // Lines recorded from real runs (cwd and the tool list cut down), plus agy's documented error result. The last two are a
@@ -42,11 +42,12 @@ type Turn = { answer?: string; tools?: number; toolErrors?: number; stderr?: num
 // line to write in the cwd; result: the result, its usage by default this run's steps' sum, naming conversation (none
 // when false) instead of the init's; raw: a line as written;
 // err: a line on stderr; bytes: that many bytes, with no newline when newline is false; tick: a delta (a blank line
-// when blank) every tick ms, for that long or forever; hold: stdout stays open and nothing more is written.
+// when blank) every tick ms, for that long or forever; wait: nothing until a file of that name is beside the stub's
+// records; hold: stdout stays open and nothing more is written.
 type Item = {
   answer?: string; usage?: [number, number, number] | null; delta?: string; tool?: string; output?: string; state?: "ACTIVE" | "DONE"; write?: string;
   result?: string; response?: string; error?: string; denied?: string[]; conversation?: string | null | false; raw?: string; err?: string; bytes?: number;
-  newline?: boolean; sleep?: number; tick?: number; for?: number; blank?: boolean; hold?: boolean;
+  newline?: boolean; sleep?: number; tick?: number; for?: number; blank?: boolean; wait?: string; hold?: boolean;
 };
 // script is the one-shot stream after the user_input step, resume replaces it when argv carries --conversation; init
 // false sends no init event; resumeAs is the conversation id the init names when argv carries --conversation; onTerm is
@@ -127,6 +128,7 @@ async function oneShot(script: Item[], cfg: Config, put: (v: unknown) => void, a
       for (let left = it.bytes; left > 0; left -= 1 << 20) writeAll(1, "x".repeat(Math.min(left, 1 << 20)));
       if (it.newline !== false) writeAll(1, "\n");
     } else if (it.sleep !== undefined) await sleep(it.sleep);
+    else if (it.wait !== undefined) while (!existsSync(join(dirname(at("")), it.wait))) await sleep(5);
     else if (it.tick !== undefined) {
       for (const end = Date.now() + (it.for ?? Infinity); Date.now() < end; await sleep(it.tick)) {
         if (it.blank) writeAll(1, "\n");

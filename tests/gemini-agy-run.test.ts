@@ -2,7 +2,7 @@
 // from tests/fixtures/agy-stub.ts and driven by its scripts, with a temp home holding a pin, settings and a canary key:
 // no real agy, no real key, no network. Key values are compared only as booleans, so a failing assertion never prints one.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { spawn, spawnSync } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync, closeSync, existsSync, linkSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync,
@@ -26,7 +26,7 @@ const WORKER_ENV = {
   WORKER_PATH: "/usr/bin:/bin", WORKER_USER: "tester", WORKER_LOGNAME: "tester", WORKER_SHELL: "/bin/bash", WORKER_LANG: "C.UTF-8", WORKER_TMPDIR: root,
   SSH_AUTH_SOCK: "/run/agent.sock", WORKER_SSH_AUTH_SOCK: "/run/agent.sock",
 };
-const FLAGS = ["--dangerously-skip-permissions", "--input-format", "stream-json", "--output-format", "stream-json", "--model", "gemini-4-neon", "--effort", "high", "--settings"];
+const FLAGS = ["--dangerously-skip-permissions", "--disable-slash-commands", "--input-format", "stream-json", "--output-format", "stream-json", "--model", "gemini-4-neon", "--effort", "high", "--settings"];
 const OPEN = '{"modelProvider":"gemini","permissions":{"deny":["write_file(*)"]}}';
 const WRAP = '{"modelProvider":"gemini","permissions":{"deny":["command(*)","write_file(*)","read_file(*)"]}}';
 const ENV_NAMES = [
@@ -34,6 +34,9 @@ const ENV_NAMES = [
   "SHELL", "TERM", "TMPDIR", "USER", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
 ];
 const FINE = [{ answer: "fine" }, { result: "SUCCESS", response: "fine" }];
+// The run's poll: the only timer of that length.
+const POLL = 20;
+const M = 60_000;
 let stubBin = "";
 let stubSha = "";
 
@@ -128,7 +131,7 @@ function started(x: Ctx): number[] {
 // late: by spawn, from 1, the ms after the spawn returns at which agy, started as a bun child, execs the stub; hidden:
 // that child lacks the marker and stays in the engine's session, as one caught before its setsid and exec looks.
 type Opts = {
-  cfg?: object; prompt?: string; turn?: number; conversation?: string; clock?: () => number; whole?: boolean; late?: Record<number, number>; hidden?: boolean;
+  cfg?: object; prompt?: string; turn?: number; conversation?: string; hand?: Hand; whole?: boolean; late?: Record<number, number>; hidden?: boolean;
 };
 // One engine run. After it: no run-dir file holds a piece of the canary, and nothing a stub started is left.
 async function go(x: Ctx, o: Opts = {}) {
@@ -138,20 +141,26 @@ async function go(x: Ctx, o: Opts = {}) {
   // Counted here: a stub swept as it starts never writes its record.
   let spawns = 0;
   const deps: RunDeps = {
-    home: x.home.dir, uid: UID, now: () => Date.now(), timers: { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
-    limits: { ...LIMITS, grace: 300, poll: 20 },
+    home: x.home.dir, uid: UID, now: () => Date.now(),
+    timers: o.hand?.timers ?? { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
+    limits: { ...LIMITS, grace: 300, poll: POLL },
     spawn: (file, args, opts) => {
       spawns++;
       const late = o.late?.[spawns];
-      if (late === undefined) return spawn(file, args, opts);
       const { GEMINI_WORKER_ID: _, ...unmarked } = opts.env ?? {};
       const as = o.hidden ? { env: unmarked, detached: false } : {};
-      return spawn(process.execPath, [join(import.meta.dir, "fixtures", "exec-later.ts"), String(late), x.home.bin, ...args], { ...opts, argv0: process.execPath, ...as });
+      const child =
+        late === undefined
+          ? spawn(file, args, opts)
+          : spawn(process.execPath, [join(import.meta.dir, "fixtures", "exec-later.ts"), String(late), x.home.bin, ...args], { ...opts, argv0: process.execPath, ...as });
+      o.hand?.spawned(child);
+      return child;
     },
     signals: () => {}, input: () => {},
-    out: (line) => out.push(line), env: WORKER_ENV, stdin: async () => Buffer.from(o.prompt ?? "Review the repository."), clock: o.clock ?? (() => performance.now()),
+    out: (line) => out.push(line), env: WORKER_ENV, stdin: async () => Buffer.from(o.prompt ?? "Review the repository."), clock: o.hand?.clock ?? (() => performance.now()),
   };
   const code = await run([x.dir, x.top, "gemini-4-neon", "high", "100000", String(turn), ...(turn > 1 ? [o.conversation ?? CONVERSATION] : [])], deps);
+  if (o.hand) o.hand.over = true;
   const holds = o.whole ? (text: string) => text.includes(CANARY) : leaks;
   for (const f of walk(x.dir)) expect([relative(x.dir, f), holds(readFileSync(f, "latin1"))]).toEqual([relative(x.dir, f), false]);
   for (const r of records(x)) expect(leftovers(r.env.GEMINI_WORKER_ID, [r.sid, r.child].filter(Boolean))).toEqual([]);
@@ -171,6 +180,70 @@ async function logged(x: Ctx, text: string): Promise<boolean> {
   const log = join(x.dir, "log.ndjson");
   for (const end = Date.now() + 5000; Date.now() < end; await Bun.sleep(5)) if (existsSync(log) && readFileSync(log, "utf8").includes(text)) return true;
   return false;
+}
+
+const HELD = Symbol("poll");
+// The call's clock, poll timer and agy's stdout in the test's hand, so load can slow the call but never moves its clock.
+// The clock reads t, which follows the wall only from a spawn until that launch sets its poll, so the engine's start-up
+// wait still runs out; the poll fires only on tick(), which says whether the call polls on; lines counts the stdout lines
+// the engine has handled since the last spawn, and handled runs after each chunk of them.
+class Hand {
+  t = 0;
+  lines = 0;
+  spawns = 0;
+  over = false;
+  handled?: () => void;
+  private wall?: number;
+  private poll?: () => void;
+  readonly clock = () => {
+    if (this.wall !== undefined) this.t = Math.max(this.t, performance.now() - this.wall);
+    return this.t;
+  };
+  readonly timers: RunDeps["timers"] = {
+    set: (fn, ms) => {
+      if (ms !== POLL) return setTimeout(fn, ms);
+      this.clock();
+      this.wall = undefined;
+      this.poll = fn;
+      return HELD;
+    },
+    clear: (h) => (h === HELD ? (this.poll = undefined) : clearTimeout(h as ReturnType<typeof setTimeout>)),
+  };
+  spawned(child: ChildProcess) {
+    this.spawns++;
+    this.lines = 0;
+    this.wall = performance.now() - this.t;
+    // Listening just ahead of the engine, whose handling of a chunk is synchronous, so the microtask runs after it.
+    const out = child.stdout;
+    const ahead = (event: string | symbol) => {
+      if (event !== "data" || !out) return;
+      out.off("newListener", ahead);
+      out.on("data", (chunk: Buffer) =>
+        queueMicrotask(() => {
+          this.lines += chunk.toString("latin1").split("\n").length - 1;
+          this.handled?.();
+        }),
+      );
+    };
+    out?.on("newListener", ahead);
+  }
+  tick(): boolean {
+    const fn = this.poll;
+    this.poll = undefined;
+    fn?.();
+    return this.poll !== undefined;
+  }
+  async until(ok: () => boolean) {
+    for (const end = Date.now() + 10_000; !ok() && !this.over; await Bun.sleep(5)) if (Date.now() > end) throw new Error("the call stalled");
+  }
+  // The call's outcome, ended past any limit if it still polls; undefined if it never ends.
+  async end<T>(call: Promise<T>): Promise<T | undefined> {
+    if (this.poll) {
+      this.t = 1e12;
+      this.tick();
+    }
+    return Promise.race([call, Bun.sleep(10_000).then(() => undefined)]);
+  }
 }
 
 // Makes the engine's next write to the run's file name fail as on a full disk, once the log holds after. The engine
@@ -326,31 +399,65 @@ describe("run", () => {
   }, 30_000);
 
   test("one 40-minute deadline covers the call and its wrap-up, which never starts past it; 12 minutes with no event but blank lines end the call", async () => {
-    // 400 times real time: the deadline is 6 s, the silence 1.8 s.
-    const fast = () => {
-      const t0 = performance.now();
-      return () => (performance.now() - t0) * 400;
-    };
+    const open = (c: Ctx, gate: string) => writeFileSync(join(c.dir, "home", "stub", gate), "");
+    // Text deltas alone carry the turn to its crossing answer at 25; the wrap-up starts there, with a delta at 35. Each
+    // entry says whether the call polls on after the clock was set to that minute.
+    const h = new Hand();
     const x = setup();
-    const cfg = { script: [{ tick: 100, for: 2500 }, { answer: "a", usage: [110_000, 0, 0] }, { hold: true }], resume: [{ tick: 100 }] };
-    const clock = fast();
-    const r = await go(x, { clock, cfg });
-    const took = clock() / 1000;
-    // A deadline per turn would have ended the wrap-up near 3,400 s.
-    expect([r.code, r.result.reason, records(x).length, took >= 2400 && took < 2700, r.result.seconds <= took]).toEqual([1, "timeout", 2, true, true]);
-    const quiet = fast();
-    const s = await go(setup(), { clock: quiet, cfg: { script: [{ tick: 100, blank: true }] } });
-    const waited = quiet() / 1000;
-    expect([s.result.reason, waited >= 720 && waited < 900]).toEqual(["timeout", true]);
-    // The clock reaches the deadline once the limit is logged, while the sweep waits on the held stub.
-    let t = 0;
+    const cfg = {
+      script: [{ wait: "a" }, { delta: "." }, { wait: "b" }, { delta: "." }, { wait: "c" }, { answer: "a", usage: [110_000, 0, 0] }, { hold: true }],
+      resume: [{ wait: "d" }, { delta: "." }, { hold: true }],
+    };
+    const call = go(x, { hand: h, cfg });
+    const polls: [number, boolean][] = [];
+    const at = (min: number) => {
+      h.t = min * M;
+      polls.push([min, h.tick()]);
+    };
+    await h.until(() => h.lines >= 2);
+    at(10);
+    open(x, "a");
+    await h.until(() => h.lines >= 3);
+    at(20);
+    open(x, "b");
+    await h.until(() => h.lines >= 4);
+    h.t = 25 * M;
+    open(x, "c");
+    await h.until(() => h.spawns === 2 && h.lines >= 2);
+    at(35);
+    open(x, "d");
+    await h.until(() => h.lines >= 3);
+    at(39.99);
+    at(40);
+    const r = await h.end(call);
+    const ran = [[10, true], [20, true], [35, true], [39.99, true], [40, false]];
+    expect([polls, r?.code, r?.result.reason, r?.spawns, r?.result.seconds]).toEqual([ran, 1, "timeout", 2, 2400]);
+    // From the user_input step, the last event: a blank line handled at 6 minutes, still polling at 11.99, ended at 12.
+    const g = new Hand();
     const y = setup();
-    const jump = logged(y, '"ended":"limit"').then((seen) => {
-      if (seen) t = 40 * 60_000;
-    });
-    const late = await go(y, { clock: () => t, cfg: { script: [{ answer: "a", usage: [101_000, 0, 0] }, { hold: true }], resume: FINE } });
-    await jump;
-    expect([late.code, late.result.reason, records(y).length]).toEqual([1, "limit", 1]);
+    const quiet = go(y, { hand: g, cfg: { script: [{ wait: "a" }, { raw: "" }, { hold: true }] } });
+    await g.until(() => g.lines >= 2);
+    const base = g.t;
+    const still: [number, boolean][] = [];
+    const after = (min: number) => {
+      g.t = base + min * M;
+      still.push([min, g.tick()]);
+    };
+    after(6);
+    open(y, "a");
+    await g.until(() => g.lines >= 3);
+    after(11.99);
+    after(12);
+    const s = await g.end(quiet);
+    expect([still, s?.result.reason]).toEqual([[[6, true], [11.99, true], [12, false]], "timeout"]);
+    // The clock passes the deadline once the crossing answer is handled, during its turn's cleanup and before the wrap-up
+    // is decided.
+    const k = new Hand();
+    k.handled = () => {
+      if (k.lines >= 3) k.t = 40 * M;
+    };
+    const late = await go(setup(), { hand: k, cfg: { script: [{ answer: "a", usage: [101_000, 0, 0] }, { hold: true }], resume: FINE } });
+    expect([late.code, late.result.reason, late.spawns]).toEqual([1, "limit", 1]);
   }, 30_000);
 
   test("a log or stderr write that fails, as on a full disk, ends the call error and leaves nothing running", async () => {
@@ -501,7 +608,7 @@ describe("run", () => {
     const r = await go(x, { cfg: second, turn: 2 });
     expect([r.code, r.response, r.result.in, r.result.out, r.result.cached, r.result.response]).toEqual([0, "second", 2000, 20, 1000, "response.2.md"]);
     expect(r.result.agy_usage).toEqual({ input_tokens: 9000, output_tokens: 90, thinking_tokens: 0, cache_read_tokens: 4000, total_tokens: 9090 });
-    expect(records(x).at(-1)?.args.slice(-2)).toEqual(["--conversation", CONVERSATION]);
+    expect(records(x).at(-1)?.args).toEqual([...FLAGS, OPEN, "--conversation", CONVERSATION]);
     const turn2 = readdirSync(x.dir).filter((f) => f.includes(".2."));
     expect(turn2.sort()).toEqual(["log.2.ndjson", "prompt.2.md", "response.2.md", "result.2.json", "stderr.2.txt"]);
     expect(readFileSync(join(x.dir, "session_id"), "utf8")).toBe(`${CONVERSATION}\n`);
