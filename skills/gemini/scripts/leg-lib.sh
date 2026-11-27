@@ -63,8 +63,8 @@ gl_limit() {
 }
 
 # GL_TOP: the physical top level of the work tree holding $1. GL_MAIN: the main checkout's root, git's first worktree
-# entry; for a bare repository its git dir, which holds no marker. A linked worktree whose repository keeps its git dir
-# apart from the main checkout is off: git records no path to that checkout, so its marker cannot be read.
+# entry; for a bare repository its git dir, read for the marker in the main checkout's place. A linked worktree whose
+# repository keeps its git dir apart from the main checkout is off: git records no path there, so no marker is read.
 gl_top() {
   local top gitdir common main="" bare=""
   [[ -d $1 ]] || gl_die 2 "not a dir: $1"
