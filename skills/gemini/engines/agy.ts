@@ -787,6 +787,7 @@ async function tui(argv: string[], d: Deps): Promise<number> {
 // clock must be monotonic: the call's deadline and silence run on it.
 export type RunDeps = Deps & { stdin: (max: number) => Promise<Buffer>; clock: () => number };
 const RUN_MODELS = ["gemini-4-neon", "gemini-4-carbon"];
+// Above the scripts' 1 MiB bound: they send the prompt framed, which adds to it.
 const PROMPT_MAX = 2 * 1024 * 1024;
 // The key file's line anywhere in the prompt: the file may hold another key than the one just read.
 const KEY_LINE = /^GEMINI_API_KEY=[A-Za-z0-9._-]+\r?$/m;

@@ -62,16 +62,27 @@ gl_limit() {
   GL_LIMIT="$1"
 }
 
-# GL_TOP: the physical top level of the work tree holding $1. GL_MAIN: the main checkout's root, the common dir's parent.
+# GL_TOP: the physical top level of the work tree holding $1. GL_MAIN: the main checkout's root, git's first worktree
+# entry; for a bare repository its git dir, which holds no marker. A linked worktree whose repository keeps its git dir
+# apart from the main checkout is off: git records no path to that checkout, so its marker cannot be read.
 gl_top() {
-  local top common
+  local top gitdir common main="" bare=""
   [[ -d $1 ]] || gl_die 2 "not a dir: $1"
   top=$(gl_git -C "$1" rev-parse --show-toplevel 2> /dev/null) && [[ -n ${top} ]] || gl_die 2 "not inside a git work tree: $1"
   GL_TOP=$(cd -P -- "${top}" && pwd -P) || gl_die 2 "cannot enter ${top}"
   # meta keeps one value per line.
   [[ ${GL_TOP} != *$'\n'* ]] || gl_die 2 "the top level's path holds a newline"
-  common=$(gl_git -C "${GL_TOP}" rev-parse --path-format=absolute --git-common-dir 2> /dev/null) || gl_die 2 "no git dir for ${GL_TOP}"
-  GL_MAIN=$(cd -P -- "${common%/*}" && pwd -P) || gl_die 2 "cannot enter ${common%/*}"
+  gitdir=$(gl_git -C "${GL_TOP}" rev-parse --path-format=absolute --git-dir 2> /dev/null) &&
+    common=$(gl_git -C "${GL_TOP}" rev-parse --path-format=absolute --git-common-dir 2> /dev/null) || gl_die 2 "no git dir for ${GL_TOP}"
+  if [[ ${gitdir} == "${common}" ]]; then
+    GL_MAIN="${GL_TOP}"
+    return 0
+  fi
+  { IFS= read -r -d '' main && IFS= read -r -d '' bare; } < <(gl_git -C "${GL_TOP}" worktree list --porcelain -z 2> /dev/null)
+  [[ ${main} == "worktree /"* ]] && GL_MAIN=$(cd -P -- "${main#worktree }" && pwd -P) ||
+    gl_die 2 "git names no main worktree for ${GL_TOP}"
+  [[ ${bare} == bare || ${GL_MAIN}/.git -ef ${common} ]] ||
+    gl_unavailable off-setup "git records no main checkout for ${GL_TOP}, so its marker cannot be read"
 }
 
 gl_inside() { [[ $1 == "${GL_TOP}" || $1 == "${GL_TOP}"/* || $1 == "${GL_MAIN}" || $1 == "${GL_MAIN}"/* ]]; }
@@ -128,11 +139,11 @@ gl_off_checks() {
 }
 
 # --- run dirs -------------------------------------------------------------------------------------------------------
-# GL_ROOT: ~/.cache/gemini-leg, physical; made mode 700 when $1 is make.
+# GL_ROOT: ~/.cache/gemini-leg, physical; made mode 700 when $1 is make, where a dir another call made first is success.
 gl_root() {
   local r="${HOME}/.cache/gemini-leg"
   if [[ ${1:-} == make ]]; then
-    mkdir -p -- "${HOME}/.cache" && { [[ -d ${r} ]] || mkdir -m 700 -- "${r}"; } || gl_die 2 "cannot create ${r}"
+    mkdir -p -- "${HOME}/.cache" && { mkdir -m 700 -- "${r}" 2> /dev/null || [[ -d ${r} ]]; } || gl_die 2 "cannot create ${r}"
   fi
   [[ -d ${r} && ! -L ${r} && -O ${r} ]] || gl_die 2 "${r} must be a real dir of this user"
   GL_ROOT=$(cd -P -- "${r}" && pwd -P) || gl_die 2 "cannot enter ${r}"
@@ -303,6 +314,8 @@ GL_LIB="${GL_HERE}/${GL_LIB##*/}"
 # A caller inside a git hook exports these, and each would point the checks at another repository.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_NAMESPACE
 export LC_ALL=C
+# 077 for the scripts' own files; gl_engine gives the engine the caller's umask back, since the engine sets its files'
+# modes itself and Gemini's commands then write in the worktree as the caller's would.
 GL_UMASK=$(umask)
 umask 077
 GL_TEMP=""

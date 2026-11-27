@@ -58,6 +58,15 @@ printf '%s\n' "$OFF" >> "$REPO/AGENTS.md"
 gls_call c2 "$RUN" --check "$WT"
 git -C "$REPO" checkout -q -- AGENTS.md
 gls_t "--check: a marker added to the main checkout after the worktree was cut exits 4 off-marker there" sh -c '[ "$0" = 4 ] && [ "$(cat "$1")" = "GEMINI: unavailable (off-marker)" ]' "$(gls_rc c2)" "$S/c2.out"
+# A git dir kept apart (git init --separate-git-dir): git records no path to the main checkout, whose marker a linked
+# worktree therefore cannot read; the marker is added after the worktree was cut, so the worktree has none.
+{ git init -q -b main --separate-git-dir "$S/sep.git" "$S/sepmain" && printf 'x\n' > "$S/sepmain/README" &&
+  git -C "$S/sepmain" add README && gls_commit "$S/sepmain" init && git -C "$S/sepmain" worktree add -q "$S/sepwt" &&
+  printf '%s\n' "$OFF" > "$S/sepmain/AGENTS.md"; } || echo "FAIL  fixture: a separate git dir and its worktree"
+gls_stub "$ANSWER"
+n=$(gls_runs)
+gls_call sd "$RUN" "$S/p.md" "$S/sepwt" high open neon
+gls_t "off: a linked worktree of a repository whose git dir is kept apart, its main checkout marked: exit 4 off-setup, no run dir" sh -c '[ "$0" = 4 ] && [ "$(cat "$1")" = "GEMINI: unavailable (off-setup)" ] && [ "$2" = "$3" ]' "$(gls_rc sd)" "$S/sd.out" "$n" "$(gls_runs)"
 printf '%s\n' "$OFF" > "$S/marker" && ln -s "$S/marker" "$REPO/CLAUDE.md"
 gls_call c3 "$RUN" --check "$REPO"
 rm -f "$REPO/CLAUDE.md"

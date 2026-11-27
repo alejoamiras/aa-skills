@@ -1,6 +1,5 @@
-// The review leg's one call of agy, headless: the prompt as one turn, the stream read to its end, the limit, the
-// tripwires, the verdict and teardown, and one wrap-up turn after a spent limit. agy.ts starts it with every outside
-// effect handed over; it never reads the key file and is given no key value.
+// The review leg's one call of agy. agy.ts hands it every outside effect: it never reads the key file and is given no
+// key value.
 import type { ChildProcess } from "node:child_process";
 import { closeSync, openSync, realpathSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
@@ -120,7 +119,7 @@ class Run {
     const models = new Set<number>();
     const tools = new Set<number>();
     const texts = new Map<number, { parts: string[]; bytes: number; last: Json }>();
-    // A wrap-up runs past the limit by design and is killed past 1.15 times it.
+    // A wrap-up starts past the limit by design.
     const past = (used: number) => (wrapup ? used * 100 > c.limit * 115 : used > c.limit);
     let last = c.clock();
     let timer: unknown;
@@ -316,7 +315,6 @@ class Run {
     try {
       if (writeSync(fd, text) === Buffer.byteLength(text)) return;
     } catch {
-      // as a short write
     }
     this.broken = true;
     // After the event being handled, so a tripwire it trips settles the shot first.
