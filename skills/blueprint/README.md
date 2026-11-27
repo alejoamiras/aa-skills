@@ -40,7 +40,7 @@ flowchart TD
     S --> I["Implement — /goal session or /loop 15m"]
     I --> V["/code-review (low|medium) --fix, committed separately (per arc on stacks)"]
     V --> P["Codex and Gemini audit (arc diff + review-commit summary; final pass = cross-arc net diff)"]
-    P --> F["Fix loop: apply → resume Codex and Gemini with the fix diff → repeat until no new material findings"]
+    P --> F["Fix loop: apply → resume Codex and Gemini with the fix diff → repeat until no new verified material finding"]
     F --> T["Delivery: arcs ship as stacked PRs (gh stack); merging is the human's call"]
 ```
 
