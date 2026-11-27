@@ -31,7 +31,7 @@ flowchart TD
     RC --> R["Phase 0.5 — tier recommendation, user can override"]
     R --> W["Phase 0.75 — workspace homing: EnterWorktree(slug) + manifest registration"]
     W --> D["Draft plan.md (incl. Architecture & Implementation section)"]
-    D --> A["Cross-model audits (Codex; + Fable at mid and above) — attack the idea AND the implementation"]
+    D --> A["Cross-model audits (Codex and Gemini; + Fable at mid and above) — attack the idea AND the implementation"]
     A --> C["Consolidate + decision ledger"]
     C --> E["ELI5 Artifact (shareable) with DRAFT /goal + /loop seeds"]
     E --> G{"Approval gate: approve / conditional / reject"}
@@ -39,8 +39,8 @@ flowchart TD
     G -- "approved" --> S["Finalize /goal + /loop seeds against the APPROVED scope"]
     S --> I["Implement — /goal session or /loop 15m"]
     I --> V["/code-review (low|medium) --fix, committed separately (per arc on stacks)"]
-    V --> P["Codex audit (arc diff + review-commit summary; final pass = cross-arc net diff)"]
-    P --> F["Fix loop: apply → resume Codex with the fix diff → repeat until no new material findings"]
+    V --> P["Codex and Gemini audit (arc diff + review-commit summary; final pass = cross-arc net diff)"]
+    P --> F["Fix loop: apply → resume Codex and Gemini with the fix diff → repeat until no new verified material finding"]
     F --> T["Delivery: arcs ship as stacked PRs (gh stack); merging is the human's call"]
 ```
 
@@ -55,8 +55,8 @@ Key mechanics, independent of tier:
 - **Security & Adversarial Considerations** is a mandatory plan section, fenced off from Assumptions so the two don't blur ("Assumptions is not a generic risk register; Security is not where uncertain facts go").
 - **Architecture & Implementation is a mandatory plan section** — the engineering layer. Audits are told to attack not just the *idea* but the *build*: right structure? simpler pattern? wrong abstraction? leaky interfaces? It lives in `plan.md`, deliberately kept out of the human-facing ELI5.
 - **Cross-model auditing**: a second model family reviews the plan. Two agents from the same family agreeing is not a signal; cross-family convergence is.
-- **Driver-agnostic**: the same `SKILL.md` runs from Claude Code or Codex. The protocol names two roles — the **driver** (the harness running the session) and the **foreign reviewer** (the other family's CLI: `/codex` when Claude Code drives, `/claude` when Codex drives) — and a **Harness capabilities** table maps every harness-specific primitive (`Agent` fan-out ↔ Codex subagents, `EnterWorktree` ↔ `agent-worktree new`, `AskUserQuestion` ↔ prose/Asks, `TaskCreate` ↔ printed checklist, Artifact ↔ `eli5.html`, `/code-review` ↔ `codex review`) so a step is substituted, never skipped. Audit files stay named by family (`audit-codex.md`, `audit-fable.md`) whichever side drives.
-- **Models**: the top-tier Claude leg ("fable") runs on the model you pick at Phase 0 — **Opus 5.5** (default) or **Fable 5.1** (opt-in: slower and more expensive) — recorded as `claude_model` in the plan. "fable" is the role name (the independent top-tier reviewer alongside Codex), not a hard model pin. Recon explorers run on the `sonnet` alias (the newest Sonnet). The Codex leg — every plan audit and post-implementation fix loop when Claude Code drives — is asked for at Phase 0 as well and recorded as `codex_model`: **GPT-6.2 Sol** (default: OpenAI's everyday tier, far lighter on plan usage) or **GPT-6.2 Astra** (opt-in: the strongest reviewer; by OpenAI's rough estimate about a third as many messages per plan window). Both need a Codex CLI newer than 0.160.0. Either runs at `high` (blueprint pins `high` because `xhigh` is too slow across a plan's many review rounds — say "xhigh" to raise it for a run).
+- **Driver-agnostic**: the same `SKILL.md` runs from Claude Code or Codex. The protocol names two roles — the **driver** (the harness running the session) and the **foreign reviewers** (the other families: `/codex` when Claude Code drives, `/claude` when Codex drives, and Gemini through the `gemini` skill's `run-agy.sh` on either driver) — and a **Harness capabilities** table maps every harness-specific primitive (`Agent` fan-out ↔ Codex subagents, `EnterWorktree` ↔ `agent-worktree new`, `AskUserQuestion` ↔ prose/Asks, `TaskCreate` ↔ printed checklist, Artifact ↔ `eli5.html`, `/code-review` ↔ `codex review`) so a step is substituted, never skipped. Audit files stay named by family (`audit-codex.md`, `audit-fable.md`, `audit-gemini.md`) whichever side drives.
+- **Models**: the top-tier Claude leg ("fable") runs on the model you pick at Phase 0 — **Opus 5.5** (default) or **Fable 5.1** (opt-in: slower and more expensive) — recorded as `claude_model` in the plan. "fable" is the role name (the independent top-tier reviewer alongside Codex), not a hard model pin. Recon explorers run on the `sonnet` alias (the newest Sonnet). The Codex leg — every plan audit and post-implementation fix loop when Claude Code drives — is asked for at Phase 0 as well and recorded as `codex_model`: **GPT-6.2 Sol** (default: OpenAI's everyday tier, far lighter on plan usage) or **GPT-6.2 Astra** (opt-in: the strongest reviewer; by OpenAI's rough estimate about a third as many messages per plan window). Both need a Codex CLI newer than 0.160.0. Either runs at `high` (blueprint pins `high` because `xhigh` is too slow across a plan's many review rounds — say "xhigh" to raise it for a run). The Gemini leg runs beside them at every gate, on either driver, at `high`: **Gemini 4 Neon** (default), **Gemini 4 Carbon** (opt-in) or off, asked at Phase 0 and recorded as `gemini_model`. It bills per token (about $3-4 per repository-reading call, an estimate), runs commands in the worktree with everything you can do, and never holds a gate: when it is unavailable, its one record line stands in its place. A line `Gemini leg: off` in the repository's `AGENTS.md` or `CLAUDE.md` turns it off.
 - **Plain-language standard**: the ELI5, phase steps, gate criteria and harden's stakeholder report are written 80% of the way to ASD-STE100 (Simplified Technical English): procedural sentences of 20 words or fewer, active voice, approved words in their approved sense, one name per thing, terms defined on first use. Naming the spec sets the tone; the listed rules are the checkable floor; a rule bends only when obeying it would lose meaning. Architecture, rationale and code comments are exempt.
 - **Diagrams earn their place**: one to three inline SVGs in the ELI5 where a real mechanism exists (flow, phase order, before/after), labeled with the prose's own names. None when there is nothing to draw.
 - **Faster where it is safe**:
@@ -74,8 +74,8 @@ Key mechanics, independent of tier:
 | | `light` | `mid` (default) | `deep` | `mega-deep` |
 |---|---|---|---|---|
 | **For** | bounded feature | contained feature | architectural / cross-cutting | novel surface nobody has mapped |
-| **Drafting** | single plan | plan + one competing outline | **three parallel plans** (main, Codex, Fable), then consolidate | deep + **research subagents map the modules first** (persisted artifacts) |
-| **Audit** | one Codex pass | Codex + Fable dual audit, then a **fresh-context** Codex pass that sees the decision ledger and rejected alternatives | dual audit + **contradiction-check** of the decision ledger | deep + Round 2: one resumed self-critique, one fresh hostile audit |
+| **Drafting** | single plan | plan + one competing outline | **four parallel plans** (main, Codex, Fable, Gemini), then consolidate | deep + **research subagents map the modules first** (persisted artifacts) |
+| **Audit** | one Codex pass and one Gemini pass | Codex + Fable + Gemini triple audit, then **fresh-context** Codex and Gemini passes that see the decision ledger and rejected alternatives | triple audit + **contradiction-check** of the decision ledger | deep + Round 2: resumed Codex and Gemini self-critiques, one fresh hostile audit |
 | **Floor** | ≥5 verified Facts, no silent Asks | decision ledger required | consolidation cannot be main-agent-only | research outputs are mandatory artifacts |
 
 The tier recommendation uses a rubric: if **two or more** of *novelty, blast radius, irreversibility, migration cost, external coupling, security sensitivity* are high → `deep`. The user always has the final word.
@@ -101,6 +101,7 @@ implementations-plan/
 │   ├── lessons/phase-N.md# COMMITTED — per-phase debugging logs
 │   ├── audit-codex.md    # local only — codex audit transcript
 │   ├── audit-fable.md    # local only — fable audit transcript (mid+)
+│   ├── audit-gemini.md   # local only — gemini audit transcript
 │   ├── plan-<family>.md  # local only — competing drafts (deep+)
 │   └── eli5.html         # local only — ELI5 FALLBACK (primary is a shareable Artifact)
 └── archive/<closed-plan>/ # committed, but out of the search path

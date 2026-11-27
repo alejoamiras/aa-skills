@@ -56,7 +56,7 @@ sc_prompt() { # <entry> <lane> <key>: prompts/<key>.md from templates/harden-spa
   # the template by its absolute path: render tries a bare name in the working directory first
   if "$0" render "$SCRIPTS/../templates/harden-spawn.md" LANE="$2" KEY="$3" WORKTREE="$WT_ROOT/$2" BRANCH="$(cfg '.worktrees.branch_prefix // "worktree-"')$2" \
     TRUNK="$TRUNK" ORCHY_HOME="$H" FOCUS="$f" EFFORT="$(jq -r .effort <<<"$1")" CLAUDE_MODEL="$(cfg '.leads.model // "opus"')" \
-    CODEX_MODEL="$(cfg '.leads.codex_model // "gpt-6.2-sol"')" SKIP_FILED="$sk" BUCKETS="${b// /=<n> }=<n>" DATE="$(date -u +%F)" NEVER_OPEN="$no" \
+    CODEX_MODEL="$(cfg '.leads.codex_model // "gpt-6.2-sol"')" GEMINI_MODEL="$(cfg '.leads.gemini_model // "off"')" SKIP_FILED="$sk" BUCKETS="${b// /=<n> }=<n>" DATE="$(date -u +%F)" NEVER_OPEN="$no" \
     > "$t" 3>&- 4>&- && mv -fT "$t" "$H/prompts/$3.md"; then return 0; fi
   rm -f "$t"; echo "refused: templates/harden-spawn.md did not render into prompts/$3.md" >&2; return 1
 }

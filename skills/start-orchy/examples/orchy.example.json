@@ -45,6 +45,7 @@
     "codex_model": "gpt-6.2-sol",
     "codex_model_short": "sol",
     "codex_effort": "high",
+    "gemini_model": "neon",
     "tier_default": "mid",
     "permission_mode": "auto",
     "stall_after_min": 20

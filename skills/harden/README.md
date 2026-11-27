@@ -21,8 +21,10 @@ flowchart TD
     S1 --> CL["Main agent clusters the repo — by entrypoint/sink (security), state owner (bugs), or boundary/similarity (quality)"]
     CL --> A["Claude agent per cluster, spread over accounts with headroom"]
     CL --> B["Codex agent per cluster"]
+    CL --> G["Gemini agent per cluster, when it is on"]
     A --> R["Phase 2.5 — cross-rebuttal (high effort and above)"]
     B --> R
+    G --> R
     R --> S3["Phase 3 — coordinator reduce: dedupe by root cause, resolve cross-model disagreements, assign severity"]
     S3 --> S4["Phase 4 — verifier pass, by severity bucket"]
     S4 --> S5["Phase 5 — report.md + findings.json + stakeholder report (Claude Artifact on Claude Code, report.html elsewhere)"]
@@ -33,7 +35,7 @@ The design decisions that matter:
 
 - **Its own worktree.** Once scope is confirmed the run moves into a task-named git worktree (`harden-<focus>`), cut from origin's default branch unless told otherwise, and records the commit it audited. Nothing lands in the checkout everyone else shares, and a branch switch there cannot change the code mid-audit. The report is committed on the worktree branch and never pushed without a say-so: landing, keeping or discarding it is the user's call.
 - **Map before audit.** A structured repo map (entrypoints, trust boundaries, dependency edges, generated-code exclusions) is built first; agents audit *clusters* derived from it, never random files. Monorepos get two-level hierarchical mapping so one bad map can't poison every downstream phase.
-- **Cross-model always.** Every cluster gets a Claude agent *and* a Codex agent, at every effort level. Two same-family agents agreeing means nothing; cross-family convergence is the strongest confidence signal available, and disagreement is itself recorded as a signal.
+- **Cross-model always.** Every cluster gets a Claude agent *and* a Codex agent, at every effort level, and a Gemini agent unless Gemini is off: the `gemini` skill's review leg, on Neon or Carbon as picked at Phase 0, running every pass Codex runs. Gemini is paid per token and reaches every file of the repository, not only the audit's scope; the Phase 0 question says so and offers `off`. Two same-family agents agreeing means nothing; cross-family convergence is the strongest confidence signal available, and a `high` confidence needs two families to have checked the trace in the source. Disagreement is itself recorded as a signal.
 - **Evidence or it doesn't exist.** Security findings need a concrete source→sink trace; bugs need a minimal counter-example; quality needs a named smell (Fowler catalog or a mapped analog). "Could be vulnerable" is a non-finding by construction. Negative lists (what NOT to flag) cut more false positives than any prompting trick.
 - **Bounded context.** In-cluster traces cap at ~4 functions of inter-procedural depth (beyond that, hallucination rates spike), with an escalation rule for handoff edges (event→listener, DI inject→consumer, hook→handler) so event-driven flows don't vanish at cluster boundaries.
 - **Headroom first, load spread.** On Claude Code a run starts only when its account clears the floors on the window its plan has (no 5-hour window: its week), and Phase 2's Claude cluster agents go round-robin to the roster accounts that clear them too, this session's account last. Both read claude-usage's cached snapshot, never a probe.
@@ -50,13 +52,13 @@ The design decisions that matter:
 
 Effort scales **agent intelligence and depth, never phase composition** — all phases run at every level.
 
-| Effort | Map | Per-cluster agents | Cross-rebuttal | Coordinator | Verification |
-|---|---|---|---|---|---|
-| `low` | Haiku | Claude Haiku + Codex (minimal) | — | Sonnet | top 3 |
-| `medium` | Sonnet | Claude Sonnet + Codex (medium) | — | Sonnet | top 5 |
-| `high` ← default | Sonnet | Claude Sonnet + Codex (xhigh) | light | Fable | top 10 |
-| `max` | Fable | Claude Fable + Codex (xhigh) | full | Codex xhigh | all Medium+ |
-| `ultra` | Fable | 2× Claude Fable + 2× Codex, independent passes | full + Round 2 push-back | Codex xhigh | everything |
+| Effort | Map | Per-cluster agents | Gemini, when on | Cross-rebuttal | Coordinator | Verification |
+|---|---|---|---|---|---|---|
+| `low` | Haiku | Claude Haiku + Codex (minimal) | +1 pass | — | Sonnet | top 3 |
+| `medium` | Sonnet | Claude Sonnet + Codex (medium) | +1 pass | — | Sonnet | top 5 |
+| `high` ← default | Sonnet | Claude Sonnet + Codex (xhigh) | +1 pass | light | Fable | top 10 |
+| `max` | Fable | Claude Fable + Codex (xhigh) | +1 pass | full | Codex xhigh | all Medium+ |
+| `ultra` | Fable | 2× Claude Fable + 2× Codex, independent passes | +2 independent passes | full + Round 2 push-back | Codex xhigh | everything |
 
 The coordinator deliberately switches family at `max`+: the map phase becomes Claude-heavy there, so a Codex judge at the reduce stage catches what Anthropic-family models share as blind spots.
 
