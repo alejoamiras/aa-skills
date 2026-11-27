@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Smoke test for skills/gemini/scripts/worker-gemini.sh: real tmux on private sockets, real Bun, a temp HOME and a stand-in
 # agy compiled from tests/fixtures/agy-stub.ts. Only what a worker needs is staged in a temp tree (the launcher, the CLI,
-# the shims and lib/director.sh), with an engines/agy.ts that is a harness running the real pump core with that home,
-# short limits and real signals. No consult entry point, real agy, key or network.
+# the shims, lib/director.sh and lib/agy-repo.sh), with an engines/agy.ts that is a harness running the real pump core
+# with that home, short limits and real signals. No consult entry point, real agy, key or network.
 # shellcheck disable=SC2016 # literal $… in sh -c bodies
 set -uo pipefail
 export LC_ALL=C
@@ -51,7 +51,7 @@ REPO="$S/repo" WT1="$S/repo/.claude/worktrees/w1" WT2="$S/repo/.claude/worktrees
   echo "GEMINI_API_KEY=$CANARY" > "$HOME/.config/gemini/.env" && mkfifo "$GWS_FIFO" &&
   mkdir -p "$S/tree/skills/gemini/engines" "$S/tree/skills/gemini/scripts" "$S/tree/lib" &&
   cp "$ROOT/skills/gemini/engines/agy" "$S/tree/skills/gemini/engines/agy" && cp -R "$ROOT/skills/gemini/shims" "$S/tree/skills/gemini/shims" &&
-  cp "$ROOT/skills/gemini/scripts/worker-gemini.sh" "$S/tree/skills/gemini/scripts/worker-gemini.sh" && cp "$ROOT/lib/director.sh" "$S/tree/lib/director.sh"; } ||
+  cp "$ROOT/skills/gemini/scripts/worker-gemini.sh" "$S/tree/skills/gemini/scripts/worker-gemini.sh" && cp "$ROOT/lib/director.sh" "$ROOT/lib/agy-repo.sh" "$S/tree/lib/"; } ||
   { echo "FAIL  fixture setup: the stub, the home and the tree"; exit 1; }
 cat > "$S/tree/skills/gemini/engines/agy.ts" << EOF || { echo "FAIL  fixture setup: the harness"; exit 1; }
 // The real pump core with the smoke's home, short limits and real signals. The stub records itself first thing, so a
@@ -279,7 +279,7 @@ echo '{"mode":"exit","child":true}' > "$HOME/stub.json"
 python3 -c "$DIRECTOR" "$FLAG" "$S/d5" "$CLI" start "$WT3" --name ex & DIRS+=("$!")
 read -r -t 60 rc <> "$GWS_FIFO"
 R5=$(ls -t "$HOME"/stub/*.json | head -n 1)
-gws_t "start: a stub that exits at once gives exit 4 with its last log lines, and no session" sh -c '[ "$0" = 4 ] && grep -q "agy exited before it could be checked" "$1" && ! tmux -L "$2" has-session -t =gemini-ex' "$rc" "$S/d5.err" "$SOCK"
+gws_t "start: a stub that exits at once gives exit 4 with its last log lines, and no session" sh -c '[ "$0" = 4 ] && grep -q "agy could not be checked: it exited, or had not started after 2 seconds" "$1" && ! tmux -L "$2" has-session -t =gemini-ex' "$rc" "$S/d5.err" "$SOCK"
 gws_t "start: ...and nothing it started is left" sh -c "$EMPTY" "$R5"
 echo '{"child":true}' > "$HOME/stub.json"
 { cp "$S/agy-stub" "$HOME/bin/agy.new" && printf x >> "$HOME/bin/agy.new" && mv "$HOME/bin/agy.new" "$HOME/bin/agy"; } || echo "FAIL  fixture: change the stub"

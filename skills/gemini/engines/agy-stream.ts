@@ -1,16 +1,18 @@
-// agy's stream-json protocol as the worker pump reads it, and the pump's log-line shapes: pure functions over events,
-// strings and byte streams. Every read of an agy event lives here; nothing here touches the key, files or processes.
+// agy's stream-json protocol as the worker pump and the one-shot run read it, and the pump's log-line shapes: pure
+// functions over events, strings and byte streams. Every read of an agy event lives here; nothing here touches the key,
+// files or processes.
 import type { Readable } from "node:stream";
 
 export type Json = Record<string, unknown>;
 export const isObj = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
-const safe = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+export const safe = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const RAW_MAX = 1024 * 1024;
 const ENTRY_MAX = 64 * 1024;
 
 // Shapes recorded from agy 1.5.15.
 export const userEvent = (text: string) => `${JSON.stringify({ event: "user", message: { content: text } })}\n`;
-const payload = (ev: unknown, name: string) => (isObj(ev) && ev.event === name && isObj(ev[name]) ? (ev[name] as Json) : undefined);
+export const payload = (ev: unknown, name: string) => (isObj(ev) && ev.event === name && isObj(ev[name]) ? (ev[name] as Json) : undefined);
 export const isStep = (ev: unknown) => payload(ev, "step_update") !== undefined;
 export const conversationOf = (ev: unknown) => (isObj(ev) && ev.event === "init" && typeof ev.conversation_id === "string" ? ev.conversation_id : undefined);
 
@@ -49,6 +51,53 @@ export function toolDone(ev: unknown): { index: number; error: boolean } | undef
   return { index: s.step_index, error: isObj(s.tool_info) && s.tool_info.error != null };
 }
 
+// The one-shot run's reads. A call's tokens are its finished model steps' sum: a result's usage is cumulative over
+// the conversation, so a resumed or wrap-up turn's result counts earlier turns again.
+export type Usage = { input: number; output: number; cached: number; counted: number };
+// All four counts whole, or no usage: the limit is never checked on part of a step.
+export function usageOf(v: unknown): Usage | undefined {
+  if (!isObj(v)) return undefined;
+  const { input_tokens: input, output_tokens: output, cache_read_tokens: cached, total_tokens: total } = v;
+  if (!safe(input) || !safe(output) || !safe(cached) || !safe(total) || !safe(total + cached)) return undefined;
+  return { input, output, cached, counted: total + cached };
+}
+const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+export function initOf(ev: unknown): { model?: string; mode?: string; conversation?: string } | undefined {
+  const i = payload(ev, "init");
+  return i && { model: str(i.model), mode: str(i.permission_mode), conversation: conversationOf(ev) };
+}
+// A subagent step carries tool_name and no tool_info.
+export function namesTool(ev: unknown, name: string): boolean {
+  const s = payload(ev, "step_update");
+  return s !== undefined && (s.tool_name === name || (isObj(s.tool_info) && s.tool_info.name === name));
+}
+export function modelDone(ev: unknown): { index?: number; usage?: Usage } | undefined {
+  const s = payload(ev, "step_update");
+  if (!s || s.step_type !== "agent_response" || s.state !== "DONE") return undefined;
+  return { index: safe(s.step_index) ? s.step_index : undefined, usage: usageOf(s.usage) };
+}
+// conversation is conversation_id when it is a string: a failed result may name null, having made none.
+export type Outcome = { status: string; response: string; error: string; usage?: Usage; raw: unknown; denied: string[]; conversation?: string };
+// denied_actions is null or absent under the skip flag; any other non-list still counts as a denial.
+export function outcomeOf(ev: unknown): Outcome | undefined {
+  const r = payload(ev, "result");
+  if (!r) return undefined;
+  const d = r.denied_actions;
+  const denied = Array.isArray(d) ? d.map((a) => (isObj(a) && typeof a.action === "string" ? a.action : "?")) : d == null ? [] : ["?"];
+  return {
+    status: str(r.status) ?? "", response: str(r.response) ?? "", error: str(r.error) ?? "", usage: usageOf(r.usage), raw: r.usage ?? null, denied,
+    conversation: str(r.conversation_id),
+  };
+}
+export function toolOutput(ev: unknown): string | undefined {
+  const s = payload(ev, "step_update");
+  return s && isObj(s.tool_info) ? str(s.tool_info.output) : undefined;
+}
+export function withOutput(ev: Json, output: string, bytes: number): Json {
+  const s = ev.step_update as Json;
+  return { ...ev, step_update: { ...s, tool_info: { ...(s.tool_info as Json), output, output_bytes: bytes } } };
+}
+
 export function paneParts(ev: unknown): string[] {
   if (!isObj(ev) || typeof ev.event !== "string") return ["raw", (typeof ev === "string" ? ev : JSON.stringify(ev)).slice(0, 300)];
   const p = isObj(ev[ev.event]) ? (ev[ev.event] as Json) : {};
@@ -82,17 +131,22 @@ export const tail = (s: string, max: number) => {
   return b.length <= max ? s : b.subarray(b.length - max).toString("utf8");
 };
 
-// Splits a byte stream into lines; a line past RAW_MAX keeps only its start and is reported as over, with its full size.
-export function lines(stream: Readable, each: (line: Buffer, over: boolean, size: number) => void, end?: () => void) {
+// Splits a byte stream into lines; a line past max keeps only its start and is reported as over, with its full size.
+// crossed hears of such a line the moment it passes max, before its newline or the stream's end.
+export function lines(
+  stream: Readable, each: (line: Buffer, over: boolean, size: number) => void, end?: () => void,
+  { max = RAW_MAX, crossed }: { max?: number; crossed?: (size: number) => void } = {},
+) {
   let parts: Buffer[] = [];
   let size = 0;
   const take = (b: Buffer) => {
-    const kept = b.subarray(0, Math.max(0, RAW_MAX + 1 - size));
+    const kept = b.subarray(0, Math.max(0, max + 1 - size));
     if (kept.length) parts.push(kept);
+    if (size <= max && size + b.length > max) crossed?.(size + b.length);
     size += b.length;
   };
   const flush = () => {
-    each(Buffer.concat(parts), size > RAW_MAX, size);
+    each(Buffer.concat(parts), size > max, size);
     parts = [];
     size = 0;
   };

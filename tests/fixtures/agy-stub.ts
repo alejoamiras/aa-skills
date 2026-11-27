@@ -1,9 +1,10 @@
 // A stand-in for agy, compiled per test run with `bun build --compile`: the pump's inode self-check needs a native
-// executable, and a script's exe is its interpreter. It speaks agy 1.5.15's stream-json shapes. $HOME/stub.json picks its
-// behaviour; it records its argv, environment names, session and every message under $HOME/stub/, never the key's value.
+// executable, and a script's exe is its interpreter. It speaks agy 1.5.15's stream-json shapes. stub.json in the home its
+// pinned binary sits in (<home>/bin/agy) picks its behaviour; it records its argv, environment names, session and every
+// message under $HOME/stub/, never the key's value.
 import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, readlinkSync, writeFileSync, writeSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // Lines recorded from real runs (cwd and the tool list cut down), plus agy's documented error result. The last two are a
 // response that only calls a tool, so it has no text, and the step agy adds when a command it started finishes.
@@ -36,7 +37,24 @@ const result = (turns: number, response: string, usage: unknown) => ({
 });
 
 type Turn = { answer?: string; tools?: number; toolErrors?: number; stderr?: number; write?: string[]; editConfig?: string; usage?: unknown };
-type Config = { mode?: string; child?: boolean | "cleared"; split?: boolean; delay?: number; tick?: number; turns?: Turn[] };
+// One line of a one-shot script. answer: a finished model step, with usage [input, output, cached] (default
+// [1000, 10, 500]; null for none); delta: a text delta of the next model step; tool: a tool step, which first appends a
+// line to write in the cwd; result: the result, its usage by default this run's steps' sum, naming conversation (none
+// when false) instead of the init's; raw: a line as written;
+// err: a line on stderr; bytes: that many bytes, with no newline when newline is false; tick: a delta (a blank line
+// when blank) every tick ms, for that long or forever; hold: stdout stays open and nothing more is written.
+type Item = {
+  answer?: string; usage?: [number, number, number] | null; delta?: string; tool?: string; output?: string; state?: "ACTIVE" | "DONE"; write?: string;
+  result?: string; response?: string; error?: string; denied?: string[]; conversation?: string | null | false; raw?: string; err?: string; bytes?: number;
+  newline?: boolean; sleep?: number; tick?: number; for?: number; blank?: boolean; hold?: boolean;
+};
+// script is the one-shot stream after the user_input step, resume replaces it when argv carries --conversation; init
+// false sends no init event; resumeAs is the conversation id the init names when argv carries --conversation; onTerm is
+// a line written on stderr when TERM arrives, before exiting.
+type Config = {
+  mode?: string; child?: boolean | "cleared"; split?: boolean; delay?: number; tick?: number; turns?: Turn[]; script?: Item[]; resume?: Item[];
+  init?: false | { model?: string; mode?: string }; resumeAs?: string; onTerm?: string;
+};
 
 function writeAll(fd: number, text: string) {
   const buf = Buffer.from(text);
@@ -62,10 +80,70 @@ function descriptors(): { fd: number; target: string }[] {
   });
 }
 
+const usage3 = ([input, output, cached]: [number, number, number]) => ({
+  input_tokens: input, output_tokens: output, thinking_tokens: 0, cache_read_tokens: cached, total_tokens: input + output,
+});
+const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+
+// init, one user event recorded, then the script; it exits when the script ends.
+async function oneShot(script: Item[], cfg: Config, put: (v: unknown) => void, at: (ext: string) => string) {
+  const args = process.argv.slice(2);
+  const i = cfg.init;
+  const conversation = (args.includes("--conversation") && cfg.resumeAs) || CONVERSATION;
+  if (i !== false) {
+    const init = { model: i?.model ?? args[args.indexOf("--model") + 1], cwd: process.cwd(), tools: ["run_command"], permission_mode: i?.mode ?? "always-proceed" };
+    put({ event: "init", conversation_id: conversation, init });
+  }
+  const line = await new Promise<string>((done) => {
+    let buf = "";
+    process.stdin.on("data", (chunk: Buffer) => {
+      buf += chunk.toString("utf8");
+      if (buf.includes("\n")) done(buf.slice(0, buf.indexOf("\n")));
+    });
+  });
+  appendFileSync(at(".in.ndjson"), `${line}\n`);
+  let s = 0;
+  const sum: [number, number, number] = [0, 0, 0];
+  put(step(s++, { state: "DONE", step_type: "user_input" }));
+  for (const it of script) {
+    if (it.answer !== undefined) {
+      const u = it.usage === undefined ? ([1000, 10, 500] as [number, number, number]) : it.usage;
+      for (let k = 0; u && k < 3; k++) sum[k] += u[k];
+      put(step(s++, { state: "DONE", step_type: "agent_response", text_delta: it.answer, ...(u ? { usage: usage3(u) } : {}) }));
+    } else if (it.delta !== undefined) put(step(s, { state: "ACTIVE", step_type: "agent_response", text_delta: it.delta }));
+    else if (it.tool !== undefined) {
+      if (it.write) appendFileSync(join(process.cwd(), it.write), "stub edit\n");
+      const info = { name: it.tool, parameters: {}, ...(it.output === undefined ? {} : { output: it.output }) };
+      put(step(s++, { state: it.state ?? "DONE", step_type: "tool", tool_name: it.tool, tool_info: info }));
+    } else if (it.result !== undefined) {
+      const u = it.usage === undefined ? sum : it.usage;
+      const denied = it.denied ? { denied_actions: it.denied.map((action) => ({ action })) } : {};
+      const id = it.conversation === false ? {} : { conversation_id: it.conversation === undefined ? conversation : it.conversation };
+      const body = { ...id, status: it.result, response: it.response ?? "", ...(it.error ? { error: it.error } : {}), num_turns: 1, ...denied };
+      put({ event: "result", result: { ...body, ...(u ? { usage: usage3(u) } : {}) } });
+    } else if (it.raw !== undefined) writeAll(1, `${it.raw}\n`);
+    else if (it.err !== undefined) writeAll(2, `${it.err}\n`);
+    else if (it.bytes !== undefined) {
+      for (let left = it.bytes; left > 0; left -= 1 << 20) writeAll(1, "x".repeat(Math.min(left, 1 << 20)));
+      if (it.newline !== false) writeAll(1, "\n");
+    } else if (it.sleep !== undefined) await sleep(it.sleep);
+    else if (it.tick !== undefined) {
+      for (const end = Date.now() + (it.for ?? Infinity); Date.now() < end; await sleep(it.tick)) {
+        if (it.blank) writeAll(1, "\n");
+        else put(step(s, { state: "ACTIVE", step_type: "agent_response", text_delta: "." }));
+      }
+    } else if (it.hold) await new Promise(() => setInterval(() => {}, 1 << 30));
+  }
+  process.exit(0);
+}
+
 function stub() {
   const fds = descriptors();
+  const argv0 = readFileSync("/proc/self/cmdline", "utf8").split("\0")[0];
+  // A one-shot run gives agy a private HOME; config and key stay in the home whose bin/ holds the pinned binary.
+  const owner = dirname(dirname(argv0));
   const home = process.env.HOME ?? "";
-  const cfg: Config = JSON.parse(readFileSync(join(home, "stub.json"), "utf8"));
+  const cfg: Config = JSON.parse(readFileSync(join(owner, "stub.json"), "utf8"));
   const mode = cfg.mode ?? "answer";
   const dir = join(home, "stub");
   mkdirSync(dir, { recursive: true });
@@ -80,15 +158,24 @@ function stub() {
   const script = cfg.child === "cleared" ? `/usr/bin/env -i /bin/sh -c "${loop}" & wait` : loop;
   const child = cfg.child || mode === "child" ? spawn("/bin/sh", ["-c", script], { detached: true, stdio: "ignore" }) : undefined;
   child?.unref();
-  const keyFile = readFileSync(join(home, ".config", "gemini", ".env"), "utf8").trim().replace(/^GEMINI_API_KEY=/, "");
+  const keyFile = readFileSync(join(owner, ".config", "gemini", ".env"), "utf8").trim().replace(/^GEMINI_API_KEY=/, "");
   writeFileSync(at(".json"), JSON.stringify({
     pid: process.pid, sid: Number(f[3]), tty: Number(f[4]), start: f[19], child: child?.pid, args: process.argv.slice(2), cwd: process.cwd(), fds,
-    argv0: readFileSync("/proc/self/cmdline", "utf8").split("\0")[0], envNames: Object.keys(process.env).sort(), keyMatches: key !== "" && key === keyFile,
+    argv0, envNames: Object.keys(process.env).sort(), keyMatches: key !== "" && key === keyFile,
     env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "GEMINI_API_KEY")),
   }));
   const args = process.argv.slice(2);
   if (mode === "exit") process.exit(3);
   if (args[0] === "models") process.exit(0);
+  if (cfg.onTerm) {
+    const line = cfg.onTerm;
+    process.on("SIGTERM", () => {
+      writeAll(2, `${line}\n`);
+      process.exit(143);
+    });
+  }
+  const shot = args.includes("--conversation") && cfg.resume ? cfg.resume : cfg.script;
+  if (shot) return void oneShot(shot, cfg, put, at);
   put({ event: "init", conversation_id: CONVERSATION, init: { model: args[args.indexOf("--model") + 1], cwd: process.cwd(), tools: ["run_command"], permission_mode: "always-proceed" } });
   let s = 0;
   let n = 0;
