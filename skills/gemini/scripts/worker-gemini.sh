@@ -259,8 +259,9 @@ gw_check_worktree() {
   GW_WT="${p}"
 }
 
+# A dir another call made first is success; the check below still refuses a link or another user's dir.
 gw_root() {
-  mkdir -p -- "${STATE_ROOT%/*}" && { [[ -d ${STATE_ROOT} ]] || mkdir -m 700 -- "${STATE_ROOT}"; } ||
+  mkdir -p -- "${STATE_ROOT%/*}" && { mkdir -m 700 -- "${STATE_ROOT}" 2> /dev/null || [[ -d ${STATE_ROOT} ]]; } ||
     gw_die 2 "cannot create ${STATE_ROOT}"
   [[ -d ${STATE_ROOT} && ! -L ${STATE_ROOT} && -O ${STATE_ROOT} ]] || gw_die 2 "${STATE_ROOT} must be a real dir of this user"
 }
@@ -495,7 +496,7 @@ gw_tui() {
   gw_check_engine
   gw_wenv
   gw_root
-  [[ -d ${state} ]] || mkdir -m 700 -- "${state}" || gw_die 2 "cannot create ${state}"
+  mkdir -m 700 -- "${state}" 2> /dev/null || [[ -d ${state} ]] || gw_die 2 "cannot create ${state}"
   exec "${ENV_BIN}" -i "${GW_ENV[@]}" "${ENGINE}" tui "${state}" "$@"
 }
 

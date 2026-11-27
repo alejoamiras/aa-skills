@@ -15,10 +15,11 @@ umask 077
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 S="$(mktemp -d)" && S="$(cd "$S" && pwd -P)" || { echo "FAIL  fixture setup: a temp dir"; exit 1; }
 SOCK="gws-$$" SOCK2="gws2-$$" FLAG=--dangerously-skip-permissions
-CLI="$S/tree/skills/gemini/scripts/worker-gemini.sh" SR="$S/home/.cache/gemini-worker" DIRS=() FAIL=0
+CLI="$S/tree/skills/gemini/scripts/worker-gemini.sh" SR="$S/home/.cache/gemini-worker" DIRS=() RACE=() FAIL=0
 gws_t() { local label="$1"; shift; if "$@" > /dev/null 2>&1; then echo "ok    $label"; else echo "FAIL  $label"; FAIL=1; fi; }
 gws_tn() { local label="$1"; shift; if "$@" > /dev/null 2>&1; then echo "FAIL  $label (expected failure)"; FAIL=1; else echo "ok    $label"; fi; }
-# Workers first, by the CLI's own stop, then the directors and the two tmux servers this run made.
+# Workers first, by the CLI's own stop, then the two racing tui calls (each timeout passes TERM on, then KILLs), the
+# directors and the two tmux servers this run made.
 gws_cleanup() {
   local d
   local -a stops=()
@@ -28,6 +29,7 @@ gws_cleanup() {
     [[ ${d##*/} == *.* ]] || { "$CLI" stop "${d##*/}" --force > /dev/null 2>&1 & stops+=("$!"); }
   done
   ((${#stops[@]})) && wait "${stops[@]}"
+  ((${#RACE[@]})) && { kill "${RACE[@]}" 2> /dev/null; wait "${RACE[@]}" 2> /dev/null; }
   ((${#DIRS[@]})) && kill "${DIRS[@]}" 2> /dev/null
   tmux -L "$SOCK" kill-server 2> /dev/null
   tmux -L "$SOCK2" kill-server 2> /dev/null
@@ -165,6 +167,33 @@ read -r -t 60 rc <> "$GWS_FIFO"
 kill "${DIRS[-1]}"
 chmod u+x "$S/tree/skills/gemini/engines/agy"
 gws_t "refuse: an engine that is not executable: exit 2, one stderr line, no session, no state dir" sh -c "$NONE" "$rc" "$S/r.err" "$SOCK" "$SR"
+
+# --- two first calls at once ------------------------------------------------------------------------------------------
+# A mkdir that holds each create of the state root or .tui until the other call asks for the same dir, so both calls find
+# it missing before either makes it; a call left alone for 30 s marks the race missed and fails.
+NOAGENT=(env -u CLAUDECODE -u CLAUDE_PID -u GEMINI_WORKER -u CREW_WORKER)
+{ mkdir -p "$S/race-bin" "$S/race" && echo '{}' > "$HOME/stub.json"; } || { echo "FAIL  fixture setup: the racing mkdir"; exit 1; }
+cat > "$S/race-bin/mkdir" << EOF && chmod +x "$S/race-bin/mkdir" || { echo "FAIL  fixture setup: the racing mkdir"; exit 1; }
+#!/bin/sh
+for d; do :; done
+case "\$d" in
+  "$SR" | "$SR/.tui")
+    : > "$S/race/\${d##*/}.\$\$"
+    i=0
+    while [ "\$(ls -d -- "$S/race/\${d##*/}".* | wc -l)" -lt 2 ]; do
+      [ "\$i" -lt 300 ] || { : > "$S/race/missed"; exit 1; }
+      sleep 0.1
+      i=\$((i + 1))
+    done ;;
+esac
+exec "$(command -v mkdir)" "\$@"
+EOF
+for i in 1 2; do "${NOAGENT[@]}" timeout -k 5 60 script -qec "PATH=$S/race-bin:\$PATH $CLI tui models" /dev/null < /dev/null > "$S/race.$i" 2>&1 & RACE+=("$!"); done
+wait "${RACE[0]}"; rc=$?
+wait "${RACE[1]}"; rc2=$?
+RACE=()
+gws_t "tui: two first calls at once meet at each mkdir, both make or reuse the state root and .tui, and both exit 0" \
+  sh -c '[ "$0$1" = 00 ] && [ ! -e "$3/missed" ] && [ "$(stat -c %a "$2" "$2/.tui")" = "$(printf "700\n700")" ]' "$rc" "$rc2" "$SR" "$S/race"
 
 # --- a worker: trailer, environment, pane, turns ----------------------------------------------------------------------
 echo '{"mode":"slow","delay":600,"child":true}' > "$HOME/stub.json"
@@ -327,7 +356,6 @@ gws_t "pump killed: a dead agy's session number, now an unrelated session, is le
 kill "$DS"
 
 # --- tui ----------------------------------------------------------------------------------------------------------------
-NOAGENT=(env -u CLAUDECODE -u CLAUDE_PID -u GEMINI_WORKER -u CREW_WORKER)
 "${NOAGENT[@]}" "$CLI" tui < /dev/null > /dev/null 2> "$S/e"; rc=$?
 gws_t "tui: exit 2 without a terminal" sh -c '[ "$0" = 2 ] && grep -q "own terminal" "$1"' "$rc" "$S/e"
 "${NOAGENT[@]}" script -qec "$CLI tui $FLAG" /dev/null < /dev/null > "$S/t1" 2>&1; rc=$?
