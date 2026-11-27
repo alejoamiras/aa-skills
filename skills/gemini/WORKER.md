@@ -85,6 +85,8 @@ Write each message to a fresh file (`mktemp`), then:
 
 Messages run one at a time, in send order. A message sent mid-turn waits for the turn to end; there is no mid-turn steering or cancel.
 
+`start` launches `agy` with slash commands off, so every message is plain text, the owner's typed lines included: a quoted `/goal` stays a quote. Slash commands work only in the owner's `tui`.
+
 ## Wait
 
 Run `wait` as a **background** Bash task (`run_in_background: true`). Its exit wakes this session. Never poll or sleep-loop.
