@@ -412,7 +412,10 @@ class Worker {
     if (this.ended) return;
     const c = checkAll(this.d, this.log);
     this.key = c.key;
-    const flags = ["--input-format", "stream-json", "--output-format", "stream-json", "--dangerously-skip-permissions", "--model", this.a.model, "--effort", this.a.effort];
+    // agy runs a slash command a message quotes, and a quoted /goal re-prompts the model until an answer ends in <!-- GOAL_COMPLETE -->.
+    const flags = [
+      "--input-format", "stream-json", "--output-format", "stream-json", "--dangerously-skip-permissions", "--disable-slash-commands", "--model", this.a.model, "--effort", this.a.effort,
+    ];
     let child: ChildProcess;
     try {
       child = await this.d.spawn(`/proc/self/fd/${c.bin.fd}`, flags, {

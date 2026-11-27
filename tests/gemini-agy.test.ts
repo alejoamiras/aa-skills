@@ -15,7 +15,7 @@ import { RECORDED, toolStep } from "./fixtures/agy-stub.ts";
 const CANARY = "AIzaQz1Rx2Sw3Tv4Uu5Vt6Ws7Xr8Yq9Zp0Ao1Bn2Cm3";
 const SUBAGENT = "You are a subagent. Don't run memo.";
 const SHIMS = join(import.meta.dir, "..", "skills", "gemini", "shims");
-const FLAGS = ["--input-format", "stream-json", "--output-format", "stream-json", "--dangerously-skip-permissions", "--model", "gemini-4-carbon", "--effort", "low"];
+const FLAGS = ["--input-format", "stream-json", "--output-format", "stream-json", "--dangerously-skip-permissions", "--disable-slash-commands", "--model", "gemini-4-carbon", "--effort", "low"];
 const ENV_NAMES = ["AGY_CLI_DISABLE_AUTO_UPDATE", "CREW_WORKER", "GEMINI_API_KEY", "GEMINI_WORKER", "GEMINI_WORKER_ID", "GIT_TERMINAL_PROMPT", "HOME", "LANG", "LOGNAME", "PATH", "SHELL", "TERM", "TMPDIR", "USER"];
 const UID = process.getuid?.() ?? 0;
 const root = mkdtempSync(join(tmpdir(), "gemini-agy-test-"));
