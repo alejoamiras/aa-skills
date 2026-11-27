@@ -41,8 +41,10 @@ export const turnFile = (turn: number, name: string, ext: string) => (turn === 1
 const ZERO: Usage = { input: 0, output: 0, cached: 0, counted: 0 };
 const plus = (a: Usage, b: Usage): Usage => ({ input: a.input + b.input, output: a.output + b.output, cached: a.cached + b.cached, counted: a.counted + b.counted });
 const head = (s: string, max: number) => Buffer.from(s).subarray(0, max).toString("utf8");
+// A prompt quotes the material under review, and agy runs slash commands it finds there: a /goal re-prompts the model
+// until an answer ends in <!-- GOAL_COMPLETE -->.
 const flags = (c: Call, deny: string[], conversation?: string) => [
-  "--dangerously-skip-permissions", "--input-format", "stream-json", "--output-format", "stream-json", "--model", c.model, "--effort", c.effort,
+  "--dangerously-skip-permissions", "--disable-slash-commands", "--input-format", "stream-json", "--output-format", "stream-json", "--model", c.model, "--effort", c.effort,
   "--settings", JSON.stringify({ modelProvider: "gemini", permissions: { deny } }), ...(conversation ? ["--conversation", conversation] : []),
 ];
 

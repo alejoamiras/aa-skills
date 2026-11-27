@@ -26,7 +26,7 @@ const WORKER_ENV = {
   WORKER_PATH: "/usr/bin:/bin", WORKER_USER: "tester", WORKER_LOGNAME: "tester", WORKER_SHELL: "/bin/bash", WORKER_LANG: "C.UTF-8", WORKER_TMPDIR: root,
   SSH_AUTH_SOCK: "/run/agent.sock", WORKER_SSH_AUTH_SOCK: "/run/agent.sock",
 };
-const FLAGS = ["--dangerously-skip-permissions", "--input-format", "stream-json", "--output-format", "stream-json", "--model", "gemini-4-neon", "--effort", "high", "--settings"];
+const FLAGS = ["--dangerously-skip-permissions", "--disable-slash-commands", "--input-format", "stream-json", "--output-format", "stream-json", "--model", "gemini-4-neon", "--effort", "high", "--settings"];
 const OPEN = '{"modelProvider":"gemini","permissions":{"deny":["write_file(*)"]}}';
 const WRAP = '{"modelProvider":"gemini","permissions":{"deny":["command(*)","write_file(*)","read_file(*)"]}}';
 const ENV_NAMES = [
@@ -608,7 +608,7 @@ describe("run", () => {
     const r = await go(x, { cfg: second, turn: 2 });
     expect([r.code, r.response, r.result.in, r.result.out, r.result.cached, r.result.response]).toEqual([0, "second", 2000, 20, 1000, "response.2.md"]);
     expect(r.result.agy_usage).toEqual({ input_tokens: 9000, output_tokens: 90, thinking_tokens: 0, cache_read_tokens: 4000, total_tokens: 9090 });
-    expect(records(x).at(-1)?.args.slice(-2)).toEqual(["--conversation", CONVERSATION]);
+    expect(records(x).at(-1)?.args).toEqual([...FLAGS, OPEN, "--conversation", CONVERSATION]);
     const turn2 = readdirSync(x.dir).filter((f) => f.includes(".2."));
     expect(turn2.sort()).toEqual(["log.2.ndjson", "prompt.2.md", "response.2.md", "result.2.json", "stderr.2.txt"]);
     expect(readFileSync(join(x.dir, "session_id"), "utf8")).toBe(`${CONVERSATION}\n`);
